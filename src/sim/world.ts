@@ -52,7 +52,26 @@ import {
   type AttributedEnemyBullet,
 } from './projectiles'
 import { Spawner } from './spawner'
+import { addItem, resolveInventory, type InventoryResolution } from './inventory'
+import { NO_EFFECTS, summariseEffects, volleyAngles, type EffectTotals } from './itemEffects'
+import { resolveAllStats, shotsPerSecond } from './stats'
+import {
+  ITEM_CHOICE_WAVES,
+  SHOP_WAVES,
+  WORK_ORDER_WAVES,
+  buildOffers,
+  makeChoice,
+  newCursor,
+  shopCosts,
+  updateCursor,
+  type ChoiceCursor,
+} from './progression'
+import type { InteractionDef, ItemDef } from '../content/types'
 import type {
+  ActiveInteraction,
+  HeldItem,
+  PendingChoice,
+  ResolvedStats,
   Bullet,
   CosmeticState,
   EnemyInstance,
@@ -143,6 +162,20 @@ const MAX_EVENTS_PER_TICK = 256
 const SHAKE_DECAY_PER_TICK = 0.86
 const SHAKE_EPSILON = 0.002
 
+/**
+ * Content the run draws items from.
+ *
+ * Injected rather than imported so tests can fabricate items — the same reason
+ * combat.test.ts fabricates enemy defs instead of asserting against the live
+ * content tables. A balance change must not be able to break a sim test.
+ */
+export interface RunContent {
+  items: Readonly<Record<string, ItemDef>>
+  interactions: readonly InteractionDef[]
+}
+
+export const EMPTY_CONTENT: RunContent = { items: {}, interactions: [] }
+
 export class World implements WorldView {
   readonly seed: string
   /** Which sector script this run is flying. One sector in M1. */
@@ -199,10 +232,40 @@ export class World implements WorldView {
   private fireCooldown = 0
   private nextMuzzleIsLeft = true
 
-  constructor(seed: string) {
+  // --- items ---------------------------------------------------------------
+
+  inventory: HeldItem[] = []
+  activeInteractions: readonly ActiveInteraction[] = []
+  resolvedStats: ResolvedStats = resolveAllStats([])
+  pendingChoice: PendingChoice | null = null
+
+  private readonly content: RunContent
+  /**
+   * Numeric effect parameters, recomputed only when the inventory changes.
+   *
+   * Every M3 effect is an aggregation, so this cannot depend on dispatch order —
+   * see the header of itemEffects.ts before adding a stateful one.
+   */
+  private effects: EffectTotals = { ...NO_EFFECTS }
+  private cursor: ChoiceCursor = newCursor()
+  /** Ticks remaining on a scrap-triggered fire-rate window. */
+  private fireRateWindowTicks = 0
+  /** Wave indices already used for a reward, so one wave cannot pay twice. */
+  private readonly rewardedWaves = new Set<number>()
+
+  /**
+   * Its own stream. `loot` was reserved for item drops, but offers and shop stock
+   * are separate decisions, and a stream shared between them would make the shop's
+   * stock depend on how many offers had been rolled.
+   */
+  private readonly rngOffers: Rng
+
+  constructor(seed: string, content: RunContent = EMPTY_CONTENT) {
     this.seed = seed
+    this.content = content
     this.rngSpawn = Rng.fromSeed(seed, 'spawn')
     this.rngLoot = Rng.fromSeed(seed, 'loot')
+    this.rngOffers = Rng.fromSeed(seed, 'offers')
 
     this.sectorId = SECTOR_ONE.id
     this.spawner = new Spawner(SECTOR_ONE, this.enemyDefs, this.rngSpawn)
@@ -268,6 +331,16 @@ export class World implements WorldView {
     if (this.runState !== 'active') return
     if (frozen) return
 
+    // A choice pauses the run. Ticks still advance so a recorded input log stays
+    // aligned with wall-clock ticks, but nothing moves, spawns, or shoots — an item
+    // choice is a decision, not a reflex test.
+    if (this.updateChoice(input)) {
+      this.advanceCosmetic()
+      return
+    }
+
+    if (this.fireRateWindowTicks > 0) this.fireRateWindowTicks--
+
     tickHullInvulnerability(this.hull)
     this.moveHull(input)
     this.updateWeapon(input)
@@ -275,6 +348,7 @@ export class World implements WorldView {
     const wavesBefore = this.spawner.waveIndex
     this.spawner.update(this.stats.tick, this.enemies)
     this.stats.waveIndex = this.spawner.waveIndex
+    this.maybeOpenChoice()
     // One event per wave, even if the script releases two on the same tick.
     for (let i = wavesBefore + 1; i <= this.stats.waveIndex; i++) {
       this.emit({ kind: 'wave-released', index: i })
@@ -294,6 +368,142 @@ export class World implements WorldView {
     if (live > this.stats.peakProjectiles) this.stats.peakProjectiles = live
   }
 
+  // --- items ---------------------------------------------------------------
+
+  /**
+   * Fire interval after items and any active scrap window.
+   *
+   * The window is a flat tick reduction rather than a multiplier so it cannot
+   * interact multiplicatively with a fire-rate item and collapse the interval to
+   * its floor — a build that reaches the floor stops responding to further
+   * upgrades, which reads as the item being broken.
+   */
+  private currentFireInterval(): number {
+    const base = this.resolvedStats.fireIntervalTicks ?? FIRE_INTERVAL_TICKS
+    const bonus = this.fireRateWindowTicks > 0 ? this.effects.fireRateWindowBonus : 0
+    return Math.max(1, Math.round(base - bonus))
+  }
+
+  /** Shots per second the HUD should display. Derived, never hand-written. */
+  get shotsPerSecond(): number {
+    return shotsPerSecond(this.currentFireInterval())
+  }
+
+  /** Recompute everything the inventory determines. Called only when it changes. */
+  private refreshInventory(): void {
+    const resolution: InventoryResolution = resolveInventory(
+      this.inventory,
+      this.content.items,
+      this.content.interactions,
+    )
+    this.resolvedStats = resolution.stats
+    this.activeInteractions = resolution.active
+    this.effects = summariseEffects(resolution.effects)
+
+    // Raising a maximum grants the difference rather than refilling the pool:
+    // +20 max integrity on a hull at 30/100 should leave it at 50/120, not 120/120,
+    // or a defence item would double as a full repair.
+    const maxIntegrity = this.resolvedStats.maxIntegrity ?? this.hull.maxIntegrity
+    if (maxIntegrity !== this.hull.maxIntegrity) {
+      const delta = maxIntegrity - this.hull.maxIntegrity
+      this.hull.maxIntegrity = maxIntegrity
+      this.hull.integrity = clamp(this.hull.integrity + Math.max(0, delta), 1, maxIntegrity)
+    }
+    const maxShield = this.resolvedStats.maxShield ?? this.hull.maxShield
+    if (maxShield !== this.hull.maxShield) {
+      const delta = maxShield - this.hull.maxShield
+      this.hull.maxShield = maxShield
+      this.hull.shield = clamp(this.hull.shield + Math.max(0, delta), 0, maxShield)
+    }
+  }
+
+  /** Take an item. The only way the inventory grows. */
+  private acquire(defId: string): void {
+    this.inventory = addItem(this.inventory, defId, this.stats.tick) as HeldItem[]
+    this.refreshInventory()
+  }
+
+  /**
+   * Open a reward if this wave is a scheduled one.
+   *
+   * Guarded by `rewardedWaves` so a wave cannot pay twice — waves can be released
+   * more than once per tick after a hitstop, and paying per release rather than per
+   * wave would hand out a reward for every frame the spawner caught up on.
+   */
+  private maybeOpenChoice(): void {
+    if (this.pendingChoice !== null) return
+    const wave = this.stats.waveIndex
+    if (wave <= 0 || this.rewardedWaves.has(wave)) return
+
+    const isItem = ITEM_CHOICE_WAVES.includes(wave)
+    const isShop = SHOP_WAVES.includes(wave)
+    const isWorkOrder = WORK_ORDER_WAVES.includes(wave)
+    if (!isItem && !isShop && !isWorkOrder) return
+
+    this.rewardedWaves.add(wave)
+    this.cursor = newCursor()
+
+    if (isWorkOrder) {
+      this.pendingChoice = makeChoice('work-order', [], [], ['supply', 'hazard', 'repair'])
+      return
+    }
+
+    const offers = buildOffers(
+      this.rngOffers,
+      this.content.items,
+      this.content.interactions,
+      this.inventory,
+    )
+    // No content to offer (an empty table in a sim test) must not stall the run.
+    if (offers.length === 0) return
+    this.pendingChoice = makeChoice(
+      isShop ? 'shop' : 'item',
+      offers,
+      isShop ? shopCosts(offers, this.content.items) : offers.map(() => 0),
+    )
+  }
+
+  /**
+   * Resolve an open choice from this tick's input.
+   *
+   * Returns true while a choice is open, which is what pauses the rest of the
+   * tick. Ticks still advance so a recorded input log stays aligned — the run is
+   * paused, not stopped.
+   */
+  private updateChoice(input: InputSnapshot): boolean {
+    const choice = this.pendingChoice
+    if (choice === null) return false
+
+    const optionCount = choice.kind === 'work-order' ? choice.workOrders.length : choice.offers.length
+    const action = updateCursor(this.cursor, input, optionCount)
+
+    if (action.kind === 'skip') {
+      this.pendingChoice = null
+      return true
+    }
+    if (action.kind !== 'confirm') return true
+
+    if (choice.kind === 'work-order') {
+      // Work orders currently record the assignment without altering the sector;
+      // the routing they gate arrives with the second sector in M5. See
+      // WorkOrderKind in content/types.ts for why they live inside a sector now.
+      this.pendingChoice = null
+      return true
+    }
+
+    const offer = choice.offers[action.index]
+    const cost = choice.costs[action.index] ?? 0
+    if (!offer) return true
+    // Silently ignoring an unaffordable pick would read as the button not working.
+    // The UI greys it out; this is the backstop.
+    if (cost > this.stats.scrap) return true
+
+    this.stats.scrap -= cost
+    this.acquire(offer.defId)
+    this.pendingChoice = null
+    return true
+  }
+
   // --- phases ---------------------------------------------------------------
 
   private moveHull(input: InputSnapshot): void {
@@ -301,7 +511,11 @@ export class World implements WorldView {
     hull.prevX = hull.x
     hull.prevY = hull.y
 
-    const speed = HULL_SPEED * (input.focus ? FOCUS_FACTOR : 1) * TICK_SECONDS
+    // Resolved, not constant: mobility items change this and the HUD reads the
+    // same number the sim uses.
+    const base = this.resolvedStats.hullSpeed ?? HULL_SPEED
+    const focus = this.resolvedStats.focusFactor ?? FOCUS_FACTOR
+    const speed = base * (input.focus ? focus : 1) * TICK_SECONDS
     let dx = input.moveX
     let dy = input.moveY
     // Normalise diagonals so corner-running isn't 41% faster than straight lines.
@@ -324,21 +538,42 @@ export class World implements WorldView {
     const offset = this.nextMuzzleIsLeft ? -MUZZLE_OFFSET : MUZZLE_OFFSET
     const muzzleX = this.hull.x + offset
     const muzzleY = this.hull.y - HULL_HALF_H
-    const fired = spawnPlayerBullet(
-      this.playerBullets,
-      muzzleX,
-      muzzleY,
-      0,
-      -BULLET_SPEED,
-      BULLET_DAMAGE,
-      BULLET_RADIUS,
-    )
+
+    const damage = this.resolvedStats.projectileDamage ?? BULLET_DAMAGE
+    const speed = this.resolvedStats.projectileSpeed ?? BULLET_SPEED
+    // `projectilesPerShot` is a stat (so it folds) and splitShot is an effect (so
+    // it stacks); both feed the same fan. The centre shot is always kept dead
+    // ahead — see volleyAngles.
+    const extra =
+      Math.max(1, Math.round(this.resolvedStats.projectilesPerShot ?? 1)) -
+      1 +
+      this.effects.splitShotCount
+    const angles = volleyAngles(extra, this.effects.splitShotSpreadDegrees)
+
+    let fired = false
+    for (const angle of angles) {
+      const vx = Math.sin(angle) * speed
+      const vy = -Math.cos(angle) * speed
+      // The first projectile decides whether the volley counted: if the cap refuses
+      // the centre shot the cadence must not advance, but a fan losing its outer
+      // shots to the cap is a performance limit, not a misfire.
+      const ok = spawnPlayerBullet(
+        this.playerBullets,
+        muzzleX,
+        muzzleY,
+        vx,
+        vy,
+        damage,
+        BULLET_RADIUS,
+      )
+      if (angle === 0) fired = ok
+    }
     // Refused by the cap: leave the cooldown and the muzzle alone so the cadence
     // resumes cleanly rather than skipping a muzzle and desynchronising the
     // alternating pattern.
     if (!fired) return
 
-    this.fireCooldown = FIRE_INTERVAL_TICKS
+    this.fireCooldown = this.currentFireInterval()
     this.nextMuzzleIsLeft = !this.nextMuzzleIsLeft
     this.stats.shotsFired++
     // At the muzzle, not at the hull centre: the flash has to come out of the

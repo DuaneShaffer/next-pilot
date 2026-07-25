@@ -197,7 +197,45 @@ function dodgeDirection(hullX: number, impactX: number): Axis {
  *   against any spawner that waits for the field to clear, and its survival time
  *   would measure the wave script's timeout rather than survivability.
  */
+
+/**
+ * Choice handling, shared by every policy.
+ *
+ * Bots must resolve choices or the run stalls: confirming needs a *rising* fire
+ * edge, and `aggressor` holds fire permanently, so it deadlocked its own runs at
+ * the first reward screen until this existed. The sim has a 60-second timeout as a
+ * backstop, but relying on it would add a minute of dead time per choice and
+ * corrupt every survival-time measurement.
+ *
+ * The alternating release/press is also how a *pick rate* becomes measurable at
+ * all, which M3's exit criteria are written against.
+ */
+function choiceInput(view: WorldView, preferred: number): InputSnapshot | null {
+  const choice = view.pendingChoice
+  if (!choice) return null
+
+  const count = choice.kind === 'work-order' ? choice.workOrders.length : choice.offers.length
+  if (count === 0) return NEUTRAL_INPUT
+
+  const target = ((preferred % count) + count) % count
+  // Release on odd ticks so the next tick is a rising edge. Without the release
+  // there is no edge and the choice never resolves.
+  const release = view.stats.tick % 2 === 0
+  if (release) return NEUTRAL_INPUT
+
+  // Affordability: a bot must not sit pressing an option it cannot buy, which the
+  // sim correctly refuses — that would look like a stall in the survival numbers.
+  const cost = choice.costs[target] ?? 0
+  if (cost > view.stats.scrap) {
+    return { moveX: 0, moveY: 0, fire: false, special: true, focus: false }
+  }
+  return { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
+}
+
 export const dodger: BotPolicy = (view) => {
+  const choosing = choiceInput(view, 0)
+  if (choosing) return choosing
+
   const hull = view.hull
   const threat = nearestThreat(view)
   if (threat !== null) {
@@ -226,6 +264,9 @@ export const dodger: BotPolicy = (view) => {
  * gap between its clear speed and dodger's is the difficulty budget.
  */
 export const aggressor: BotPolicy = (view) => {
+  const choosing = choiceInput(view, 1)
+  if (choosing) return choosing
+
   const hull = view.hull
   const enemy = nearestEnemy(view)
   const targetX = enemy === null ? Playfield.centerX : leadX(view, enemy)
@@ -247,6 +288,9 @@ export const aggressor: BotPolicy = (view) => {
  * distance, greedy is where that shows up.
  */
 export const greedy: BotPolicy = (view) => {
+  const choosing = choiceInput(view, 2)
+  if (choosing) return choosing
+
   const hull = view.hull
   const enemy = nearestEnemy(view)
   const targetX = enemy === null ? Playfield.centerX : leadX(view, enemy)
@@ -274,7 +318,9 @@ function randomPolicy(seed: string): BotPolicy {
   const rng = Rng.fromSeed(seed, 'bot:random')
   let held: InputSnapshot = NEUTRAL_INPUT
   let ticksHeld = 0
-  return () => {
+  return (view) => {
+    const choosing = choiceInput(view, rng.int(3))
+    if (choosing) return choosing
     if (ticksHeld <= 0) {
       held = {
         moveX: (rng.int(3) - 1) as Axis,

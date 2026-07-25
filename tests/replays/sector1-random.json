@@ -3,39 +3,39 @@
   "name": "sector1-random",
   "policy": "random",
   "seed": "RND72QKM3HTV",
-  "ticks": 5753,
+  "ticks": 5007,
   "note": "Recorded by tools/playtest.ts --record-fixture. Replaying these inputs must reproduce expected.hash exactly. If a deliberate balance change breaks this, re-record and let the diff show what moved.",
-  "replay": "TlBSAQxSTkQ3MlFLTTNIVFb5LAQJARk1BREVEA8FCBkSERAZFFIFGgsVBhoMMQwZERIQCg0VFBASQRcaGDkVEglaFQAJGA8SDBALFAwaDxkXBBEWDBASGBcJEBEMABoRBAUQChERDhUHCQkSBRAYEgQBExgMCQURCBoFGBc6BwYSGgQUEQgRCQgBDxQXCAQWDhAPGgQVDRoMFg8ZDwkQGg0BEgQXUAYCHRIHUBAJFRENURERBRAPChoQDhUaGgVVFRoSFQgEBxgSFRcRCBoIEQRGFhgNAg8KBBkJFg4FEBUHWgUECBkUEA8YBgAFEQ5EEykLGg1GCgUFBhFIBloRBgwSBBoWEAoYEhYRVA5gEQAYFg4KEBkQABgYBhIKCQcACxkOBgUBEgYIFAgaDhgLAQwGBzYIBAoSFBYGVAkICAYEEBQ5BVITBAwIBFIGGhAFChUSChdaDAoWEgwVFhoQAAoBDBkTBhAZFgkMUhQKBAINGQwKDhIOEAsAFAIIFBgFBwkYFARBFRUQEQQVBgEXGhBRFQQRAhUGCRIPBBc2EhkhBAYUDUgJGAwJFkURGRgKBAk0Eg8WChAYGRQRBhYNAgQqFxYMARYKGBkLCRMYCwAXVA8RDRYJAR0aFBgWGg8KDRQOGBYFDBAVGBgZFxoIAA4WFUEREQkYGAUQFQ4QBRoQGAwaDQgHVQUWEAEYVAcYDBoLARMQCwkGFAYKBRIHEAUVDwoLGhICExoHFQYaDRYIUg8WBxALFRQGERkQEQgUExAsAgQEFBIFBRYGExYMVQoUCBIFBhZAEzAXQgRAEQQKAAsaCBUJBRdKCAIMBhgFDBoECA4FEwkREAsYCwQZAhMZDwETFg0VFRgJABYwCmULMRJBCRkMERUWDhgUQBYVBBYGES8IEBYEGhESBhkLFQYBFUoVCRARCxIVGgcQGCIJFRESHxoHFgUUDwENGg4AGAgSARQADgQSFRUaCgQTEggIDDQNOQwAExATcgxxBgkHBgwFCwgGFgsCCRAHAA0YBRkXEQ0WEBoXWBECGxQFFQsUBBUFGBMCFAAWCAYQBAkMFhQIChQGAhQJCggPBhcVCBERFAcWBxoPBg8JFhUGGRckBx7kntk",
+  "replay": "TlBSAQxSTkQ3MlFLTTNIVFaPJxkFAScUBwgVAggSCEYHWhUWB1gVFggZBRgNEQcSBAYNCgkRCAIYBQ8RFgULShURE1AQFhVQFBIVFRcQCQoVCBYRDlQKFQYFBBYPAhARDRYYGA0VBAoFEQZaCBUIGA8VETQNEgkUFwgWFhQFEQQUARAKFQEXGhgUFhYYSAtVFBgXGg0CExgLGRgWEAkVFhcUEAkGEAhKCBoLFRUWERoUMQUZCAUUEBUVChEFFAgYFgQKVhIJEwUUFQcxCUgFSgUGBhYXeRgEB0kJEgYVBkoVGhcKIgEUGQgGFxkWFRQUFBUHGhc1CxUHESEEFRUYVhUAFxAXBRIYFAUYEBICDVAGEhQYCwgNFAoSEgYVBCwGDRIPEA0WERIYGQYJFgoMWQoUBwELFgkVBEkFGAkUDgYSCQkKDwAEEgsJBxoTCQcAFVUMSAoUFiEIEBcZCRIEEQgyDxEKFBVqFEoEGRQRFxoSARIGCxYMABMaExIVQg8YBBUYEiQVDhYMAQ4QByERBQsSCwAHFgQADgYNGBICFlQTAQ5WEQEEKBMEHmgXEAkAFxIKGA5RDQoKBhcUKwEYFBgJFRAMGQsKCBgXGQ4BEAQNGggUBhUWAA5EFxgSCBAWCSEECQhUEVgOFhsKDhgSFQQWFAEdAhgGCxgVFg8YBhkUQgcUDAQWFRgFFBISFQ8QDQQWEAYADRAPEgUaDykUEAhEExIMCAUREAkUChgEBgoJGiFQGEgLERcJDhEXGBYRFhoRFhMUEhAYFRhKFQQQCAsJBxEUEggWBhkLQRIZBgUGCRMGCAAWCA0SBwYNEQcKEBkUAQYCEhoEBhcWFxIWGgoSBFgTABUWChoJQAQGCkUEAhcUFxoNCA4QFlEVChRRCxARGg_vc5TO",
   "expected": {
     "runState": "lost",
-    "hash": "bcd915d1d05bde3e",
+    "hash": "505419f81e290ad2",
     "components": {
-      "hull": "961fc88409caaf77",
-      "playerBullets": "5ded0a594a2e34f6",
-      "enemyBullets": "074473d2ee130167",
-      "enemies": "87d75a801faf34e8",
-      "stats": "2deea394a5a8e5bb",
-      "run": "9e27ce5fffe088b3"
+      "hull": "479c9ee98646f920",
+      "playerBullets": "ee2b0b589872c92b",
+      "enemyBullets": "d5aa389194e936de",
+      "enemies": "b53239e040f5b0e1",
+      "stats": "cd024bd2fd12cc08",
+      "run": "5b49dea30c94d179"
     },
-    "cosmetic": "6335a17c879cf6e5",
+    "cosmetic": "3cb87e6c5a10e759",
     "counts": {
-      "playerBullets": 4,
-      "enemyBullets": 24,
-      "enemies": 4,
-      "explosions": 2
+      "playerBullets": 7,
+      "enemyBullets": 7,
+      "enemies": 6,
+      "explosions": 1
     },
     "stats": {
-      "tick": 5753,
-      "waveIndex": 16,
-      "kills": 25,
-      "scrap": 106,
-      "shotsFired": 1124,
-      "hits": 203,
-      "damageTaken": 142
+      "tick": 5007,
+      "waveIndex": 14,
+      "kills": 24,
+      "scrap": 117,
+      "shotsFired": 997,
+      "hits": 137,
+      "damageTaken": 146
     },
     "incident": {
-      "causeKind": "collision",
-      "causeEnemyId": "mine"
+      "causeKind": "enemy-fire",
+      "causeEnemyId": "turret"
     }
   }
 }

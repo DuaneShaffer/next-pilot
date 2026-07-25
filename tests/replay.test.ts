@@ -152,6 +152,10 @@ function worldView(overrides: Partial<WorldView> = {}): WorldView {
     events: [],
     cosmetic: { shake: 0 },
     freezeTicks: 0,
+    inventory: [],
+    activeInteractions: [],
+    resolvedStats: {},
+    pendingChoice: null,
     ...overrides,
   }
 }

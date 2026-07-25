@@ -211,28 +211,27 @@ export interface WorldView {
 
   readonly cosmetic: Readonly<CosmeticState>
 
+  /** Items held, in acquisition order. Effect dispatch follows this order. */
+  readonly inventory: readonly HeldItem[]
+  /** Interactions live because both their items are held. */
+  readonly activeInteractions: readonly ActiveInteraction[]
   /**
-   * M3 will add four members here, in the same change that implements them:
+   * Stat values after folding every modifier.
    *
-   *   readonly inventory: readonly HeldItem[]
-   *   readonly activeInteractions: readonly ActiveInteraction[]
-   *   readonly resolvedStats: ResolvedStats
-   *   readonly pendingChoice: Readonly<PendingChoice> | null
-   *
-   * They are deliberately NOT declared yet. Adding a required member to this
-   * interface immediately breaks `World` and every consumer, so declaring the
-   * contract ahead of the implementation would mean committing a red tree — and a
-   * repository that does not compile is not a boundary anyone can safely resume
-   * from. The shapes below are designed and reviewable; wiring them is the first
-   * task of the implementation.
-   *
-   * Two obligations to carry into that change:
-   *   - `resolvedStats` is the single source the HUD reads. This project has
-   *     already shipped a panel advertising a fire rate the weapon did not have.
-   *   - while `pendingChoice` is non-null, time is paused: an item choice is a
-   *     decision, not a reflex test. Ticks still advance so a recorded input log
-   *     stays aligned, but nothing moves.
+   * The single source the HUD reads. This project has already shipped a panel
+   * advertising a fire rate the weapon did not have, and items are about to make
+   * these numbers move constantly — recomputing them anywhere else reintroduces
+   * exactly that bug.
    */
+  readonly resolvedStats: ResolvedStats
+  /**
+   * Set when the run is waiting on a player decision.
+   *
+   * While this is non-null, time is paused: an item choice is a decision, not a
+   * reflex test. Ticks still advance so a recorded input log stays aligned with
+   * wall-clock ticks, but nothing moves and nothing spawns.
+   */
+  readonly pendingChoice: Readonly<PendingChoice> | null
 
   /**
    * Ticks of hitstop remaining. Non-zero means gameplay is frozen this tick.

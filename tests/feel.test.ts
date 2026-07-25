@@ -172,6 +172,10 @@ function worldFixture(shake: number, freezeTicks: number): WorldView {
   return {
     seed: 'TEST-SEED',
     runState: 'active',
+    inventory: [],
+    activeInteractions: [],
+    resolvedStats: {},
+    pendingChoice: null,
     hull,
     playerBullets: [bullet(224, 400, -620), bullet(219, 300, -620), bullet(228, 120, -620)],
     enemyBullets: [
