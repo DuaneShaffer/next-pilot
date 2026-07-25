@@ -225,6 +225,49 @@ export type ItemTag =
   | 'electric'
   | 'cursed'
 
+/**
+ * A parameterised behaviour the simulation knows how to run.
+ *
+ * Closed union, for the same reason MovementKind is: content declares *what*
+ * happens and the sim owns *how*. If hooks were arbitrary functions supplied by
+ * content, adding an item would mean adding simulation code, the sim would stop
+ * being data-driven, and item behaviour would escape the determinism review that
+ * every other sim change gets.
+ *
+ * - `splitShot`      — fires `count` extra projectiles at ±`spreadDegrees`.
+ * - `chainOnHit`     — a hit arcs to `count` targets within `radius` for `fraction`
+ *                      of the original damage.
+ * - `scrapOnOverkill` — damage beyond what was needed to kill converts to scrap at
+ *                      `fraction`.
+ * - `fireRateWindow` — grants `bonus` fire rate for `durationTicks` when triggered.
+ * - `retaliate`      — releases `count` projectiles when the trigger fires.
+ * - `repairOnKill`   — restores `amount` integrity, at most `chance` of the time.
+ * - `pierce`         — projectiles pass through `count` additional targets.
+ */
+export type EffectKind =
+  | 'splitShot'
+  | 'chainOnHit'
+  | 'scrapOnOverkill'
+  | 'fireRateWindow'
+  | 'retaliate'
+  | 'repairOnKill'
+  | 'pierce'
+
+export interface EffectDef {
+  kind: EffectKind
+  /** When it runs. */
+  on: HookName
+  /** Tuning. Which fields matter depends on `kind`; see EffectKind's docs. */
+  count?: number
+  spreadDegrees?: number
+  radius?: number
+  fraction?: number
+  bonus?: number
+  durationTicks?: number
+  amount?: number
+  chance?: number
+}
+
 export interface ItemDef {
   id: string
   name: string
@@ -241,8 +284,8 @@ export interface ItemDef {
   /** Flavour. Always omittable, never load-bearing. */
   flavour?: string
   stats?: readonly StatModifier[]
-  /** Hooks this item implements. The sim looks up behaviour by item id. */
-  hooks?: readonly HookName[]
+  /** Behaviours this item adds, as data the sim interprets. */
+  effects?: readonly EffectDef[]
   /** Relative offer weight within its tier. 0 means never offered randomly. */
   weight?: number
 }
@@ -268,8 +311,8 @@ export interface InteractionDef {
   text: string
   /** Extra modifiers that apply only while both items are held. */
   stats?: readonly StatModifier[]
-  /** Extra hooks that apply only while both items are held. */
-  hooks?: readonly HookName[]
+  /** Extra behaviours that apply only while both items are held. */
+  effects?: readonly EffectDef[]
 }
 
 /**
