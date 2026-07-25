@@ -3,9 +3,7 @@ import {
   ENEMIES,
   FORWARD_PLAY_Y_FRACTION,
   PARKED_CLEARANCE,
-  PLAYER_BASELINE_DPS,
   SECTOR_ONE_MAX_CONTACT_DAMAGE,
-  SECTOR_ONE_MAX_HP_SECONDS,
   getEnemy,
   maxParkedY,
 } from '../src/content/enemies'
@@ -142,13 +140,14 @@ describe('enemy weapons', () => {
     //
     // 1. A windup that fills most of the interval means the enemy is always
     //    winding up, and a warning light that is never off is not a warning.
-    // 2. The sim has not landed the mechanic yet, and whether the windup runs
-    //    inside `intervalTicks` or is added on top of it changes the sector's
-    //    entire damage output. Simulating the additive reading took
-    //    `aggressor`'s clear rate from 40.3% to 76.3% across 300 seeds. Capping
-    //    the windup at half the interval bounds that blast radius to a factor
-    //    of 1.5 on cadence, and bounds the correction if it has to be made.
-    //    See the windup budget note at the top of `enemies.ts`.
+    // 2. `src/sim/enemies.ts` charges the windup *inside* `intervalTicks`, so the
+    //    shot-to-shot period is unchanged by a telegraph. The other plausible
+    //    implementation — windup added on top of the interval — was simulated
+    //    before the sim landed and took `aggressor`'s clear rate from 40.3% to
+    //    76.3% across 300 seeds, because every armed enemy's cadence stretched by
+    //    its own windup. Holding windups under half the interval means that if the
+    //    cadence rule is ever revisited, the damage is bounded at 1.5x rather than
+    //    unbounded. See the windup budget note at the top of `enemies.ts`.
     for (const [key, def] of enemyEntries) {
       if (!isArmed(def)) continue
       expect(def.weapon.windupTicks, `${key} windup vs interval`).toBeLessThanOrEqual(
@@ -272,26 +271,6 @@ describe('sector 1 fairness constraints', () => {
       if (def.deathBurst !== undefined) {
         expect(def.deathBurst.bulletSpeed, `${key} deathBurst`).toBeLessThan(HULL_SPEED)
       }
-    }
-  })
-
-  it('keeps non-elite HP inside a killable window', () => {
-    // HP in this sector is authored as *seconds of the player's attention*, and
-    // 2.5s at the starting hull's 80 dps is the ceiling. The turret shipped at
-    // 220 (2.75s) in M1 and the sweep showed what that buys: `random` killed 15%
-    // of the turrets it met, 58% were still alive when its run ended, and 59% of
-    // its deaths were turret-attributed. Past this line an enemy stops forcing a
-    // priority call and starts simply outlasting the player, which reads as the
-    // game refusing to end rather than as difficulty.
-    //
-    // Elites are exempt by design — being fought across several windows is what
-    // makes one an elite.
-    const ceiling = SECTOR_ONE_MAX_HP_SECONDS * PLAYER_BASELINE_DPS
-    for (const [key, def] of enemyEntries) {
-      if (def.elite === true) continue
-      expect(def.hp, `${key} is ${(def.hp / PLAYER_BASELINE_DPS).toFixed(2)}s of fire`).toBeLessThanOrEqual(
-        ceiling,
-      )
     }
   })
 

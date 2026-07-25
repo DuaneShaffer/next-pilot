@@ -12,7 +12,7 @@ import { Keyboard, type InputSnapshot } from './core/input'
 import { generateSeed, isValidSeed, normalizeSeed } from './core/seed'
 import { VIRTUAL_H, VIRTUAL_W } from './core/space'
 import { ENEMIES } from './content/enemies'
-import { SECTOR_ONE } from './content/sectors'
+import { SECTOR_ONE, SECTORS } from './content/sectors'
 import { createAudioDirector } from './audio'
 import { adoptLegacySave, loadSave, persistSave, type Save, type Settings } from './meta/save'
 import { Viewport } from './render/layout'
@@ -118,7 +118,8 @@ function main(): void {
     // Derived from the sim, never hand-written, so the HUD cannot lie about it.
     fireRate: SHOTS_PER_SECOND,
     sector: 1,
-    sectorCount: 5,
+    // Sectors that exist, not sectors that are planned. See SECTORS.
+    sectorCount: SECTORS.length,
     waveCount: SECTOR_ONE.waves.length,
   }
 

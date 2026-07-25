@@ -9,10 +9,13 @@
 
 import { describe, expect, it } from 'vitest'
 import { TICK_HZ } from '../src/core/loop'
+import { NEUTRAL_INPUT } from '../src/core/input'
 import { PLAYFIELD_H, PLAYFIELD_W, VIRTUAL_H, VIRTUAL_W, PANEL_W } from '../src/core/space'
 import { getEnemy } from '../src/content/enemies'
-import { SECTOR_ONE } from '../src/content/sectors'
+import { SECTOR_ONE, SECTORS } from '../src/content/sectors'
 import { createEnemy, updateEnemyMovement } from '../src/sim/enemies'
+import { BOTS } from '../src/sim/bots'
+import { World } from '../src/sim/world'
 import type { EnemyDef } from '../src/content/types'
 
 describe('sine frequency means oscillations per second', () => {
@@ -130,5 +133,46 @@ describe('sector content agrees with the simulation', () => {
         expect(Number.isFinite(enemy.y)).toBe(true)
       }
     }
+  })
+})
+
+describe('run outcomes are distinguishable', () => {
+  /**
+   * Regression: a tester cleared sector 1 and was shown "HULL LOSS CONFIRMED"
+   * with a TOTAL LOSS stamp and an unattributed cause of death.
+   *
+   * `runState` has three values and the summary screen assumed one of them.
+   * Telling a player who just won that they died is the worst misreport the
+   * interface can make, so both outcomes are now pinned here rather than only in
+   * a screenshot.
+   */
+  it('reaches extraction on a seed where a competent policy clears', () => {
+    const seed = 'K7F29XQM3RTV'
+    const world = new World(seed)
+    const policy = BOTS.aggressor.create(seed)
+    for (let tick = 0; tick < TICK_HZ * 240 && world.runState === 'active'; tick++) {
+      world.tick(policy(world))
+    }
+    expect(world.runState).toBe('extracted')
+    // Nothing killed the pilot, so there is no incident to file. The summary
+    // screen must not read this as an unattributed death.
+    expect(world.incident).toBeNull()
+  })
+
+  it('files an incident only when the run was actually lost', () => {
+    const seed = 'DEATHRUN1234'
+    const world = new World(seed)
+    for (let tick = 0; tick < TICK_HZ * 240 && world.runState === 'active'; tick++) {
+      world.tick(NEUTRAL_INPUT)
+    }
+    expect(world.runState).toBe('lost')
+    expect(world.incident).not.toBeNull()
+  })
+
+  it('never advertises more sectors than exist', () => {
+    // The panel's denominator comes from SECTORS, not from the five that
+    // docs/DESIGN.md plans, so it cannot claim progress that is unreachable.
+    expect(SECTORS.length).toBeGreaterThan(0)
+    expect(SECTORS.map((sector) => sector.id)).toContain(SECTOR_ONE.id)
   })
 })

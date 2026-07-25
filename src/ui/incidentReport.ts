@@ -132,6 +132,32 @@ const REMARKS: ReadonlyArray<readonly string[]> = [
 ]
 
 /**
+ * Closing remarks for a *successful* extraction.
+ *
+ * Separate list because every entry in REMARKS presumes a corpse. Filing "next of
+ * kin notified" after a pilot came home is the same class of misreport as stamping
+ * a cleared run TOTAL LOSS — the tone survives only while the facts are right.
+ */
+const EXTRACTION_REMARKS: ReadonlyArray<readonly string[]> = [
+  [
+    'Hull returned within acceptable tolerances.',
+    'Pilot retained pending the next corridor assignment.',
+  ],
+  [
+    'Salvage logged and valued by the reviewing officer.',
+    'Hazard pay remains under review and will continue to be.',
+  ],
+  [
+    'Performance rated SATISFACTORY. No commendation is issued for satisfactory.',
+    'The corridor has been re-listed as active.',
+  ],
+  [
+    'Recovered materiel has been credited against the hull lease.',
+    'A balance remains. There is always a balance.',
+  ],
+]
+
+/**
  * The TOTAL LOSS stamp.
  *
  * `danger` for death is one of the colour's sanctioned uses, and this is the
@@ -217,6 +243,16 @@ export function drawIncidentReport(
 ): void {
   const incident = view.incident
   const stats = view.stats
+  /**
+   * A cleared sector reaches this same screen, because it is the run summary —
+   * but it must not read as a death.
+   *
+   * A tester cleared sector 1 and was shown "HULL LOSS CONFIRMED" with a TOTAL
+   * LOSS stamp and an unattributed cause. Telling a player who just won that they
+   * died is the worst possible misreport, and it happened because `runState` has
+   * three values while this screen assumed one.
+   */
+  const extracted = view.runState === 'extracted'
 
   // A near-opaque scrim rather than a fill: the wreck of the last frame stays
   // faintly visible behind the paperwork, which is both where the player was
@@ -231,8 +267,9 @@ export function drawIncidentReport(
   ctx.strokeRect(CARD_X + 0.5, CARD_Y + 0.5, CARD_W - 1, CARD_H - 1)
 
   // Severity bar. `danger` for death is one of its sanctioned uses, and it is a
-  // static bar, not a flash — rule 10.
-  ctx.fillStyle = Palette.danger
+  // static bar, not a flash — rule 10. A successful extraction is `good`: the
+  // colour is the first thing read, so it has to agree with the outcome.
+  ctx.fillStyle = extracted ? Palette.good : Palette.danger
   ctx.fillRect(CARD_X, CARD_Y, CARD_W, 3)
 
   // Header band.
@@ -244,7 +281,7 @@ export function drawIncidentReport(
   ctx.fillRect(CARD_X, headerTop + headerH, CARD_W, 1)
 
   const pilotTag = String(opts.pilotNumber).padStart(3, '0')
-  drawText(ctx, 'Salvage Division // Incident Report', CONTENT_X, headerTop + 10, {
+  drawText(ctx, extracted ? 'Salvage Division // Extraction Report' : 'Salvage Division // Incident Report', CONTENT_X, headerTop + 10, {
     size: 11,
     tracking: 2,
     baseline: 'top',
@@ -260,14 +297,15 @@ export function drawIncidentReport(
 
   // Verdict. The stamp sits to the right of the title; the title is sized so the
   // two cannot meet even with the stamp's rotation widening its footprint.
-  drawText(ctx, 'HULL LOSS CONFIRMED', CONTENT_X, 100, {
+  drawText(ctx, extracted ? 'EXTRACTION CONFIRMED' : 'HULL LOSS CONFIRMED', CONTENT_X, 100, {
     size: 24,
     weight: 700,
     tracking: 3,
     baseline: 'top',
     color: Palette.text,
   })
-  drawStamp(ctx, 494, 128)
+  // No TOTAL LOSS stamp on a hull that came home.
+  if (!extracted) drawStamp(ctx, 494, 128)
 
   // Kept short on purpose: this line shares its band with the stamp, and the
   // longest hull name in DESIGN.md ("Collateral") plus a third clause would run
@@ -289,13 +327,19 @@ export function drawIncidentReport(
   const causeName = opts.causeName ?? (causeId ? prettifyId(causeId) : null)
   const causeLine = causeName ? `${CAUSE_TEXT[causeKind]} — ${causeName}` : CAUSE_TEXT[causeKind]
 
-  drawLabel(ctx, 'Cause of loss', CONTENT_X, 186, { baseline: 'top' })
-  drawText(ctx, incident ? causeLine : 'Unattributed', CONTENT_X, 204, {
-    size: 17,
-    weight: 600,
-    baseline: 'top',
-    color: Palette.danger,
-  })
+  drawLabel(ctx, extracted ? 'Outcome' : 'Cause of loss', CONTENT_X, 186, { baseline: 'top' })
+  drawText(
+    ctx,
+    extracted ? 'Hull recovered — corridor cleared' : incident ? causeLine : 'Unattributed',
+    CONTENT_X,
+    204,
+    {
+      size: 17,
+      weight: 600,
+      baseline: 'top',
+      color: extracted ? Palette.good : Palette.danger,
+    },
+  )
   const tickOfLoss = incident?.tick ?? stats.tick
   drawText(
     ctx,
@@ -314,7 +358,7 @@ export function drawIncidentReport(
   // screenshot of this screen is a reproducible bug report on its own.
   let y = 272
   if (opts.sector !== undefined && opts.sectorCount !== undefined) {
-    y = drawEntry(ctx, y, 'Sector reached', `${opts.sector} / ${opts.sectorCount}`, 'sectors')
+    y = drawEntry(ctx, y, extracted ? 'Sector cleared' : 'Sector reached', `${opts.sector} / ${opts.sectorCount}`, 'sectors')
   } else if (opts.sectorName) {
     y = drawEntry(ctx, y, 'Sector reached', opts.sectorName)
   }
@@ -398,7 +442,8 @@ export function drawIncidentReport(
   // Closing remark: flavour, visually subordinate, and omittable without losing
   // any information — the same rule item text follows. Dropped entirely when the
   // body ran long, because a joke is the first thing that should give way.
-  const remark = REMARKS[tickOfLoss % REMARKS.length] ?? []
+  const remarkPool = extracted ? EXTRACTION_REMARKS : REMARKS
+  const remark = remarkPool[tickOfLoss % remarkPool.length] ?? []
   let remarkY = Math.max(494, y + 10)
   if (remarkY + remark.length * 17 <= promptY - 10) {
     for (const line of remark) {
@@ -418,7 +463,8 @@ export function drawIncidentReport(
   ctx.strokeStyle = Palette.caution
   ctx.lineWidth = 1.5
   ctx.strokeRect(promptX + 0.5, promptY + 0.5, promptW - 1, promptH - 1)
-  drawText(ctx, 'PRESS ENTER — DEPLOY NEXT PILOT', promptX + promptW / 2, promptY + promptH / 2, {
+  const prompt = extracted ? 'PRESS ENTER — NEXT SORTIE' : 'PRESS ENTER — DEPLOY NEXT PILOT'
+  drawText(ctx, prompt, promptX + promptW / 2, promptY + promptH / 2, {
     size: 15,
     weight: 600,
     align: 'center',

@@ -103,12 +103,48 @@ roguelike faster than an update erasing progress.
 
 ## Performance budget
 
-Asserted in tests, not hoped for:
-
 - Sim tick: < 2ms at p99 with 2,000 live projectiles.
 - Frame: < 8ms at p99, leaving headroom inside the 16.6ms budget.
-- `droppedTicks` must be 0 in any perf test.
-- Bundle: < 150KB uncompressed. Currently ~15KB.
+- `droppedTicks` must be 0.
+- Bundle: < 150KB uncompressed. Currently ~81KB.
+
+**What 2,000 projectiles actually is:** a headroom target for content that does not exist yet, not a
+description of the game. The projectile caps total 1,792, so 2,000 is *unreachable through play*, and
+the observed peak across full runs is **54**. The figure is kept deliberately — it is the margin
+being defended for M3's items and M5's later sectors — but `tests/perf.test.ts` constructs it by
+stuffing the entity arrays directly and pins the discrepancy, because a budget nobody can reach is
+worth nothing if the test quietly measures an empty playfield instead.
+
+**`?ff=N` cannot be used to measure either budget.** `main.ts` runs N simulation steps inside a
+single `hooks.tick()`, so at `ff=12` every sample is twelve steps' worth of work and dividing its p99
+by twelve is not a p99. `tools/perf.mjs` prints timings at `ff≠1` but *refuses the verdicts*; reaching
+dense play honestly means `--seconds=180`. This is the same shape of mistake as reading dropped ticks
+around a screenshot.
+
+**Where each is enforced, and why it matters:**
+
+| Check | Enforced by | Runs on CI |
+| --- | --- | --- |
+| Bundle size | `ci.yml` | yes |
+| `droppedTicks == 0` | `tests/perf.test.ts` | yes |
+| Scenario integrity (really 2,000 projectiles) | `tests/perf.test.ts` | yes |
+| Absolute tick p50/p99 | `tests/perf.test.ts` | **no — local only** |
+| Absolute frame p50/p99 | `npm run perf` (real browser) | no |
+
+Absolute wall-clock timing is deliberately **not** asserted on CI. A shared,
+virtualised runner cannot produce a stable absolute figure, and the p99 especially is dominated by a
+single descheduling event — the same scenario measured 0.31ms p50 locally and 2.93ms p99 on CI with
+no code change between them. A test that fails for reasons unrelated to the change gets deleted or
+rubber-stamped, and either way the budget stops being enforced.
+
+So CI keeps the machine-independent checks, which are the ones that would silently void the whole
+file if they broke, and the absolute numbers are measured where they mean something: `npm run perf`
+against a real browser, reporting sliding-window percentiles. Latest run: **frame p99 0.66ms, tick
+p99 0.07ms, 0 dropped** — roughly 12× headroom on the frame budget.
+
+The honest limit: that browser run reached 64s of sector time, so the densest moments (the elite at
+134s, the clear-out at 164-174s) are unmeasured, and real play peaks near 54 live projectiles rather
+than 2,000 — the 2,000 case is constructed directly in the test because no browser pass can reach it.
 
 ## Why not the alternatives
 

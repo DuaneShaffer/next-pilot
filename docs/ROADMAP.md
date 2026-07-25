@@ -88,19 +88,41 @@ so the heaviest moments — the elite at 134s and the clear-out beats at 164-174
 the browser. `tests/perf.test.ts` constructs the 2,000-projectile case directly, because real play
 peaks near 54 live projectiles and no browser pass can reach 2,000 at all.
 
-**Balance fixes, measured over 200 runs per policy:**
+**Balance fixes, measured over 300 runs per policy across two base seeds:**
 
-| policy | M1 median | M2 median | change |
-| --- | --- | --- | --- |
-| greedy | 123.7s (p10 123.0 — a wall) | 156.7s (p10 143.6, p90 171.7) | **wall replaced by a 28s spread** |
-| random | 103.5s, wave 18/30 | 95.7s, wave 16/30 | less deep on noise |
-| aggressor | 41.2% clear | 56.5% clear | overshot the 35-50% target |
-| dodger | 141.2s | 120.2s | worse |
+| policy | M1 | M2 |
+| --- | --- | --- |
+| aggressor clear | 44.0% | **39.3%** (42.0% on seed B) |
+| greedy median | 123.3s | **153.6s** |
+| greedy IQR | **3.0s** | **12.6s** (4.2× wider) |
+| greedy `collision:lancer` | 47%, none during the dive | 35%, **all telegraphed** |
+| random median | 104.8s, wave 18/30 | **95.6s**, wave 16/30 |
+| dodger median | 126.0s | 122.0s |
 
-The two stated defects are fixed: greedy no longer dies at a deterministic wall, and the upper
-playfield is usable again. But the fix overshot — aggressor now clears 56.5% against a 35-50%
-target, and dodger lost 21 seconds. **Tightening that is the first balance job of M6**, and it needs
-its own before/after sweep rather than being folded into a feel change.
+**The diagnosis mattered more than the fix, and both prior suspicions were wrong.** The lancer parked
+at y=216; a forward-flying pilot sits at y=230; lancer radius 13 plus hull hitbox 7 is 20. **It
+arrived already inside contact range of the pilot it was supposed to be warning.** Of 121
+`collision:lancer` deaths over 300 seeds, 64 happened while it descended, 57 while it sat parked and
+motionless, and **zero during the dive** — the telegraph was being delivered after impact. Moving its
+parking height to y=144 put 134 of 134 lancer collisions back in the dive phase.
+
+Lengthening the tell (the intuitive fix) measured *worse*: a parked lancer sitting on you longer is
+more contact, not more warning.
+
+**Two changes were tried and reverted on evidence.** Turret HP 220→176 did nothing for `random`
+(104.8s either way — 7 dps cannot kill a 176 HP turret either, and it leaves on its own timer
+regardless) while handing `aggressor` 33 points of clear rate. An escort windup tweak was worth 1.5pp,
+inside sample noise, and changing a number for an unmeasurable reason is how a tuned sector drifts.
+
+**The death histogram was the wrong instrument for `random`.** Ablation — zeroing one damage source
+and re-measuring — showed skiff fire worth +13.2s and turret fire worth +13.2s, identical, despite
+turret being 62% of the histogram. A histogram over-attributes to whatever fires *last*.
+
+**Not one wave was edited.** All the difficulty moved through behaviour, so the HP buckets are
+unchanged and still monotone — a useful demonstration that spawned HP is only a proxy for difficulty.
+
+**Trade-off, stated:** `dodger` loses ~4s and its deaths collapsed to two causes (turret 56%, escort
+44%). Worth watching in M6, not worth chasing now.
 
 **Carried forward, honestly:**
 

@@ -17,35 +17,33 @@
  * Each enemy exists to teach exactly one thing. Where a choice was between
  * "interesting stat line" and "clear lesson", the lesson won.
  *
- * ## The windup budget, and an assumption that needs resolving
+ * ## The windup budget
  *
- * `windupTicks` (see `EnemyWeaponDef`) is the per-volley telegraph. Every value
- * in this file was chosen on *reaction-window* grounds — how long the pilot needs
- * to read the attack and act on it — and ordered by how much positional work the
- * attack demands, not by how dangerous it is:
+ * `windupTicks` (see `EnemyWeaponDef`) is the per-volley telegraph. Values here
+ * are chosen on *reaction-window* grounds — how long the pilot needs to read the
+ * attack and act on it — and ordered by how much positional work the attack
+ * demands rather than by how dangerous it is:
  *
  *   skiff 20 (0.33s)  single pellet, mostly self-telegraphing
- *   escort 24 (0.40s) slow fat tracker, the most readable projectile here
+ *   escort 30 (0.50s) slow fat tracker; unchanged, see the note on it below
  *   turret 32 (0.53s) 3-shot fan; the pilot must choose a lane
  *   heavy  38 (0.63s) 5-shot 46-degree fan; the sector's hardest positional ask
  *
- * **Every one is under half its weapon's `intervalTicks`, and that bound is
- * enforced by `tests/content.test.ts`.** It is not tidiness. The mechanic is not
- * implemented in `src/sim/**` yet, and the two obvious implementations differ
- * enormously: if the windup runs *inside* the existing cadence the numbers below
- * are the numbers, but if it is *added* on top of `intervalTicks` then every
- * armed enemy's cycle stretches by its windup and the whole sector loses that
- * much damage output. Simulating the additive reading against these values moved
- * `aggressor`'s clear rate from 40.3% to 76.3% over 300 seeds and collapsed its
- * survival IQR from 12.4s to 2.7s — the sector effectively stops being able to
- * kill a competent pilot.
+ * **Every one is under half its weapon's `intervalTicks`, and `tests/content.test.ts`
+ * enforces that.** Not tidiness — a windup that fills most of the interval means
+ * the enemy is always winding up, and a warning light that is never off is not a
+ * warning.
  *
- * These numbers are tuned against the sim that exists today, where
- * `intervalTicks` is the gap between volleys. **If the windup lands as an
- * additive delay, each armed def's `intervalTicks` must drop by its
- * `windupTicks` to preserve the measured cadence** (skiff 78->58, escort
- * 120->96, turret 96->64, heavy 96->58) and the sweep must be re-run. Capping
- * windups at half the interval is what keeps that correction bounded.
+ * It also bounds a risk that turned out not to materialise, and the number is
+ * worth keeping written down. `src/sim/enemies.ts` charges the windup *inside*
+ * `intervalTicks`: the cooldown resets when the tell starts, so the shot-to-shot
+ * period is unchanged and the values below are the values. The other obvious
+ * implementation — adding the windup on top of the interval — would have stretched
+ * every armed enemy's cycle by its own windup. That was simulated before the sim
+ * landed, over 300 seeds, and it took `aggressor`'s clear rate from 40.3% to 76.3%
+ * while collapsing its survival IQR from 12.4s to 2.7s. A feel feature would have
+ * silently removed the sector's ability to kill a competent pilot. If anyone ever
+ * reconsiders that choice, the whole sector needs re-sweeping, not re-reasoning.
  */
 
 import { PLAYFIELD_H } from '../core/space'
@@ -61,24 +59,6 @@ import type { EnemyDef } from './types'
  * arbitrary. `tests/content.test.ts` enforces this.
  */
 export const SECTOR_ONE_MAX_CONTACT_DAMAGE = 35
-
-/**
- * Ceiling on a non-elite sector-1 enemy's HP, expressed as seconds of the
- * player's undivided fire: 2.5s at the starting hull's 80 dps.
- *
- * This is a rule, not a preference, and it exists because M1 broke it. The
- * turret shipped at 220 HP — 2.75 seconds — and the M1 bot sweep found that no
- * unskilled policy ever killed one: `random` destroyed 15% of the turrets it
- * met, 58% were still alive when the run ended, and 59% of its deaths were
- * turret-attributed. An enemy that cannot be killed inside any safe window the
- * sector offers stops being a must-kill and becomes an obstacle that simply
- * outlasts the player, which is a different (and worse) thing than difficulty.
- *
- * `tests/content.test.ts` enforces this. The elite is exempt: being fought
- * across several windows is the whole point of it.
- */
-export const SECTOR_ONE_MAX_HP_SECONDS = 2.5
-export const PLAYER_BASELINE_DPS = 80
 
 /**
  * How high up the playfield a pilot who is pushing forward is expected to fly,
@@ -249,22 +229,25 @@ export const ENEMIES: Record<string, EnemyDef> = {
    *
    * Everything before the turret can be waited out. The turret parks itself and
    * keeps firing, so dodging is a losing strategy — the player has to decide to
-   * commit to a target. 176 HP is 2.2 seconds of uninterrupted fire, which is
+   * commit to a target. 220 HP is 2.75 seconds of uninterrupted fire, which is
    * the point: it is the first enemy that cannot be killed *while* dodging
    * something else, so it forces a priority call.
    *
-   * **The trade here is deliberate: less HP, more gun.** M1 shipped 220 HP
-   * (2.75s) with a 105-tick 3x6 volley and the sweep showed the turret was doing
-   * the wrong job. It was not forcing a priority call on an unskilled pilot, it
-   * was outlasting them: `random` killed 15% of the turrets it met, 58% were
-   * alive when the run ended, and 59% of its deaths were turret-attributed —
-   * a single def carrying most of the work of stopping a pilot who never plays.
-   * Dropping HP alone made this worse in the other direction (`aggressor` clear
-   * rate jumped 37.7% -> 56.5% at 150 HP, `random` moved 1.2s), so HP came down
-   * *and* the gun came up together: 176 HP / 96 ticks / 7 damage. A pilot who
-   * commits gets the kill 0.55s sooner; a pilot who does not takes 9% more
-   * volleys, each 17% harder. Measured: `aggressor` 40.3% clear (target band
-   * 35-50%), `random` median 103.9s -> 94.7s.
+   * **220 HP was suspected of being the reason an unskilled pilot gets so far, and
+   * the sweep says it is not. Do not lower it.** The suspicion was reasonable:
+   * `random` destroys only 15% of the turrets it meets, 58% are still alive when
+   * its run ends, and 59% of its deaths are turret-attributed. But cutting HP
+   * fixes none of that and breaks something else. Measured on this sim, at 200
+   * runs a policy, changing *only* turret HP from 220 to 176:
+   *
+   *   `random`    median 104.8s -> 104.8s, wave 18 -> 18   (no effect at all)
+   *   `aggressor` clear rate 45.0% -> 78.5%                (target band is 35-50%)
+   *
+   * `random` cannot kill a 176 HP turret either — at 14% accuracy and a 60% duty
+   * cycle it is doing about 7 dps, so the difference is 32 seconds versus 25, and
+   * the turret leaves on its 10-second timer long before either. All the HP
+   * reduction did was hand 33 points of clear rate to a policy that already fires
+   * every third tick. What *did* move `random` was the volley, below.
    *
    * holdYFraction 0.22 puts it at y=158, high enough that its spread has room to
    * fan out and become dodgeable before it arrives, and 57 units clear of the
@@ -283,7 +266,7 @@ export const ENEMIES: Record<string, EnemyDef> = {
   turret: {
     id: 'turret',
     name: 'Turret',
-    hp: 176,
+    hp: 220,
     radius: 15,
     contactDamage: 16,
     scrap: 14,
@@ -291,7 +274,13 @@ export const ENEMIES: Record<string, EnemyDef> = {
     movementParams: { speed: 55, holdYFraction: 0.22, holdTicks: 600 },
     weapon: {
       kind: 'spread',
-      intervalTicks: 96, // 1.6s — still a gap wide enough to reposition inside.
+      // 1.6s and 7 damage, up from 1.75s and 6. This is the half of the turret
+      // change that the numbers actually supported: a 9% faster volley that is
+      // 17% harder took `random` from a 104.8s median at wave 18 to 102.0s at
+      // wave 17 while costing `aggressor` 3.5 points of clear rate. Unlike the HP
+      // cut it taxes the pilot who fails to kill the turret rather than rewarding
+      // the one who was always going to.
+      intervalTicks: 96,
       bulletSpeed: 120,
       damage: 7,
       count: 3,
@@ -366,13 +355,16 @@ export const ENEMIES: Record<string, EnemyDef> = {
       bulletSpeed: 105,
       damage: 7,
       firstDelayTicks: 66, // 1.1s — the escort is on screen and identified first.
-      // Telegraph: 24 ticks (0.40s), and deliberately *shorter* than the
-      // turret's despite the escort being the more common killer. A tracker is
-      // fat (radius 4.5) and slow (105 u/s, half the hull's speed), so the
-      // projectile is already the most readable thing in the game; the windup
-      // only has to mark the moment of release. Padding it further would make
-      // the escort permanently lit and the tell would stop reading as an event.
-      windupTicks: 24,
+      // Telegraph: 30 ticks (0.50s), left alone this milestone. A shorter tell was
+      // considered — a tracker is fat (radius 4.5) and slow (105 u/s, half the
+      // hull's speed), so the projectile is already the most readable thing in the
+      // game and arguably needs less warning than the turret's fan. But escort
+      // fire is the top killer of both `dodger` (42%) and `aggressor` (25%), so
+      // shortening it is a real difficulty change, and the sweep put the argument
+      // for it at 1.5 points of `aggressor` clear rate — inside the noise of a
+      // 200-run sample. Changing a number for an unmeasurable reason is how a
+      // tuned sector drifts, so this one stays where M1 left it.
+      windupTicks: 30,
     },
     shape: 'escort',
   },
@@ -382,17 +374,12 @@ export const ENEMIES: Record<string, EnemyDef> = {
    * reusing its shape and its lesson, which is the point: the elite is a test of
    * something already taught rather than a new thing to learn mid-fight.
    *
-   * 360 HP is 4.5 seconds of committed fire, and it stays 360 even though the
-   * regular turret came down to 176 this milestone. The two numbers are not a
-   * ratio to be maintained: "cannot be killed in one window, must be fought
-   * across several" *is* the elite's design, and it is the reason
-   * SECTOR_ONE_MAX_HP_SECONDS exempts elites instead of scaling them. Nothing in
-   * the sweep asked for a change here — `greedy` takes 7-10% of its deaths from
-   * the heavy and `random` never reaches it — so it was left alone.
-   *
-   * That is long enough that the player cannot kill it inside a single safe
-   * window and must break off, reposition, and come back — the first time
-   * sector 1 asks for that. The 5-shot / 46-degree
+   * 360 HP is 4.5 seconds of committed fire. That is long enough that the player
+   * cannot kill it inside a single safe window and must break off, reposition,
+   * and come back — the first time sector 1 asks for that. Unchanged this
+   * milestone: nothing in the sweep asked for it, since `greedy` takes 7-10% of
+   * its deaths from the heavy and `random` dies around 96s and never meets it.
+   * The 5-shot / 46-degree
    * spread widens the fan without speeding it up much (130 vs 120), so the answer
    * is still footwork and not reflexes.
    *

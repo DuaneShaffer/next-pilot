@@ -104,6 +104,15 @@ const SHOTS = [
     holdMs: 500,
   },
   {
+    // A cleared sector. Added after a tester finished sector 1 and was shown a
+    // death screen: nothing captured the extraction state, so no screenshot pass
+    // could have caught it.
+    name: 'extraction-report',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=28`,
+    waitFor: 'runState === "extracted"',
+    holdMs: 500,
+  },
+  {
     name: 'pause-menu',
     url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=12`,
     waitFor: 'enemyCount >= 2',

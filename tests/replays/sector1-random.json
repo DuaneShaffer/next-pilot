@@ -8,29 +8,29 @@
   "replay": "TlBSAQxSTkQ3MlFLTTNIVFb5LAQJARk1BREVEA8FCBkSERAZFFIFGgsVBhoMMQwZERIQCg0VFBASQRcaGDkVEglaFQAJGA8SDBALFAwaDxkXBBEWDBASGBcJEBEMABoRBAUQChERDhUHCQkSBRAYEgQBExgMCQURCBoFGBc6BwYSGgQUEQgRCQgBDxQXCAQWDhAPGgQVDRoMFg8ZDwkQGg0BEgQXUAYCHRIHUBAJFRENURERBRAPChoQDhUaGgVVFRoSFQgEBxgSFRcRCBoIEQRGFhgNAg8KBBkJFg4FEBUHWgUECBkUEA8YBgAFEQ5EEykLGg1GCgUFBhFIBloRBgwSBBoWEAoYEhYRVA5gEQAYFg4KEBkQABgYBhIKCQcACxkOBgUBEgYIFAgaDhgLAQwGBzYIBAoSFBYGVAkICAYEEBQ5BVITBAwIBFIGGhAFChUSChdaDAoWEgwVFhoQAAoBDBkTBhAZFgkMUhQKBAINGQwKDhIOEAsAFAIIFBgFBwkYFARBFRUQEQQVBgEXGhBRFQQRAhUGCRIPBBc2EhkhBAYUDUgJGAwJFkURGRgKBAk0Eg8WChAYGRQRBhYNAgQqFxYMARYKGBkLCRMYCwAXVA8RDRYJAR0aFBgWGg8KDRQOGBYFDBAVGBgZFxoIAA4WFUEREQkYGAUQFQ4QBRoQGAwaDQgHVQUWEAEYVAcYDBoLARMQCwkGFAYKBRIHEAUVDwoLGhICExoHFQYaDRYIUg8WBxALFRQGERkQEQgUExAsAgQEFBIFBRYGExYMVQoUCBIFBhZAEzAXQgRAEQQKAAsaCBUJBRdKCAIMBhgFDBoECA4FEwkREAsYCwQZAhMZDwETFg0VFRgJABYwCmULMRJBCRkMERUWDhgUQBYVBBYGES8IEBYEGhESBhkLFQYBFUoVCRARCxIVGgcQGCIJFRESHxoHFgUUDwENGg4AGAgSARQADgQSFRUaCgQTEggIDDQNOQwAExATcgxxBgkHBgwFCwgGFgsCCRAHAA0YBRkXEQ0WEBoXWBECGxQFFQsUBBUFGBMCFAAWCAYQBAkMFhQIChQGAhQJCggPBhcVCBERFAcWBxoPBg8JFhUGGRckBx7kntk",
   "expected": {
     "runState": "lost",
-    "hash": "4236759196e548b8",
+    "hash": "bcd915d1d05bde3e",
     "components": {
       "hull": "961fc88409caaf77",
-      "playerBullets": "ee2ffdfc23c67e2a",
-      "enemyBullets": "40b495ba78bf3447",
-      "enemies": "f574e6f82245b79a",
-      "stats": "ddb151e3e6ecfd06",
-      "run": "8fd8c9464c7ebbda"
+      "playerBullets": "5ded0a594a2e34f6",
+      "enemyBullets": "074473d2ee130167",
+      "enemies": "87d75a801faf34e8",
+      "stats": "2deea394a5a8e5bb",
+      "run": "9e27ce5fffe088b3"
     },
-    "cosmetic": "1cb7ce7e7f1b4096",
+    "cosmetic": "6335a17c879cf6e5",
     "counts": {
       "playerBullets": 4,
-      "enemyBullets": 15,
-      "enemies": 3,
+      "enemyBullets": 24,
+      "enemies": 4,
       "explosions": 2
     },
     "stats": {
       "tick": 5753,
       "waveIndex": 16,
-      "kills": 26,
-      "scrap": 120,
-      "shotsFired": 1123,
-      "hits": 201,
+      "kills": 25,
+      "scrap": 106,
+      "shotsFired": 1124,
+      "hits": 203,
       "damageTaken": 142
     },
     "incident": {
