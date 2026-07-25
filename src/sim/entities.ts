@@ -212,6 +212,29 @@ export interface WorldView {
   readonly cosmetic: Readonly<CosmeticState>
 
   /**
+   * M3 will add four members here, in the same change that implements them:
+   *
+   *   readonly inventory: readonly HeldItem[]
+   *   readonly activeInteractions: readonly ActiveInteraction[]
+   *   readonly resolvedStats: ResolvedStats
+   *   readonly pendingChoice: Readonly<PendingChoice> | null
+   *
+   * They are deliberately NOT declared yet. Adding a required member to this
+   * interface immediately breaks `World` and every consumer, so declaring the
+   * contract ahead of the implementation would mean committing a red tree — and a
+   * repository that does not compile is not a boundary anyone can safely resume
+   * from. The shapes below are designed and reviewable; wiring them is the first
+   * task of the implementation.
+   *
+   * Two obligations to carry into that change:
+   *   - `resolvedStats` is the single source the HUD reads. This project has
+   *     already shipped a panel advertising a fire rate the weapon did not have.
+   *   - while `pendingChoice` is non-null, time is paused: an item choice is a
+   *     decision, not a reflex test. Ticks still advance so a recorded input log
+   *     stays aligned, but nothing moves.
+   */
+
+  /**
    * Ticks of hitstop remaining. Non-zero means gameplay is frozen this tick.
    *
    * Hitstop is a *feel* feature that is really a *timing* feature: briefly
@@ -223,3 +246,64 @@ export interface WorldView {
    */
   readonly freezeTicks: number
 }
+
+// ---------------------------------------------------------------------------
+// items — runtime state
+// ---------------------------------------------------------------------------
+
+/** One item held by the pilot, in acquisition order. */
+export interface HeldItem {
+  defId: string
+  /** Tick it was acquired. Hook dispatch order follows this, so it is play-affecting. */
+  acquiredAtTick: number
+  /** Stacks, for items that can be taken more than once. */
+  count: number
+}
+
+/**
+ * An interaction currently active because both of its items are held.
+ *
+ * Resolved by the simulation and exposed so the HUD can show the player which of
+ * their combinations are live — UI rule 5 requires that a synergy is stated, and
+ * that obligation does not end once the item has been picked.
+ */
+export interface ActiveInteraction {
+  defId: string
+  text: string
+}
+
+/**
+ * One of the three options on the item-choice screen.
+ *
+ * `interactionText` is filled in by the simulation when this option would combine
+ * with something already held. It is the mechanism behind UI rule 5: the choice
+ * screen never has to work out for itself whether two items interact, so it cannot
+ * fail to mention one.
+ */
+export interface ItemOffer {
+  defId: string
+  /** Non-empty when taking this would activate an interaction with the build. */
+  interactionText: readonly string[]
+}
+
+/** Why the run is currently paused for a decision. */
+export type PendingChoiceKind = 'item' | 'shop' | 'work-order'
+
+export interface PendingChoice {
+  kind: PendingChoiceKind
+  offers: readonly ItemOffer[]
+  /** Scrap cost per option; all zero for a free reward. */
+  costs: readonly number[]
+  /** Work-order options, when kind is 'work-order'. */
+  workOrders: readonly string[]
+}
+
+/**
+ * Resolved stat values after folding every modifier.
+ *
+ * Exposed so the HUD reads the same numbers the simulation uses. The panel
+ * advertising a fire rate the weapon does not have is a bug this project has
+ * already shipped once, and reading resolved stats rather than recomputing them is
+ * how it stays fixed.
+ */
+export type ResolvedStats = Readonly<Record<string, number>>

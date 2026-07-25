@@ -132,3 +132,162 @@ export interface SectorDef {
   durationSeconds: number
   waves: WaveEntry[]
 }
+
+// ---------------------------------------------------------------------------
+// items
+// ---------------------------------------------------------------------------
+
+/**
+ * Numeric properties an item may modify.
+ *
+ * A closed union, deliberately. An open string key would let an item modify a
+ * stat nothing reads, which fails silently and is nearly impossible to notice —
+ * the item just does nothing and the player never knows.
+ */
+export type StatKey =
+  | 'fireIntervalTicks'
+  | 'projectileDamage'
+  | 'projectileSpeed'
+  | 'projectilesPerShot'
+  | 'hullSpeed'
+  | 'maxIntegrity'
+  | 'maxShield'
+  | 'scrapMultiplier'
+  | 'pickupRadius'
+  | 'focusFactor'
+
+/**
+ * How a modifier combines with the base value.
+ *
+ * THE FOLD ORDER IS FIXED AND MUST NOT CHANGE: every `add` is summed onto the
+ * base, then every `mul` is applied to that subtotal, then the stat's own bounds
+ * clamp the result. Additions before multiplications, never interleaved by
+ * acquisition order.
+ *
+ * Bounds live with the stat in the simulation, not on the modifier — a fire
+ * interval must never reach zero however many items stack, and that is a property
+ * of the stat rather than of whichever item happened to push it there.
+ *
+ * This matters more than it looks. If order followed pickup order, the same two
+ * items would produce different numbers depending on which was found first —
+ * builds would be unreproducible, two players on one seed could diverge, and
+ * "+2 damage" would mean something different every run. A fixed order costs
+ * nothing and removes a whole class of unexplainable bug reports.
+ */
+export type ModifierKind = 'add' | 'mul'
+
+export interface StatModifier {
+  stat: StatKey
+  kind: ModifierKind
+  value: number
+}
+
+/**
+ * Points in the simulation where an item may act.
+ *
+ * Hooks exist for *behavioural* items — split shot, chain lightning, retaliation
+ * — because a stat modifier cannot express them. Stats handle numbers; hooks
+ * handle behaviour. Anything expressible as a stat modifier should be one, since
+ * stats fold in a fixed order and hooks do not.
+ *
+ * DETERMINISM: hooks fire in item acquisition order, which is stable within a
+ * run and recorded in the replay. Any randomness a hook needs comes from the
+ * run's `items` stream — never a new Rng, never `Math.random()`.
+ */
+export type HookName =
+  /** After the weapon fires. Can append projectiles or alter the volley. */
+  | 'onFire'
+  /** A player projectile connected. Carries damage dealt and the target. */
+  | 'onProjectileHit'
+  /** An enemy died. Carries position and scrap value. */
+  | 'onEnemyKilled'
+  /** The hull took damage, after shields were applied. */
+  | 'onHullDamaged'
+  /** Scrap was collected. */
+  | 'onScrapCollected'
+  /** Every tick, for timers and windows. Keep these cheap. */
+  | 'onTick'
+
+/** Tiers drive offer weighting and the colour a name is drawn in. */
+export type ItemTier = 'common' | 'uncommon' | 'rare' | 'relic'
+
+/**
+ * Tags describe what an item is *about*, so interactions and offer weighting can
+ * reason about builds without hardcoding item ids.
+ */
+export type ItemTag =
+  | 'weapon'
+  | 'defence'
+  | 'economy'
+  | 'mobility'
+  | 'drone'
+  | 'explosive'
+  | 'electric'
+  | 'cursed'
+
+export interface ItemDef {
+  id: string
+  name: string
+  tier: ItemTier
+  tags: readonly ItemTag[]
+  /**
+   * What the item does, in one sentence, with real numbers.
+   *
+   * UI.md rule 4: mechanism first, flavour third and omittable. A player choosing
+   * between three items under time pressure needs the mechanism, not the joke.
+   * Write "+18% fire rate for 3 s after collecting scrap", not "runs on greed".
+   */
+  mechanism: string
+  /** Flavour. Always omittable, never load-bearing. */
+  flavour?: string
+  stats?: readonly StatModifier[]
+  /** Hooks this item implements. The sim looks up behaviour by item id. */
+  hooks?: readonly HookName[]
+  /** Relative offer weight within its tier. 0 means never offered randomly. */
+  weight?: number
+}
+
+/**
+ * An interaction between two items — FIRST-CLASS DATA, not an emergent accident.
+ *
+ * UI.md rule 5 requires that synergies are *stated* when offered. "Hidden
+ * synergies players discover" works for the 5% who read wikis; for everyone else
+ * an undiscoverable interaction is indistinguishable from no interaction, and the
+ * depth the design is paying for goes unused.
+ *
+ * Declaring them as data means the choice screen can look up every interaction
+ * between an offered item and the current build and name it, the interaction graph
+ * can be documented and tested for reachability, and a combination cannot exist
+ * that the game is unable to explain.
+ */
+export interface InteractionDef {
+  id: string
+  /** Exactly two items in M3. Ordering is irrelevant; matching is set-based. */
+  requires: readonly [string, string]
+  /** Stated verbatim on the choice screen. Mechanism, with numbers. */
+  text: string
+  /** Extra modifiers that apply only while both items are held. */
+  stats?: readonly StatModifier[]
+  /** Extra hooks that apply only while both items are held. */
+  hooks?: readonly HookName[]
+}
+
+/**
+ * What a work-order assignment rewards.
+ *
+ * NOTE ON SCOPE: docs/DESIGN.md describes work orders as a choice *between
+ * sectors*. Only one sector exists until M5, so between-sector choices have
+ * nowhere to go. M3 places them at assignment points *within* a sector instead —
+ * the mechanic, the interface, and the risk/reward reasoning are all identical,
+ * and they relocate to sector boundaries when there are boundaries to put them
+ * on. Building the choice UI now and the routing later is cheaper than the
+ * reverse.
+ */
+export type WorkOrderKind = 'supply' | 'hazard' | 'vault' | 'repair' | 'unlisted'
+
+export interface WorkOrderDef {
+  kind: WorkOrderKind
+  name: string
+  /** The trade-off in plain language. No icon-guessing — see UI.md rule 4. */
+  description: string
+}
