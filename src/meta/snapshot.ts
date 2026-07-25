@@ -21,8 +21,11 @@
  *    byte order, which would give a big-endian machine a different hash.
  *
  * 3. **Cosmetic state is hashed into its own component and left out of the
- *    regression hash.** Explosions and hit flashes exist for the renderer. If
- *    they fed the main hash, retuning an explosion's lifetime in M2 would fail
+ *    regression hash.** Explosions, hit flashes, the shake impulse, and the event
+ *    stream all exist for presentation. Hitstop and telegraph countdowns do NOT —
+ *    they spend real ticks and gate real attacks, so they are in the regression
+ *    hash with the rest of the gameplay state. If the cosmetic half fed the main
+ *    hash, retuning an explosion's lifetime or a shake impulse would fail
  *    every replay fixture for no reason, and the corpus would get re-recorded
  *    reflexively until it stopped meaning anything. The cosmetic digest is still
  *    computed and reported, so a divergence there is visible rather than hidden.
@@ -30,12 +33,14 @@
 
 import type {
   Bullet,
+  CosmeticState,
   EnemyBullet,
   EnemyInstance,
   Explosion,
   Hull,
   Incident,
   RunStats,
+  SimEvent,
   WorldView,
 } from '../sim/entities'
 
@@ -195,8 +200,13 @@ function hashEnemies(enemies: readonly EnemyInstance[]): string {
       .bool(e.alive)
       .num(e.originX)
       .num(e.holdY)
-    // hitFlashTicks deliberately omitted — entities.ts documents it as a
-    // render-only concern, so it belongs in the cosmetic digest, not this one.
+      // The telegraph countdown is gameplay: it is the player's reaction window,
+      // and a windup that fired a tick early is a difficulty change, not a visual
+      // one. entities.ts is explicit that this is sim state and not an animation.
+      .num(e.telegraphTicks)
+    // hitFlashTicks and telegraphTotal deliberately omitted — entities.ts documents
+    // both as render-only (a flash, and a progress denominator), so they belong in
+    // the cosmetic digest, not this one.
   }
   return h.digest()
 }
@@ -215,9 +225,26 @@ function hashStats(stats: Readonly<RunStats>): string {
   return h.digest()
 }
 
-function hashRun(runState: string, incident: Readonly<Incident> | null): string {
+/**
+ * Whole-run gameplay state: the outcome, the incident report, and the hitstop
+ * clock.
+ *
+ * `freezeTicks` is play-affecting — a freeze spends real ticks, so a run that
+ * froze differently diverges from that point on — and so it must be in the
+ * regression hash rather than in the cosmetic digest.
+ *
+ * It rides in this component rather than getting one of its own because
+ * `tools/playtest.ts` enumerates component names by hand when it writes a fixture.
+ * A component that tool does not know about would be silently absent from every
+ * recorded fixture, which is a worse outcome than a slightly less precise diff.
+ */
+function hashRun(
+  runState: string,
+  incident: Readonly<Incident> | null,
+  freezeTicks: number,
+): string {
   const h = new Hasher()
-  h.str(runState)
+  h.str(runState).num(freezeTicks)
   if (incident === null) {
     h.u32(0xffffffff)
   } else {
@@ -233,9 +260,25 @@ function hashRun(runState: string, incident: Readonly<Incident> | null): string 
   return h.digest()
 }
 
+/**
+ * Presentation state: explosions, flashes, the shake impulse, and this tick's
+ * events.
+ *
+ * All of it is sim-owned so playback looks identical, and all of it is kept out of
+ * the regression hash so that retuning an explosion, an impulse, or which events
+ * fire does not fail every fixture and get the corpus re-recorded reflexively.
+ * Hashed and reported all the same, so a divergence here is visible rather than
+ * invisible.
+ *
+ * Events are included because "which events fired, in what order, carrying what"
+ * is real sim output that nothing else in the digest would catch — an event
+ * emitted twice, or at the wrong position, is a bug the cosmetic digest can see.
+ */
 function hashCosmetic(
   explosions: readonly Explosion[],
   enemies: readonly EnemyInstance[],
+  cosmetic: Readonly<CosmeticState>,
+  events: readonly SimEvent[],
 ): string {
   const h = new Hasher()
   h.u32(explosions.length)
@@ -243,8 +286,49 @@ function hashCosmetic(
     h.num(e.x).num(e.y).num(e.age).num(e.lifetime).num(e.radius).str(e.kind)
   }
   h.u32(enemies.length)
-  for (const e of enemies) h.num(e.hitFlashTicks)
+  for (const e of enemies) h.num(e.hitFlashTicks).num(e.telegraphTotal)
+  h.num(cosmetic.shake)
+  h.u32(events.length)
+  for (const event of events) hashEvent(h, event)
   return h.digest()
+}
+
+/**
+ * Hash one event, field by field rather than through JSON.
+ *
+ * The switch is exhaustive on purpose: adding a variant to `SimEvent` without
+ * hashing it should fail the typecheck here, not pass silently and leave the new
+ * event outside the only thing that would notice it changing.
+ */
+function hashEvent(h: Hasher, event: SimEvent): void {
+  h.str(event.kind)
+  switch (event.kind) {
+    case 'player-shot':
+      h.num(event.x).num(event.y)
+      return
+    case 'enemy-hit':
+      h.num(event.x).num(event.y).num(event.damage).str(event.defId).bool(event.lethal)
+      return
+    case 'enemy-killed':
+      h.num(event.x).num(event.y).str(event.defId).num(event.scrap).bool(event.elite)
+      return
+    case 'enemy-shot':
+      h.num(event.x).num(event.y).str(event.defId)
+      return
+    case 'hull-hit':
+      h.num(event.x).num(event.y).num(event.damage).bool(event.absorbedByShield)
+      return
+    case 'shield-broken':
+    case 'hull-lost':
+      h.num(event.x).num(event.y)
+      return
+    case 'scrap-collected':
+      h.num(event.x).num(event.y).num(event.amount)
+      return
+    case 'wave-released':
+      h.num(event.index)
+      return
+  }
 }
 
 export interface EntityCounts {
@@ -269,9 +353,12 @@ export interface WorldDigest {
   readonly enemyBullets: string
   readonly enemies: string
   readonly stats: string
-  /** runState plus the incident report. */
+  /** runState, the incident report, and the hitstop clock. */
   readonly run: string
-  /** Explosions and hit flashes. Reported, but not part of `hash`. */
+  /**
+   * Explosions, hit flashes, telegraph totals, the shake impulse, and this tick's
+   * events. Reported, but not part of `hash`.
+   */
   readonly cosmetic: string
   readonly counts: EntityCounts
 }
@@ -295,7 +382,7 @@ export function digestWorld(view: WorldView): WorldDigest {
     enemyBullets: hashEnemyBullets(view.enemyBullets),
     enemies: hashEnemies(view.enemies),
     stats: hashStats(view.stats),
-    run: hashRun(view.runState, view.incident),
+    run: hashRun(view.runState, view.incident, view.freezeTicks),
   }
 
   // The seed is folded in so two runs that happen to reach identical state from
@@ -308,7 +395,7 @@ export function digestWorld(view: WorldView): WorldDigest {
   return {
     hash: combined.digest(),
     ...components,
-    cosmetic: hashCosmetic(view.explosions, view.enemies),
+    cosmetic: hashCosmetic(view.explosions, view.enemies, view.cosmetic, view.events),
     counts: {
       playerBullets: view.playerBullets.length,
       enemyBullets: view.enemyBullets.length,

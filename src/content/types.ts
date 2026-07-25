@@ -49,6 +49,18 @@ export interface EnemyWeaponDef {
    * something that shoots the instant it appears is unreactable, not difficult.
    */
   firstDelayTicks: number
+  /**
+   * Ticks of visible windup before each volley — the telegraph.
+   *
+   * The enemy commits to the shot for this long before it fires, and the renderer
+   * shows that commitment. This is the player's reaction window, so it is real
+   * simulation time rather than an animation played alongside the shot.
+   *
+   * Longer windups make an attack fairer and easier to read; shorter ones make it
+   * more dangerous. Zero means the shot arrives unannounced, which should be rare
+   * and deliberate — an unreadable attack is not difficulty, it is noise.
+   */
+  windupTicks: number
 }
 
 /** Movement tuning. Which fields matter depends on `movement`. */

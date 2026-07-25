@@ -9,9 +9,9 @@ ends permanently, the incident is filed, and someone else is issued your equipme
 
 ▶ **[Play it](https://duaneshaffer.github.io/next-pilot/)**
 
-> **Status: early development (M1).** Playable: seeded runs, seven enemy types, five movement and
-> five weapon patterns, shields, permadeath, and a filed incident report when you die. Sector 1 is
-> ~3 minutes of escalating waves. No items or meta-progression yet — see
+> **Status: early development (M2).** Playable: seeded runs, seven enemy types, telegraphed attacks,
+> hitstop and screen shake, synthesised audio, permadeath, a pause menu, and a filed incident report
+> when you die. Sector 1 is ~3 minutes of escalating waves. No items or meta-progression yet — see
 > [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Controls
@@ -23,6 +23,7 @@ ends permanently, the incident is filed, and someone else is issued your equipme
 | Focus  | `Ctrl` or `C` (slower, precise movement) |
 | Special| `X`, `K`, or `Shift`    |
 | Confirm| `Enter`                 |
+| Pause  | `P` or `Esc` (also the settings screen) |
 
 ## Running it locally
 
@@ -41,6 +42,7 @@ npm run dev        # http://localhost:5173
 | `npm run check`     | Contracts + typecheck + tests. The gate before committing. |
 | `npm run contracts` | Statically enforces the three architectural contracts |
 | `npm run playtest`  | Headless bot sweep — the balance oracle |
+| `npm run perf`      | Frame-time measurement in a real browser |
 | `npm run screenshot`| Build, then capture every screen for visual review |
 
 Append `?seed=K7F2-9XQM-3RTV` to replay an exact run, or `?screen=sortie` to skip the title screen.
@@ -50,7 +52,7 @@ simulation. All four exist for the verification harness and are just as usable b
 ## How it's built
 
 Vanilla TypeScript, Canvas2D, Vite. **No runtime dependencies**, no binary assets — ships are
-code-defined geometry and audio is synthesised at runtime. The production bundle is about 49KB (17KB gzipped).
+code-defined geometry and audio is synthesised at runtime. The production bundle is about 81KB (27KB gzipped).
 
 The design is built around one constraint: **the simulation is deterministic.** Same seed plus
 same inputs always produces the same run. It advances in fixed 60Hz ticks, draws all randomness

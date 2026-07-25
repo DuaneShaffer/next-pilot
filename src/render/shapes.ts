@@ -224,27 +224,44 @@ const SHAPES: Record<EnemyShape, ShapeSpec> = {
   },
 }
 
+type Rgb = readonly [number, number, number]
+
 /**
- * Blend two `#rrggbb` colours.
+ * Colour mixing in component space rather than on hex strings.
  *
- * Hand-rolled rather than pulled in: mixing two hex strings is nine lines, and
- * this project has no runtime dependencies.
+ * Deliberately not "mix two hex strings": the outline colour is now the result of
+ * up to two mixes (windup, then hit flash), and a string-based helper cannot take
+ * its own output as input without re-parsing something that is no longer hex. That
+ * was a real bug — the second mix parsed `rgb(...)` as base-16 and produced NaN,
+ * which paints nothing at all.
+ *
+ * Hand-rolled rather than pulled in: this project has no runtime dependencies.
  */
-function mixHex(a: string, b: string, t: number): string {
-  const clamped = t < 0 ? 0 : t > 1 ? 1 : t
-  const ai = parseInt(a.slice(1), 16)
-  const bi = parseInt(b.slice(1), 16)
-  const mix = (shift: number): number => {
-    const av = (ai >> shift) & 0xff
-    const bv = (bi >> shift) & 0xff
-    return Math.round(av + (bv - av) * clamped)
-  }
-  return `rgb(${mix(16)}, ${mix(8)}, ${mix(0)})`
+function parseHex(hex: string): Rgb {
+  const value = parseInt(hex.slice(1), 16)
+  return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff]
+}
+
+function mixRgb(a: Rgb, b: Rgb, t: number): Rgb {
+  const k = t < 0 ? 0 : t > 1 ? 1 : t
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * k),
+    Math.round(a[1] + (b[1] - a[1]) * k),
+    Math.round(a[2] + (b[2] - a[2]) * k),
+  ]
+}
+
+function rgbCss(rgb: Rgb): string {
+  return `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`
 }
 
 /** Near-white, used for the hit flash. Not `#FFFFFF`: pure white reads as a UI element. */
-const FLASH_EDGE = '#F4FBFF'
-const FLASH_FILL = '#6E8598'
+const FLASH_EDGE = parseHex('#F4FBFF')
+const FLASH_FILL = parseHex('#6E8598')
+const HOSTILE = parseHex(Palette.hostile)
+const HOSTILE_ELITE = parseHex(Palette.hostileElite)
+const HOSTILE_FILL = parseHex(Palette.hostileFill)
+const CAUTION = parseHex(Palette.caution)
 
 export interface EnemyShapeStyle {
   /** Reinforced variant. Doubled outline plus `hostileElite`. */
@@ -253,6 +270,16 @@ export interface EnemyShapeStyle {
   flash?: number
   /** Interpolated age in ticks, for shapes whose rotation is a recognition cue. */
   age?: number
+  /**
+   * 0..1 firing windup, 1 being the tick the shot leaves. Warms the outline
+   * toward `caution` and thickens it.
+   *
+   * The silhouette itself carrying the windup matters: the telegraph ring in
+   * effects.ts can be occluded or lost in a crowd, but a hull visibly tensing
+   * cannot be mistaken for a hull sitting still. `caution` rather than `danger`,
+   * because nothing has been fired yet — see UI.md rule 3.
+   */
+  charge?: number
 }
 
 /** How far above its centre a shape draws, in virtual units. Negative is up. */
@@ -276,13 +303,18 @@ export function drawEnemyShape(
   style: EnemyShapeStyle = {},
 ): void {
   const spec = SHAPES[shape]
-  const { elite = false, flash = 0, age = 0 } = style
+  const { elite = false, flash = 0, age = 0, charge = 0 } = style
 
-  const edge = elite ? Palette.hostileElite : Palette.hostile
+  const base = elite ? HOSTILE_ELITE : HOSTILE
+  // Windup warms the steel; the hit flash then whitens whatever that produced, so
+  // an enemy hit mid-windup still reads as hit.
+  let edge = charge > 0 ? mixRgb(base, CAUTION, Math.min(1, charge) * 0.85) : base
   // The flash brightens fill and edge but never alters the outline, so the
   // silhouette a player is tracking cannot change shape when it is hit.
-  const strokeColor = flash > 0 ? mixHex(edge, FLASH_EDGE, flash) : edge
-  const fillColor = flash > 0 ? mixHex(Palette.hostileFill, FLASH_FILL, flash * 0.9) : Palette.hostileFill
+  if (flash > 0) edge = mixRgb(edge, FLASH_EDGE, flash)
+  const strokeColor = rgbCss(edge)
+  const fillColor =
+    flash > 0 ? rgbCss(mixRgb(HOSTILE_FILL, FLASH_FILL, flash * 0.9)) : Palette.hostileFill
 
   ctx.save()
   ctx.translate(x, y)
@@ -292,7 +324,8 @@ export function drawEnemyShape(
   ctx.fillStyle = fillColor
   ctx.fill()
   ctx.strokeStyle = strokeColor
-  ctx.lineWidth = elite ? 2 : 1.5
+  // Thickening with the windup gives the cue a second, colour-blind-safe channel.
+  ctx.lineWidth = (elite ? 2 : 1.5) + 0.9 * Math.min(1, Math.max(0, charge))
   ctx.stroke()
 
   // Elite marking: a second, inset trace of the same outline. A doubled edge is

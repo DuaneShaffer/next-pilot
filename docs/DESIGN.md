@@ -125,6 +125,45 @@ Determinism is architectural (see `docs/ARCHITECTURE.md`), so these come nearly 
 - **No procedurally generated art.** Code-defined geometry, hand-tuned. Procedural visuals
   usually read as noise.
 
+## Audio
+
+Everything is synthesised at runtime from declarative layer recipes — no audio files, ever. The
+recipe *is* the asset, which is what keeps the "no binary assets" rule honest and makes the
+interesting parts (mapping, mixing, limiting) testable in Node.
+
+Tone: cold, mechanical, institutional. Relays, compressors, and load-bearing machinery — not
+musical stings. The player's gun is a relay closing, not a laser. A kill is decompression and
+venting. Losing the hull is a 900ms power-down.
+
+**The mix hierarchy is a legibility rule, not a taste one**, and it is treated exactly like colour
+in `docs/UI.md` rule 3: the important thing must be the loudest thing.
+
+```
+alarm 1.00  >  threat 0.95  >  impact 0.62  >  ui 0.60  >  pickup 0.50  >  weapon 0.26
+```
+
+Priorities mirror the gains, so the hierarchy decides not just what is quieter but *what gets
+dropped* when voices are contested. Both invariants are locked by tests, so changing the hierarchy
+requires deliberately changing a test.
+
+**The player fires 20 shots per second**, which is the hardest problem in the audio design: a
+full-volume click at 20Hz becomes unbearable within seconds, and pitched blips stack into a drone.
+Five mitigations together, because no single one suffices:
+
+1. The weapon is the *quietest* category in the game. It is confirmation that the trigger is held,
+   and the player already knows that.
+2. 25ms and mostly broadband — filtered clicks fatigue far less than pitched tones.
+3. Round-robin pitch and amplitude rotation rather than random draw, specifically because a random
+   draw occasionally repeats a value twice in a row, which is the artefact being avoided.
+4. A 3-voice cap with a 28ms retrigger gap — headroom for a future fire-rate item, not a throttle
+   on the base weapon.
+5. Lowest priority in the game, so the gun always loses a contested slot.
+
+Stereo pan is derived from playfield x and capped at ±0.55, so incoming fire is locatable without
+hard-panning, which is disorienting on headphones and vanishes on a phone speaker.
+
+**Nobody has heard any of this yet.** See the audio blind spot in `docs/VERIFICATION.md`.
+
 ## Mobile support — the decision, made early
 
 Planned, not a non-goal. The architecture already handles the hard part, and one constraint is

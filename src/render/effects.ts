@@ -22,7 +22,7 @@
 import type { Explosion, ExplosionKind } from '../sim/entities'
 import { Palette } from './palette'
 
-export type GlowTint = 'warm' | 'hot' | 'danger' | 'self' | 'elite'
+export type GlowTint = 'warm' | 'hot' | 'danger' | 'self' | 'elite' | 'smoke'
 
 const GLOW_RGB: Record<GlowTint, readonly [number, number, number]> = {
   /** Explosion body. */
@@ -32,6 +32,13 @@ const GLOW_RGB: Record<GlowTint, readonly [number, number, number]> = {
   danger: [255, 74, 56],
   self: [92, 224, 240],
   elite: [245, 185, 66],
+  /**
+   * The aftermath layer. Drawn additively at a very low alpha, which reads as
+   * dust caught in the blast light rather than as opaque smoke — the honest way
+   * to fake smoke in an additive pass, and it costs one more sprite instead of a
+   * second compositing pass.
+   */
+  smoke: [168, 150, 138],
 }
 
 /**
@@ -47,6 +54,15 @@ const SPRITE_PX = 96
  */
 const MAX_EXPLOSIONS_DRAWN = 24
 const MAX_SHARDS = 8
+
+/**
+ * Ticks of the initial hot flash on an explosion.
+ *
+ * 3 ticks is 50ms: brief and local, which is how rule 10 says to make something
+ * punchy. It is the single frame-ish stab of light that makes a kill land, and it
+ * is over before the eye can call it a flash. Nothing full-screen, ever.
+ */
+const EXPLOSION_FLASH_TICKS = 3
 
 /**
  * Ticks over which a hit flash decays for display purposes.
@@ -134,8 +150,11 @@ export function blitGlow(
  * would scatter differently, which breaks screenshot comparison and makes
  * effects flicker at frame rates above the tick rate. Hashing the explosion's
  * own position gives every blast its own stable, unrepeated scatter for free.
+ *
+ * Exported because screen shake and label drift need exactly the same property:
+ * scatter that is stable for a given input and reproducible in a screenshot.
  */
-function hash01(a: number, b: number): number {
+export function hash01(a: number, b: number): number {
   let h = Math.imul(Math.round(a * 8191) ^ Math.round(b * 131071), 0x27d4eb2d)
   h ^= h >>> 15
   h = Math.imul(h, 0x85ebca6b)
@@ -200,10 +219,29 @@ export function drawExplosions(
     const fade = (1 - t) * (1 - t)
     const style = EXPLOSION_STYLE[e.kind]
 
+    // Aftermath. Widest, dimmest, and the slowest to fade (linear, against the
+    // squared fade of the light), so the last third of the effect is a dispersing
+    // haze rather than a core that simply switches off. This is most of what
+    // separates a kill from a hit: the hit is over in seven ticks, the kill leaves
+    // something behind.
+    blitGlow(ctx, 'smoke', e.x, e.y, e.radius * (0.9 + 1.5 * easeOut(t)), (1 - t) * 0.17)
+
     blitGlow(ctx, style.body, e.x, e.y, e.radius * style.glowReach * (0.5 + 0.7 * t), fade * 0.95)
     // The core is the part that reads as "something was destroyed here", so it
     // is the brightest and the shortest-lived thing in the effect.
     blitGlow(ctx, style.core, e.x, e.y, e.radius * (0.72 - 0.34 * t), fade * 1.1)
+
+    // The stab of light at t=0. Bigger than the core and gone within three ticks,
+    // so the blast has an *onset* — without it the first frame of an explosion
+    // looks like the middle of one, and impact loses its edge.
+    const flashAge = e.age + alpha
+    if (flashAge < EXPLOSION_FLASH_TICKS) {
+      const f = 1 - flashAge / EXPLOSION_FLASH_TICKS
+      // Tapers to exactly zero at the cutoff. A flash that ends while still at a
+      // third of its brightness is a step change in luminance — small, but the
+      // kind of thing rule 10 is about, and it also just looks like a bug.
+      blitGlow(ctx, 'hot', e.x, e.y, e.radius * (1.7 - 0.8 * f), 0.9 * f)
+    }
 
     // Shockwave: a thinning ring is what gives an explosion a readable size and
     // a readable *end*. A pure fading blob just dims.
@@ -255,6 +293,115 @@ export function drawExplosions(
 export function hitFlashStrength(ticks: number): number {
   if (ticks <= 0) return 0
   return Math.min(1, ticks / HIT_FLASH_TICKS)
+}
+
+/** Shards thrown by one hit spark. Small on purpose — see `drawHitSpark`. */
+const SPARK_SHARDS = 4
+
+/**
+ * One non-lethal impact: a small directional spatter at the point of contact.
+ *
+ * The weight difference between this and an explosion is the point of the whole
+ * effect pass. A hit is ~12 units across, four shards, gone in seven ticks, and
+ * never brighter than half alpha. A kill is four layers, a shockwave, and lingers
+ * for half a second. If a player cannot tell those apart without reading the
+ * damage bar, the impact work has failed.
+ *
+ * Drawn in near-white rather than in `warm`: this is the player's own fire
+ * connecting, so it belongs to the cyan/white side of the palette. It is not
+ * `danger` — nothing here can hurt anyone.
+ *
+ * `t` is 0..1 through the spark's life, `power` scales size only. Caller owns the
+ * composite mode so a whole pass of sparks is one state change.
+ */
+export function drawHitSpark(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  t: number,
+  power: number,
+  seed: number,
+): void {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return
+  const clampedT = t < 0 ? 0 : t > 1 ? 1 : t
+  const fade = (1 - clampedT) * (1 - clampedT)
+  if (fade <= 0.02) return
+
+  const scale = 4.5 + 6 * (power < 0 ? 0 : power > 1 ? 1 : power)
+  blitGlow(ctx, 'self', x, y, scale * (0.9 + 0.6 * clampedT), fade * 0.45)
+
+  ctx.fillStyle = `rgba(223, 246, 251, ${(fade * 0.85).toFixed(3)})`
+  for (let i = 0; i < SPARK_SHARDS; i++) {
+    // Biased upward (the direction the player's fire travels) so the spatter reads
+    // as material coming off the target rather than a symmetrical puff.
+    const angle = hash01(seed * 13.1 + i * 7.7, seed * 3.3 - i * 5.1) * Math.PI * 2
+    const reach = scale * (0.5 + 1.4 * easeOut(clampedT)) * (0.6 + 0.4 * hash01(i, seed))
+    const size = 1.8 * (1 - clampedT) + 0.4
+    ctx.fillRect(
+      x + Math.cos(angle) * reach - size / 2,
+      y + Math.sin(angle) * reach * 0.75 - reach * 0.35 - size / 2,
+      size,
+      size,
+    )
+  }
+}
+
+/**
+ * The windup an attack is readable by.
+ *
+ * The mechanic only exists so the player can react *before* the shot, so the cue
+ * has to be unambiguous about two things: that something is coming, and how long
+ * is left. A progress arc answers both — its sweep *is* the remaining time, and it
+ * closes into a full circle on the tick the volley leaves the barrel.
+ *
+ * `caution`, never `danger`. Nothing has been fired yet, and rule 3 reserves
+ * `danger` for what can hurt you this instant; spending it on "something is about
+ * to happen" is how a player's threat reflex gets trained on noise. The difference
+ * between winding up and firing then reads twice over: amber ring closing, then
+ * saturated red round moving.
+ *
+ * Monotone from start to finish — it brightens and tightens, it never blinks, so a
+ * fast-firing enemy cannot become a strobe (rule 10).
+ */
+export function drawTelegraph(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  ticksRemaining: number,
+  total: number,
+): void {
+  if (ticksRemaining <= 0 || total <= 0) return
+  const raw = 1 - ticksRemaining / total
+  const p = raw < 0 ? 0 : raw > 1 ? 1 : raw
+
+  // Tightens toward the hull as it completes, so "committed" is a shape change and
+  // not only a brightness change.
+  const r = radius * (1.6 - 0.28 * p)
+
+  // Faint full circle behind the arc: without the track, a 40% arc is just a
+  // curve, and the player cannot tell how much windup is left.
+  ctx.strokeStyle = Palette.caution
+  ctx.globalAlpha = 0.13
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.arc(x, y, r, 0, Math.PI * 2)
+  ctx.stroke()
+
+  ctx.globalAlpha = 0.35 + 0.55 * p
+  ctx.lineWidth = 1.4 + 1.6 * p
+  ctx.beginPath()
+  // From the top, clockwise: the same direction as every other progress readout in
+  // the game.
+  ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + p * Math.PI * 2)
+  ctx.stroke()
+  ctx.globalAlpha = 1
+
+  // Charge building at the muzzle end. Quadratic in p, so almost all of it arrives
+  // in the last third of the windup — the "now" cue.
+  ctx.globalCompositeOperation = 'lighter'
+  blitGlow(ctx, 'elite', x, y + radius * 0.85, radius * (0.3 + 0.55 * p), 0.08 + 0.42 * p * p)
+  ctx.globalCompositeOperation = 'source-over'
 }
 
 /**

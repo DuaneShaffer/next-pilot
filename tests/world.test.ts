@@ -5,6 +5,7 @@ import { NEUTRAL_INPUT } from '../src/core/input'
 import { Rng } from '../src/core/rng'
 import { Playfield } from '../src/core/space'
 import { SHOTS_PER_SECOND, World } from '../src/sim/world'
+import { diffDigests, digestWorld, hashWorld } from '../src/meta/snapshot'
 
 /**
  * Build a reproducible input script.
@@ -54,6 +55,13 @@ const FIRING: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, 
  * would pass while enemies, projectiles, and death attribution diverged — which
  * is precisely the class of drift this is here to catch, since a replay fixture
  * is only as strong as what this function looks at.
+ *
+ * Deliberately includes the M2 feel state as well. Hitstop is timing, so a run
+ * that froze differently is a different run; telegraph countdowns gate real
+ * attacks; and the shake impulse and event stream are sim outputs that must be
+ * identical on playback even though the regression *hash* keeps them separate.
+ * This function is not the fixture hash and does not have to make that split — it
+ * is the stricter of the two on purpose.
  */
 function snapshot(world: World): string {
   return JSON.stringify({
@@ -66,36 +74,82 @@ function snapshot(world: World): string {
     enemies: world.enemies,
     explosions: world.explosions,
     stats: world.stats,
+    freezeTicks: world.freezeTicks,
+    cosmetic: world.cosmetic,
+    events: world.events,
   })
+}
+
+/**
+ * Run a script while watching for the states a single end-of-run snapshot cannot
+ * see, so the determinism tests can prove they actually exercised them.
+ */
+function runObserved(
+  seed: string,
+  script: readonly InputSnapshot[],
+): { world: World; frozenTicks: number; telegraphingTicks: number; peakShake: number; events: number } {
+  const world = new World(seed)
+  let frozenTicks = 0
+  let telegraphingTicks = 0
+  let peakShake = 0
+  let events = 0
+  for (const input of script) {
+    world.tick(input)
+    if (world.freezeTicks > 0) frozenTicks++
+    if (world.enemies.some((e) => e.telegraphTicks > 0)) telegraphingTicks++
+    peakShake = Math.max(peakShake, world.cosmetic.shake)
+    events += world.events.length
+  }
+  return { world, frozenTicks, telegraphingTicks, peakShake, events }
 }
 
 describe('World determinism', () => {
   it('reaches an identical state from the same seed and inputs', () => {
     const script = inputScript('DETERMIN1SM2', 3600)
-    const a = runScript('K7F29XQM3RTV', script)
-    const b = runScript('K7F29XQM3RTV', script)
-    expect(snapshot(a)).toEqual(snapshot(b))
+    const a = runObserved('K7F29XQM3RTV', script)
+    const b = runObserved('K7F29XQM3RTV', script)
+    expect(snapshot(a.world)).toEqual(snapshot(b.world))
 
     // The comparison is worthless unless the run actually exercised combat, so
     // assert the coverage the snapshot is supposed to be protecting.
-    expect(a.currentWaveIndex).toBeGreaterThan(0)
-    expect(a.stats.hits).toBeGreaterThan(0)
-    expect(a.stats.kills).toBeGreaterThan(0)
-    expect(a.stats.damageTaken).toBeGreaterThan(0)
-    expect(a.explosions.length + a.stats.kills).toBeGreaterThan(0)
+    expect(a.world.currentWaveIndex).toBeGreaterThan(0)
+    expect(a.world.stats.hits).toBeGreaterThan(0)
+    expect(a.world.stats.kills).toBeGreaterThan(0)
+    expect(a.world.stats.damageTaken).toBeGreaterThan(0)
+    expect(a.world.explosions.length + a.world.stats.kills).toBeGreaterThan(0)
+
+    // Including the M2 systems, which end-of-run state alone cannot evidence: a
+    // freeze and a telegraph both resolve back to zero, so without this the run
+    // could stop exercising either of them and this test would still pass.
+    expect(a.frozenTicks).toBeGreaterThan(0)
+    expect(a.telegraphingTicks).toBeGreaterThan(0)
+    expect(a.peakShake).toBeGreaterThan(0)
+    expect(a.events).toBeGreaterThan(0)
+    // Two runs that froze and telegraphed on different ticks would have diverged
+    // long before the final snapshot; comparing the counts names the cause.
+    expect(b.frozenTicks).toBe(a.frozenTicks)
+    expect(b.telegraphingTicks).toBe(a.telegraphingTicks)
+    expect(b.events).toBe(a.events)
+    expect(b.peakShake).toBe(a.peakShake)
   })
 
   it('reproduces a run that ends in death, incident included', () => {
     // A pilot who never moves and never shoots gets rammed. This is the only test
     // that covers the death path through the full sim rather than through
     // damage.ts directly, so it has to compare the filed incident too.
-    const a = runHeld('DEATHRUN1234', NEUTRAL_INPUT, 5400)
-    const b = runHeld('DEATHRUN1234', NEUTRAL_INPUT, 5400)
+    const a = runObserved('DEATHRUN1234', new Array(5400).fill(NEUTRAL_INPUT))
+    const b = runObserved('DEATHRUN1234', new Array(5400).fill(NEUTRAL_INPUT))
 
-    expect(a.runState).toBe('lost')
-    expect(a.incident).not.toBeNull()
-    expect(snapshot(a)).toEqual(snapshot(b))
-    expect(a.incident).toEqual(b.incident)
+    expect(a.world.runState).toBe('lost')
+    expect(a.world.incident).not.toBeNull()
+    expect(snapshot(a.world)).toEqual(snapshot(b.world))
+    expect(a.world.incident).toEqual(b.world.incident)
+    // The death itself freezes, and the freeze drains rather than pinning the
+    // world in a permanent hitstop behind the incident report.
+    expect(a.frozenTicks).toBeGreaterThan(0)
+    expect(b.frozenTicks).toBe(a.frozenTicks)
+    expect(a.world.freezeTicks).toBe(0)
+    expect(a.world.cosmetic.shake).toBe(0)
   })
 
   it('diverges when the inputs differ', () => {
@@ -238,5 +292,59 @@ describe('Weapon and projectiles', () => {
     // Spawned at the muzzle, then advanced one tick upward in the same call.
     const travelled = (bullet as { prevY: number; y: number }).prevY - (bullet as { y: number }).y
     expect(travelled).toBeCloseTo(620 * TICK_SECONDS, 6)
+  })
+})
+
+describe('what the regression hash is allowed to ignore', () => {
+  /**
+   * snapshot.ts splits play-affecting state from presentation, and the split is
+   * load-bearing in both directions. Asserted here rather than only in
+   * tests/replay.test.ts's synthetic worlds, because the question is whether the
+   * *real* World's new M2 fields land on the right side of the line.
+   */
+  /** Play until there is something on screen to mutate. */
+  function played(seed: string): World {
+    const world = new World(seed)
+    for (let i = 0; i < 900 && world.enemies.length === 0; i++) world.tick(FIRING)
+    expect(world.enemies.length).toBeGreaterThan(0)
+    return world
+  }
+
+  it('counts hitstop and telegraph state as play-affecting', () => {
+    const world = played('HASHFREEZE12')
+    const base = hashWorld(world)
+
+    // A freeze spends real ticks, so a run that froze differently diverges from
+    // that point on. If this ever stops failing a fixture, hitstop has been moved
+    // into the cosmetic digest and the corpus has stopped watching it.
+    world.freezeTicks += 1
+    expect(hashWorld(world)).not.toBe(base)
+    world.freezeTicks -= 1
+    expect(hashWorld(world)).toBe(base)
+
+    const enemy = world.enemies[0]
+    expect(enemy).toBeDefined()
+    // The windup is the player's reaction window: a volley arriving a tick early is
+    // a difficulty change, not a visual one.
+    ;(enemy as { telegraphTicks: number }).telegraphTicks += 1
+    expect(hashWorld(world)).not.toBe(base)
+  })
+
+  it('keeps the shake impulse and the event stream out of it', () => {
+    const world = played('HASHCOSMET12')
+    const base = digestWorld(world)
+
+    world.cosmetic.shake = world.cosmetic.shake === 0.5 ? 0.25 : 0.5
+    const shaken = digestWorld(world)
+    // Retuning an impulse must not fail every fixture — that is how a corpus gets
+    // rubber-stamped — but it must still be visible somewhere.
+    expect(shaken.hash).toBe(base.hash)
+    expect(shaken.cosmetic).not.toBe(base.cosmetic)
+    expect(diffDigests(base, shaken)).toEqual(['cosmetic'])
+
+    world.events.push({ kind: 'shield-broken', x: 1, y: 2 })
+    const noisy = digestWorld(world)
+    expect(noisy.hash).toBe(base.hash)
+    expect(noisy.cosmetic).not.toBe(shaken.cosmetic)
   })
 })

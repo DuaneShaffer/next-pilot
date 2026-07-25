@@ -26,10 +26,20 @@ import type { SectorDef } from './types'
  * tutorial", and the structural commitment behind that is: **every mechanic gets
  * a wave where it is the only thing on screen.**
  *
- * Total HP by 30s bucket: 288 / 414 / 790 / 1068 / 1368 / 1694. The jumps are
+ * Total HP by 30s bucket: 288 / 414 / 702 / 936 / 1280 / 1606. The jumps are
  * intentionally uneven — the big steps land where a new *kind* of threat is
  * introduced (turrets at 73s, the elite at 134s), not spread evenly, because a
  * smooth curve is felt as no curve at all.
+ *
+ * Those four later figures dropped in M2 (from 790 / 1068 / 1368 / 1694) purely
+ * because the turret's HP came down from 220 to 176 — see `enemies.ts` for why,
+ * and note that the turret's *output* went up at the same time. No wave was
+ * edited, and the curve stays monotone with the last bucket still over 5x the
+ * first, so `tests/content.test.ts` needed no rebalancing. This is worth stating
+ * plainly because spawned HP is only a proxy for difficulty: this milestone made
+ * the sector measurably harder for an unskilled pilot (`random`'s median run fell
+ * from 103.9s to 94.7s) while the proxy went *down*. If a future change moves the
+ * two in opposite directions again, trust the sweep, not the buckets.
  */
 export const SECTOR_ONE: SectorDef = {
   id: 'debris-shelf',
@@ -182,7 +192,7 @@ export const SECTOR_ONE: SectorDef = {
       atSeconds: 73,
       label: 'First turret',
       // Centre-screen, unavoidable, with only two skiffs alongside so the
-      // 2.75-second kill can actually be attempted. The turret's 1.25s
+      // 2.2-second kill can actually be attempted. The turret's 1.25s
       // first-volley delay plus ~3s of descent gives the player a long look at
       // it before it does anything.
       formations: [
@@ -243,7 +253,7 @@ export const SECTOR_ONE: SectorDef = {
     {
       atSeconds: 109,
       label: 'Twin turrets',
-      // 440 HP of things that will not leave, split to opposite flanks so the
+      // 352 HP of things that will not leave, split to opposite flanks so the
       // two spread cones overlap in the middle. This is the peak of the
       // pressure phase and the first wave where losing shield is expected.
       formations: [
@@ -319,7 +329,7 @@ export const SECTOR_ONE: SectorDef = {
       atSeconds: 147,
       label: 'Turret, escorts, skiff stream',
       // Three simultaneous demands: kill the turret, keep moving for the
-      // escorts, clear the column before it accumulates. 372 HP with bullets
+      // escorts, clear the column before it accumulates. 328 HP with bullets
       // from three sources.
       formations: [
         { enemyId: 'turret', count: 1, pattern: 'line', atXFraction: 0.36 },

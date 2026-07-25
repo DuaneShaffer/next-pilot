@@ -78,6 +78,20 @@ export interface EnemyInstance extends Interpolated {
   alive: boolean
   /** Counts down after taking damage, for the hit flash. Render-only concern. */
   hitFlashTicks: number
+  /**
+   * Ticks of firing windup remaining, counting down to the shot.
+   *
+   * This is the telegraph. Every attack must be readable *before* it lands, so
+   * the enemy visibly commits for `windupTicks` before a volley leaves the
+   * barrel. It is simulation state rather than a render animation because the
+   * windup is real: it is the window in which the player is allowed to react,
+   * and a purely cosmetic version would let the shot arrive without one.
+   *
+   * 0 means not currently winding up.
+   */
+  telegraphTicks: number
+  /** Total windup for the current volley, so render can show progress. */
+  telegraphTotal: number
   /** Anchor values a movement script needs (sine origin, hover target, ...). */
   originX: number
   holdY: number
@@ -113,6 +127,52 @@ export interface Incident {
   kills: number
 }
 
+/**
+ * Something that happened during a tick, for presentation to react to.
+ *
+ * Audio, damage numbers, and impact effects all need to know *when* something
+ * happened, not just that state changed. Diffing state per frame cannot recover
+ * that: two enemies dying in one tick, or a hit and a kill on the same target,
+ * are indistinguishable after the fact.
+ *
+ * CRITICAL — these are cleared every tick, so they must be drained per *tick*,
+ * not per rendered frame. A frame can span several ticks (and does span many
+ * under `?ff=`), so a per-frame drain silently discards all but the last tick's
+ * events, which shows up as audio dropping out under load.
+ *
+ * Events carry positions so presentation never has to look up an entity that the
+ * sim may already have reaped.
+ */
+export type SimEvent =
+  | { kind: 'player-shot'; x: number; y: number }
+  | { kind: 'enemy-hit'; x: number; y: number; damage: number; defId: string; lethal: boolean }
+  | { kind: 'enemy-killed'; x: number; y: number; defId: string; scrap: number; elite: boolean }
+  | { kind: 'enemy-shot'; x: number; y: number; defId: string }
+  | { kind: 'hull-hit'; x: number; y: number; damage: number; absorbedByShield: boolean }
+  | { kind: 'shield-broken'; x: number; y: number }
+  | { kind: 'hull-lost'; x: number; y: number }
+  | { kind: 'scrap-collected'; x: number; y: number; amount: number }
+  | { kind: 'wave-released'; index: number }
+
+/**
+ * Cosmetic state the simulation owns.
+ *
+ * It lives in the sim so a replay looks identical when played back, and it is
+ * hashed into a separate digest that the regression corpus deliberately excludes —
+ * otherwise tuning an explosion would fail every fixture and the corpus would get
+ * rubber-stamped into meaninglessness.
+ */
+export interface CosmeticState {
+  /**
+   * Screen-shake energy, 0..1, decaying each tick.
+   *
+   * The *impulse* is sim state so playback matches; the resulting pixel offset is
+   * computed by the renderer, which is free to scale or ignore it entirely when
+   * the player has reduced motion enabled.
+   */
+  shake: number
+}
+
 export interface RunStats {
   tick: number
   shotsFired: number
@@ -145,4 +205,21 @@ export interface WorldView {
   readonly explosions: readonly Explosion[]
   readonly stats: Readonly<RunStats>
   readonly incident: Readonly<Incident> | null
+
+  /** Events from the most recent tick. Drain per tick — see SimEvent. */
+  readonly events: readonly SimEvent[]
+
+  readonly cosmetic: Readonly<CosmeticState>
+
+  /**
+   * Ticks of hitstop remaining. Non-zero means gameplay is frozen this tick.
+   *
+   * Hitstop is a *feel* feature that is really a *timing* feature: briefly
+   * freezing everything on a solid hit is what makes impact feel like contact
+   * rather than overlap. It therefore lives in the simulation and consumes real
+   * ticks. Implementing it by skipping render frames instead would look identical
+   * on screen while making the run non-reproducible, and would silently
+   * invalidate every recorded replay.
+   */
+  readonly freezeTicks: number
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { TICK_HZ } from '../src/core/loop'
 import { Rng } from '../src/core/rng'
 import { PLAYFIELD_H, PLAYFIELD_W, Playfield } from '../src/core/space'
 import type { InputSnapshot } from '../src/core/input'
@@ -11,16 +12,25 @@ import type {
   WaveEntry,
 } from '../src/content/types'
 import { ENEMIES } from '../src/content/enemies'
+import { SECTOR_ONE } from '../src/content/sectors'
 import { circlesOverlap, pointInCircle, segmentHitsCircle } from '../src/sim/collision'
 import type { DamageContext } from '../src/sim/damage'
 import {
+  addShake,
   applyEnemyDamage,
   applyHullDamage,
+  extendFreeze,
+  freezeForEnemyHit,
+  freezeForHullHit,
+  FREEZE_MAX_TICKS,
   HULL_COLLISION_RADIUS,
   HULL_INVULN_TICKS,
+  shakeForEnemyHit,
+  shakeForHullHit,
   tickHullInvulnerability,
 } from '../src/sim/damage'
 import {
+  ageEnemyCosmetics,
   createEnemy,
   fireDeathBurst,
   isEnemyOutOfPlay,
@@ -35,7 +45,7 @@ import {
   spawnPlayerBullet,
 } from '../src/sim/projectiles'
 import { Spawner } from '../src/sim/spawner'
-import type { Bullet, EnemyInstance } from '../src/sim/entities'
+import type { Bullet, EnemyInstance, SimEvent } from '../src/sim/entities'
 import { World } from '../src/sim/world'
 
 // --- fixtures ---------------------------------------------------------------
@@ -46,6 +56,7 @@ const UNARMED: EnemyWeaponDef = {
   bulletSpeed: 0,
   damage: 0,
   firstDelayTicks: 0,
+  windupTicks: 0,
 }
 
 /**
@@ -381,6 +392,11 @@ describe('movement kinds', () => {
 
 // --- weapons ----------------------------------------------------------------
 
+/**
+ * These defs all set `windupTicks: 0`, which keeps the assertions about *what* a
+ * volley looks like independent of *when* it leaves. The windup has its own
+ * describe block below, where the timing is the subject rather than the noise.
+ */
 describe('enemy weapons', () => {
   it('never fires when unarmed', () => {
     const def = makeDef({ weapon: UNARMED })
@@ -390,7 +406,7 @@ describe('enemy weapons', () => {
 
   it('waits firstDelayTicks before the first volley, then keeps interval', () => {
     const def = makeDef({
-      weapon: { kind: 'aimed', intervalTicks: 20, bulletSpeed: 100, damage: 3, firstDelayTicks: 30 },
+      weapon: { kind: 'aimed', intervalTicks: 20, bulletSpeed: 100, damage: 3, firstDelayTicks: 30, windupTicks: 0 },
     })
     const e = createEnemy(def, 100, 200)
 
@@ -408,7 +424,7 @@ describe('enemy weapons', () => {
     // view arrives already shooting.
     const def = makeDef({
       radius: 10,
-      weapon: { kind: 'aimed', intervalTicks: 20, bulletSpeed: 100, damage: 3, firstDelayTicks: 30 },
+      weapon: { kind: 'aimed', intervalTicks: 20, bulletSpeed: 100, damage: 3, firstDelayTicks: 30, windupTicks: 0 },
     })
     const e = createEnemy(def, 100, -40)
     expect(fireFor(e, def, 300)).toHaveLength(0)
@@ -421,7 +437,7 @@ describe('enemy weapons', () => {
 
   it('aimed fires one shot at the hull, at exactly bulletSpeed', () => {
     const def = makeDef({
-      weapon: { kind: 'aimed', intervalTicks: 60, bulletSpeed: 120, damage: 3, firstDelayTicks: 10 },
+      weapon: { kind: 'aimed', intervalTicks: 60, bulletSpeed: 120, damage: 3, firstDelayTicks: 10, windupTicks: 0 },
     })
     const e = createEnemy(def, 100, 200)
     const shots = fireFor(e, def, 10, 100, 600)
@@ -439,7 +455,7 @@ describe('enemy weapons', () => {
 
   it('aimed leads nothing — it aims where the hull is at fire time', () => {
     const def = makeDef({
-      weapon: { kind: 'aimed', intervalTicks: 30, bulletSpeed: 100, damage: 3, firstDelayTicks: 1 },
+      weapon: { kind: 'aimed', intervalTicks: 30, bulletSpeed: 100, damage: 3, firstDelayTicks: 1, windupTicks: 0 },
     })
     const e = createEnemy(def, 100, 100)
     const left = fireFor(e, def, 1, 0, 200)
@@ -458,6 +474,7 @@ describe('enemy weapons', () => {
         count: 5,
         spreadDegrees: 40,
         firstDelayTicks: 5,
+      windupTicks: 0,
       },
     })
     const e = createEnemy(def, 100, 200)
@@ -485,6 +502,7 @@ describe('enemy weapons', () => {
         count: 1,
         spreadDegrees: 40,
         firstDelayTicks: 1,
+      windupTicks: 0,
       },
     })
     const e = createEnemy(def, 100, 200)
@@ -503,6 +521,7 @@ describe('enemy weapons', () => {
         damage: 5,
         count: 8,
         firstDelayTicks: 4,
+      windupTicks: 0,
       },
     })
 
@@ -541,6 +560,7 @@ describe('enemy weapons', () => {
         bulletSpeed: 70,
         damage: 8,
         firstDelayTicks: 6,
+      windupTicks: 0,
       },
     })
     const e = createEnemy(def, 100, 100)
@@ -820,6 +840,7 @@ describe('projectile caps', () => {
         damage: 1,
         count: 40,
         firstDelayTicks: 1,
+      windupTicks: 0,
       },
       deathBurst: { count: 40, bulletSpeed: 60, damage: 1 },
     })
@@ -928,5 +949,604 @@ describe('combat in the world', () => {
     const world = new World('HITBOXHITBO1')
     expect(world.hull.radius).toBe(HULL_COLLISION_RADIUS)
     expect(world.hull.radius).toBeLessThan(11)
+  })
+})
+
+// --- telegraphs -------------------------------------------------------------
+
+/** A def whose windup is the thing under test. */
+function telegraphDef(over: Partial<EnemyWeaponDef> = {}): EnemyDef {
+  return makeDef({
+    weapon: {
+      kind: 'aimed',
+      intervalTicks: 20,
+      bulletSpeed: 100,
+      damage: 3,
+      firstDelayTicks: 30,
+      windupTicks: 12,
+      ...over,
+    },
+  })
+}
+
+/**
+ * Tick a weapon one tick at a time, recording the tick each volley left on and
+ * the telegraph countdown as observed after every tick.
+ */
+function fireTimeline(
+  e: EnemyInstance,
+  def: EnemyDef,
+  ticks: number,
+): { shotTicks: number[]; telegraph: number[]; shots: AttributedEnemyBullet[] } {
+  const shots: AttributedEnemyBullet[] = []
+  const shotTicks: number[] = []
+  const telegraph: number[] = []
+  for (let t = 1; t <= ticks; t++) {
+    const before = shots.length
+    updateEnemyWeapon(e, def, 100, 600, shots)
+    if (shots.length > before) shotTicks.push(t)
+    telegraph.push(e.telegraphTicks)
+  }
+  return { shotTicks, telegraph, shots }
+}
+
+describe('enemy telegraphs', () => {
+  it('commits for exactly windupTicks before every volley', () => {
+    const def = telegraphDef()
+    const e = createEnemy(def, 100, 200)
+    const { shotTicks, telegraph } = fireTimeline(e, def, 130)
+
+    // firstDelayTicks 30, then a 12-tick windup: the first shot lands on tick 42.
+    expect(shotTicks[0]).toBe(42)
+    // The countdown is visible for all 12 ticks before it, one step per tick, and
+    // is zero on the tick the shot leaves. That window is the whole feature: it is
+    // the time the player has to react, so it is asserted tick by tick rather than
+    // as "greater than zero at some point".
+    for (let i = 0; i < 12; i++) {
+      expect(telegraph[30 + i - 1], `telegraph at tick ${30 + i}`).toBe(12 - i)
+    }
+    expect(telegraph[41]).toBe(0)
+
+    // And every later volley is preceded by the same windup, not just the first.
+    for (const shotTick of shotTicks) {
+      for (let back = 1; back <= 12; back++) {
+        expect(telegraph[shotTick - back - 1], `telegraph ${back} ticks before ${shotTick}`).toBe(back)
+      }
+    }
+  })
+
+  it('reports the windup total so render can show progress', () => {
+    const def = telegraphDef()
+    const e = createEnemy(def, 100, 200)
+    fireFor(e, def, 35)
+    expect(e.telegraphTicks).toBeGreaterThan(0)
+    expect(e.telegraphTotal).toBe(12)
+
+    // Cleared once the volley is away, so nothing draws a stale progress bar over
+    // an enemy that is no longer committed to anything.
+    expect(fireFor(e, def, 7)).toHaveLength(1)
+    expect(e.telegraphTicks).toBe(0)
+    expect(e.telegraphTotal).toBe(0)
+  })
+
+  it('keeps intervalTicks as the shot-to-shot period', () => {
+    // Charging the windup on top of the interval would have cut every armed
+    // enemy's rate of fire — a balance change wearing a feel change's clothes.
+    const def = telegraphDef()
+    const e = createEnemy(def, 100, 200)
+    const { shotTicks } = fireTimeline(e, def, 200)
+    expect(shotTicks.length).toBeGreaterThan(4)
+    for (let i = 1; i < shotTicks.length; i++) {
+      expect((shotTicks[i] as number) - (shotTicks[i - 1] as number)).toBe(20)
+    }
+  })
+
+  it('starts no windup while still above the top edge', () => {
+    // A telegraph the player cannot see is not a telegraph. The cadence clock and
+    // the windup both wait for the enemy to be visible.
+    const def = telegraphDef()
+    const e = createEnemy(def, 100, -40)
+    const offScreen = fireTimeline(e, def, 300)
+    expect(offScreen.shots).toHaveLength(0)
+    expect(Math.max(...offScreen.telegraph)).toBe(0)
+    expect(e.fireCooldown).toBe(30)
+
+    // firstDelayTicks still counts from the moment it becomes visible, and the
+    // windup follows it.
+    e.y = 200
+    const visible = fireTimeline(e, def, 60)
+    expect(visible.shotTicks[0]).toBe(42)
+  })
+
+  it('fires nothing when killed mid-windup', () => {
+    const def = telegraphDef()
+    const e = createEnemy(def, 100, 200)
+    expect(fireFor(e, def, 35)).toHaveLength(0)
+    expect(e.telegraphTicks).toBeGreaterThan(0)
+
+    // Killing something that has committed to a shot has to be a reward, so the
+    // volley it was winding up must never arrive.
+    expect(applyEnemyDamage(e, 999)).toBe(true)
+    expect(fireFor(e, def, 300)).toHaveLength(0)
+  })
+
+  it('fires without warning only when content asks for windupTicks 0', () => {
+    const def = telegraphDef({ windupTicks: 0 })
+    const e = createEnemy(def, 100, 200)
+    const { shotTicks, telegraph } = fireTimeline(e, def, 60)
+    expect(shotTicks[0]).toBe(30)
+    expect(Math.max(...telegraph)).toBe(0)
+  })
+
+  it('starts every enemy un-telegraphed', () => {
+    const e = createEnemy(telegraphDef(), 100, 200)
+    expect(e.telegraphTicks).toBe(0)
+    expect(e.telegraphTotal).toBe(0)
+  })
+})
+
+// --- the impact budget ------------------------------------------------------
+
+describe('impact budget', () => {
+  it('scales the freeze with damage dealt', () => {
+    // A single bullet is 4 damage: deliberately not worth a tick. At 20 shots a
+    // second, freezing on every hit would leave the game frozen a third of the
+    // time.
+    expect(freezeForEnemyHit(4, false)).toBe(0)
+    expect(freezeForEnemyHit(8, false)).toBe(1)
+    expect(freezeForEnemyHit(24, false)).toBeGreaterThan(freezeForEnemyHit(8, false))
+    expect(shakeForEnemyHit(24, false)).toBeGreaterThan(shakeForEnemyHit(4, false))
+  })
+
+  it('freezes longer for a kill than for a glancing hit', () => {
+    expect(freezeForEnemyHit(4, true)).toBeGreaterThan(freezeForEnemyHit(4, false))
+    expect(shakeForEnemyHit(4, true)).toBeGreaterThan(shakeForEnemyHit(4, false))
+  })
+
+  it('caps every freeze, however large the damage', () => {
+    // A long freeze does not read as weight, it reads as a hang.
+    expect(freezeForEnemyHit(1e9, true)).toBe(FREEZE_MAX_TICKS)
+    expect(freezeForHullHit(1e9, false)).toBe(FREEZE_MAX_TICKS)
+    expect(freezeForHullHit(4, true)).toBe(FREEZE_MAX_TICKS)
+    expect(FREEZE_MAX_TICKS).toBeLessThanOrEqual(10)
+  })
+
+  it('keeps every shake impulse inside 0..1', () => {
+    for (const damage of [0, 1, 4, 12, 40, 400, 1e9]) {
+      for (const flag of [false, true]) {
+        for (const impulse of [shakeForEnemyHit(damage, flag), shakeForHullHit(damage, flag)]) {
+          expect(impulse).toBeGreaterThanOrEqual(0)
+          expect(impulse).toBeLessThanOrEqual(1)
+        }
+      }
+    }
+  })
+
+  it('treats taking a hit as a bigger event than landing one', () => {
+    expect(freezeForHullHit(8, false)).toBeGreaterThan(freezeForEnemyHit(8, true))
+    expect(shakeForHullHit(8, false)).toBeGreaterThan(shakeForEnemyHit(8, true))
+  })
+
+  it('takes the longest freeze rather than the sum of them', () => {
+    // Four enemies dying on one tick is one impact, not four. Summing is the
+    // failure mode that stops the game dead on a lucky tick, and the player's
+    // weapon lands at most one hit per tick, so the sim alone would never show it.
+    expect(extendFreeze(3, 3)).toBe(3)
+    expect(extendFreeze(3, 5)).toBe(5)
+    expect(extendFreeze(5, 3)).toBe(5)
+
+    // However many grants arrive, the total cannot grow past the cap...
+    let freeze = 0
+    for (let i = 0; i < 100; i++) freeze = extendFreeze(freeze, 3)
+    expect(freeze).toBe(3)
+    // ...and no single grant can either.
+    expect(extendFreeze(0, 1000)).toBe(FREEZE_MAX_TICKS)
+    expect(extendFreeze(FREEZE_MAX_TICKS, 1000)).toBe(FREEZE_MAX_TICKS)
+    expect(extendFreeze(0, -5)).toBe(0)
+  })
+
+  it('accumulates shake but never past full strength', () => {
+    expect(addShake(0.2, 0.3)).toBeCloseTo(0.5, 12)
+    expect(addShake(0.9, 0.9)).toBe(1)
+    expect(addShake(1, 1)).toBe(1)
+    expect(addShake(0, -1)).toBe(0)
+  })
+
+  it('ignores damage that cannot have landed', () => {
+    expect(freezeForEnemyHit(0, false)).toBe(0)
+    expect(freezeForEnemyHit(-5, false)).toBe(0)
+    expect(freezeForEnemyHit(Number.NaN, false)).toBe(0)
+    expect(shakeForEnemyHit(Number.NaN, false)).toBeGreaterThanOrEqual(0)
+  })
+})
+
+// --- hitstop, events, and shake through the world ---------------------------
+
+/** Every event emitted over `ticks` ticks, paired with the tick it came from. */
+function eventLog(
+  world: World,
+  input: InputSnapshot,
+  ticks: number,
+): Array<{ tick: number; event: SimEvent }> {
+  const log: Array<{ tick: number; event: SimEvent }> = []
+  for (let i = 0; i < ticks; i++) {
+    world.tick(input)
+    for (const event of world.events) log.push({ tick: world.stats.tick, event })
+  }
+  return log
+}
+
+function eventsOfKind<K extends SimEvent['kind']>(
+  log: Array<{ tick: number; event: SimEvent }>,
+  kind: K,
+): Array<Extract<SimEvent, { kind: K }>> {
+  return log
+    .filter((entry) => entry.event.kind === kind)
+    .map((entry) => entry.event as Extract<SimEvent, { kind: K }>)
+}
+
+/** Put a real def in front of the hull. Fabricated defs are not in ENEMIES. */
+function withEnemy(world: World, id: string, x: number, y: number): EnemyDef {
+  const def = ENEMIES[id] as EnemyDef
+  expect(def).toBeDefined()
+  world.enemies.push(createEnemy(def, x, y))
+  return def
+}
+
+/** Everything a frozen tick must leave untouched. */
+function gameplaySnapshot(world: World): string {
+  return JSON.stringify({
+    hull: world.hull,
+    playerBullets: world.playerBullets,
+    enemyBullets: world.enemyBullets,
+    enemies: world.enemies.map((e) => ({ ...e, hitFlashTicks: 0 })),
+    waveIndex: world.currentWaveIndex,
+    shotsFired: world.stats.shotsFired,
+    hits: world.stats.hits,
+    kills: world.stats.kills,
+  })
+}
+
+const DRIFTING: InputSnapshot = { moveX: 1, moveY: -1, fire: true, special: false, focus: false }
+
+/** Tick until the world is frozen, or give up. Returns the tick it froze on. */
+function tickUntilFrozen(world: World, input: InputSnapshot, max: number): number {
+  for (let i = 0; i < max; i++) {
+    world.tick(input)
+    if (world.freezeTicks > 0) return world.stats.tick
+  }
+  return -1
+}
+
+describe('hitstop', () => {
+  it('freezes gameplay while consuming real ticks, then resumes', () => {
+    const world = new World('H1TST0P12345')
+    withEnemy(world, 'hauler', world.hull.x, world.hull.y - 140)
+
+    // A kill is the event that earns a freeze; a single 4-damage hit does not.
+    // Held still and firing, so the shots actually connect.
+    const frozeOn = tickUntilFrozen(world, FIRING, 140)
+    expect(frozeOn).toBeGreaterThan(0)
+    expect(world.stats.kills).toBe(1)
+
+    const granted = world.freezeTicks
+    expect(granted).toBeGreaterThan(0)
+    expect(granted).toBeLessThanOrEqual(FREEZE_MAX_TICKS)
+
+    // Now ask for movement and fire. Neither may happen while frozen: input is not
+    // buffered, the tick is simply spent.
+    for (let i = 0; i < granted; i++) {
+      const before = gameplaySnapshot(world)
+      const tickBefore = world.stats.tick
+      const explosionAges = world.explosions.map((x) => x.age)
+
+      world.tick(DRIFTING)
+
+      // Gameplay held: the hull did not move, nothing fired, nothing advanced.
+      expect(gameplaySnapshot(world), `frozen tick ${i + 1}`).toEqual(before)
+      // ...but the tick was really spent, which is what keeps one input byte
+      // meaning one tick and a replay reproducible.
+      expect(world.stats.tick).toBe(tickBefore + 1)
+      expect(world.freezeTicks).toBe(granted - i - 1)
+      // ...and presentation kept breathing, so the freeze reads as impact and not
+      // as a hang.
+      expect(world.explosions.map((x) => x.age)).toEqual(explosionAges.map((a) => a + 1))
+    }
+
+    expect(world.freezeTicks).toBe(0)
+    const hullBefore = { x: world.hull.x, y: world.hull.y }
+    const shotsBefore = world.stats.shotsFired
+    world.tick(DRIFTING)
+    expect(world.hull.x).toBeGreaterThan(hullBefore.x)
+    expect(world.hull.y).toBeLessThan(hullBefore.y)
+    // The weapon's cadence was frozen with everything else rather than banking
+    // ticks, so it resumes rather than catching up: the shot arrives within one
+    // fire interval of the thaw, not on the first tick after it.
+    world.tick(DRIFTING)
+    world.tick(DRIFTING)
+    expect(world.stats.shotsFired).toBeGreaterThan(shotsBefore)
+  })
+
+  it('never exceeds its cap, and no freeze can be extended by another', () => {
+    // The cap is enforced at the point of application, and because no collision or
+    // firing phase runs while frozen, nothing can land a hit to extend a freeze.
+    // A run of consecutive frozen ticks longer than the cap would mean one of those
+    // two properties broke — most likely by summing freezes instead of taking the
+    // longest.
+    const world = new World('CAPFREEZE123')
+    let consecutive = 0
+    let longest = 0
+    let frozenTicks = 0
+    for (let i = 0; i < 6000; i++) {
+      world.tick(FIRING)
+      expect(world.freezeTicks).toBeLessThanOrEqual(FREEZE_MAX_TICKS)
+      expect(world.freezeTicks).toBeGreaterThanOrEqual(0)
+      if (world.freezeTicks > 0) {
+        frozenTicks++
+        consecutive++
+        longest = Math.max(longest, consecutive)
+      } else {
+        consecutive = 0
+      }
+    }
+    // The assertion is worthless if the run never froze.
+    expect(frozenTicks).toBeGreaterThan(20)
+    expect(longest).toBeLessThanOrEqual(FREEZE_MAX_TICKS)
+  })
+
+  it('spends a small enough share of a sortie to stay a garnish', () => {
+    // Hitstop trades away real playing time. Measured rather than assumed: if a
+    // retune ever pushes this past a few percent, the game is stuttering.
+    const world = new World('FREEZESHARE1')
+    let frozen = 0
+    const ticks = 6000
+    for (let i = 0; i < ticks; i++) {
+      world.tick(FIRING)
+      if (world.freezeTicks > 0) frozen++
+    }
+    expect(frozen / ticks).toBeLessThan(0.08)
+  })
+
+  it('delays a wave release by at most one freeze, and never drops one', () => {
+    // The wave clock is stats.tick, which advances through a freeze, and Spawner
+    // releases everything due at or *before* the tick it is handed. So a freeze can
+    // postpone a release but can never skip it. Implementing hitstop by not
+    // advancing the tick counter would break this immediately.
+    const world = new World('FREEZEWAVES1')
+    const scheduled = [...SECTOR_ONE.waves]
+      .sort((a, b) => a.atSeconds - b.atSeconds)
+      .map((wave) => Math.round(wave.atSeconds * TICK_HZ))
+
+    let froze = false
+    const releases: number[] = []
+    for (let i = 0; i < 6000 && world.runState === 'active'; i++) {
+      world.tick(FIRING)
+      if (world.freezeTicks > 0) froze = true
+      for (const event of world.events) {
+        if (event.kind === 'wave-released') releases.push(world.stats.tick)
+      }
+    }
+
+    expect(froze).toBe(true)
+    expect(releases.length).toBeGreaterThan(4)
+    for (let i = 0; i < releases.length; i++) {
+      const due = scheduled[i] as number
+      const actual = releases[i] as number
+      expect(actual, `wave ${i + 1} released early`).toBeGreaterThanOrEqual(due)
+      expect(actual - due, `wave ${i + 1} released late`).toBeLessThanOrEqual(FREEZE_MAX_TICKS)
+    }
+  })
+})
+
+describe('sim events', () => {
+  it('clears the list every tick', () => {
+    const world = new World('EVENTCLEAR12')
+    world.tick(FIRING)
+    expect(world.events.some((e) => e.kind === 'player-shot')).toBe(true)
+    // The next tick's list describes that tick and nothing before it. Draining per
+    // frame instead of per tick is what this protects against.
+    world.tick(NEUTRAL_INPUT)
+    expect(world.events.some((e) => e.kind === 'player-shot')).toBe(false)
+  })
+
+  it('reports a player shot at the muzzle that fired it', () => {
+    const world = new World('EVENTSHOT123')
+    world.tick(FIRING)
+    const shots = world.events.filter((e) => e.kind === 'player-shot')
+    expect(shots).toHaveLength(1)
+    const bullet = world.playerBullets[0] as Bullet
+    const shot = shots[0] as Extract<SimEvent, { kind: 'player-shot' }>
+    // Same x as the bullet that left it; the bullet has already travelled a tick.
+    expect(shot.x).toBeCloseTo(bullet.x, 6)
+    expect(shot.y).toBeCloseTo(bullet.prevY, 6)
+    expect(Math.abs(shot.x - world.hull.x)).toBeCloseTo(4.5, 6)
+  })
+
+  it('reports hits, the kill, and the scrap it paid out', () => {
+    const world = new World('EVENTKILL123')
+    const def = withEnemy(world, 'hauler', world.hull.x, world.hull.y - 140)
+    const log = eventLog(world, FIRING, 140)
+
+    const hits = eventsOfKind(log, 'enemy-hit')
+    expect(hits.length).toBe(world.stats.hits)
+    for (const hit of hits) {
+      expect(hit.defId).toBe('hauler')
+      expect(hit.damage).toBeGreaterThan(0)
+    }
+    // Exactly one hit is lethal, and it is the last one.
+    expect(hits.filter((h) => h.lethal)).toHaveLength(1)
+    expect((hits[hits.length - 1] as { lethal: boolean }).lethal).toBe(true)
+
+    const killed = eventsOfKind(log, 'enemy-killed')
+    expect(killed).toHaveLength(1)
+    const kill = killed[0] as Extract<SimEvent, { kind: 'enemy-killed' }>
+    expect(kill.defId).toBe('hauler')
+    expect(kill.scrap).toBe(def.scrap)
+    expect(kill.elite).toBe(false)
+    // The position must be the enemy's, not the killing bullet's: the sim already
+    // reaped the entity, so this is the only record of where the explosion goes.
+    expect(kill.x).toBeCloseTo(world.hull.x, 6)
+
+    const collected = eventsOfKind(log, 'scrap-collected')
+    expect(collected).toHaveLength(1)
+    const scrap = collected[0] as Extract<SimEvent, { kind: 'scrap-collected' }>
+    expect(scrap.amount).toBe(def.scrap)
+    expect(scrap.x).toBe(kill.x)
+    expect(scrap.y).toBe(kill.y)
+  })
+
+  it('reports the hit at the point of impact, not the target centre', () => {
+    const world = new World('EVENTSPARK12')
+    const def = withEnemy(world, 'hauler', world.hull.x, world.hull.y - 140)
+    const log = eventLog(world, FIRING, 60)
+    const hit = eventsOfKind(log, 'enemy-hit')[0] as Extract<SimEvent, { kind: 'enemy-hit' }>
+    expect(hit).toBeDefined()
+    // Inside the target by definition, so never more than its radius away from the
+    // centre — but not exactly at it, which would read as a hit on empty space.
+    expect(Math.abs(hit.y - (world.hull.y - 140))).toBeLessThanOrEqual(def.radius + 3)
+  })
+
+  it('reports an enemy volley when it leaves, not when it was telegraphed', () => {
+    const world = new World('EVENTVOLLEY1')
+    const skiff = ENEMIES['skiff'] as EnemyDef
+    world.enemies.push(createEnemy(skiff, 60, 220))
+
+    const log = eventLog(world, NEUTRAL_INPUT, 145)
+    const shots = eventsOfKind(log, 'enemy-shot')
+    expect(shots.length).toBeGreaterThan(0)
+    expect((shots[0] as { defId: string }).defId).toBe('skiff')
+
+    // The volley event lands on the tick the bullet appears, which is
+    // windupTicks after the cadence clock came due — not on the earlier tick.
+    const shotTick = (log.find((e) => e.event.kind === 'enemy-shot') as { tick: number }).tick
+    expect(shotTick).toBe(skiff.weapon.firstDelayTicks + skiff.weapon.windupTicks)
+  })
+
+  it('reports shield absorption, the break, and the loss of the hull', () => {
+    const world = new World('EVENTDEATH12')
+    const log: Array<{ tick: number; event: SimEvent }> = []
+    for (let i = 0; i < 5400 && world.runState === 'active'; i++) {
+      world.tick(NEUTRAL_INPUT)
+      for (const event of world.events) log.push({ tick: world.stats.tick, event })
+    }
+    expect(world.runState).toBe('lost')
+
+    const hullHits = eventsOfKind(log, 'hull-hit')
+    expect(hullHits.length).toBeGreaterThan(1)
+    expect(hullHits.some((h) => h.absorbedByShield)).toBe(true)
+    expect(hullHits.some((h) => !h.absorbedByShield)).toBe(true)
+    // One hull-hit per landed hit, and stats agrees.
+    expect(hullHits.reduce((sum, h) => sum + h.damage, 0)).toBe(world.stats.damageTaken)
+
+    // The shield breaks exactly once — it does not regenerate in M1.
+    expect(eventsOfKind(log, 'shield-broken')).toHaveLength(1)
+
+    const lost = eventsOfKind(log, 'hull-lost')
+    expect(lost).toHaveLength(1)
+    const death = lost[0] as Extract<SimEvent, { kind: 'hull-lost' }>
+    expect(death.x).toBeCloseTo(world.hull.x, 6)
+    expect(death.y).toBeCloseTo(world.hull.y, 6)
+  })
+
+  it('reports no impact for a hit absorbed by invulnerability', () => {
+    // The player must never see a flash, a shake, or a freeze for a hit that cost
+    // nothing.
+    const world = new World('EVENTINVULN1')
+    for (let i = 0; i < 5400 && world.stats.damageTaken === 0; i++) world.tick(NEUTRAL_INPUT)
+    expect(world.hull.invulnTicks).toBeGreaterThan(0)
+
+    const damageTaken = world.stats.damageTaken
+    let hullHits = 0
+    for (let i = 0; i < 20; i++) {
+      world.tick(NEUTRAL_INPUT)
+      hullHits += world.events.filter((e) => e.kind === 'hull-hit').length
+    }
+    expect(world.stats.damageTaken).toBe(damageTaken)
+    expect(hullHits).toBe(0)
+  })
+
+  it('reports each wave release exactly once, in order', () => {
+    const world = new World('EVENTWAVES12')
+    const log = eventLog(world, NEUTRAL_INPUT, 1200)
+    const released = eventsOfKind(log, 'wave-released').map((e) => e.index)
+    expect(released.length).toBeGreaterThan(1)
+    expect(released).toEqual(released.map((_, i) => i + 1))
+    expect(released[released.length - 1]).toBe(world.currentWaveIndex)
+  })
+
+  it('stays bounded on a tick that retires a screen full of enemies', () => {
+    const world = new World('EVENTFLOOD12')
+    for (let i = 0; i < 3600; i++) {
+      world.tick(FIRING)
+      expect(world.events.length).toBeLessThanOrEqual(256)
+    }
+  })
+})
+
+describe('screen shake impulse', () => {
+  it('stays inside 0..1 and decays to exactly zero', () => {
+    const world = new World('SHAKESHAKE12')
+    withEnemy(world, 'hauler', world.hull.x, world.hull.y - 140)
+
+    let peak = 0
+    for (let i = 0; i < 140; i++) {
+      world.tick(FIRING)
+      peak = Math.max(peak, world.cosmetic.shake)
+      expect(world.cosmetic.shake).toBeGreaterThanOrEqual(0)
+      expect(world.cosmetic.shake).toBeLessThanOrEqual(1)
+    }
+    expect(peak).toBeGreaterThan(0)
+
+    // It must reach exactly zero, not merely approach it: an asymptote would leave
+    // "is the screen shaking" true forever and the cosmetic digest never settling.
+    const quiet = new World('SHAKEQUIET12')
+    withEnemy(quiet, 'hauler', quiet.hull.x, quiet.hull.y - 140)
+    for (let i = 0; i < 140; i++) quiet.tick(FIRING)
+    for (let i = 0; i < 240; i++) quiet.tick(NEUTRAL_INPUT)
+    expect(quiet.cosmetic.shake).toBe(0)
+  })
+
+  it('shakes harder for a bigger event', () => {
+    const world = new World('SHAKESIZE123')
+    withEnemy(world, 'hauler', world.hull.x, world.hull.y - 140)
+    let hitShake = 0
+    let killShake = 0
+    for (let i = 0; i < 140; i++) {
+      world.tick(FIRING)
+      const killed = world.events.some((e) => e.kind === 'enemy-killed')
+      if (killed) killShake = world.cosmetic.shake
+      else if (world.events.some((e) => e.kind === 'enemy-hit') && killShake === 0) {
+        hitShake = Math.max(hitShake, world.cosmetic.shake)
+      }
+    }
+    expect(hitShake).toBeGreaterThan(0)
+    expect(killShake).toBeGreaterThan(hitShake)
+  })
+
+  it('never starts a run already shaking', () => {
+    expect(new World('SHAKESTART12').cosmetic.shake).toBe(0)
+    expect(new World('SHAKESTART12').freezeTicks).toBe(0)
+    expect(new World('SHAKESTART12').events).toHaveLength(0)
+  })
+})
+
+describe('render-only countdowns', () => {
+  it('ages the hit flash independently of the movement script', () => {
+    // Split out of updateEnemyMovement so it can keep running during hitstop, when
+    // movement deliberately does not.
+    const def = makeDef({})
+    const e = createEnemy(def, 100, 100)
+    applyEnemyDamage(e, 1)
+    const flash = e.hitFlashTicks
+    expect(flash).toBeGreaterThan(0)
+
+    updateEnemyMovement(e, def)
+    expect(e.hitFlashTicks).toBe(flash)
+
+    ageEnemyCosmetics(e)
+    expect(e.hitFlashTicks).toBe(flash - 1)
+
+    for (let i = 0; i < flash * 2; i++) ageEnemyCosmetics(e)
+    expect(e.hitFlashTicks).toBe(0)
   })
 })

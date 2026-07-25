@@ -16,21 +16,43 @@
  * front:
  *
  *   1. background and starfield
- *   2. enemies
+ *   2. enemies, then their attack telegraphs
  *   3. player projectiles
  *   4. enemy projectiles — *above* enemies, so incoming fire is never occluded
  *      by the thing that fired it
  *   5. explosions and impact effects
  *   6. the player hull, last, so it is never hidden by anything
  *   7. vignette, then the edge warnings that must survive it
+ *   8. floating labels, outside the screen-shake transform
  *
  * Under a screen full of bullets the player must always be able to find their
  * own ship and the things that can kill them. That ordering is the mechanism.
+ *
+ * **Screen shake moves the playfield and nothing else.** The offset is applied
+ * inside a clip to the playfield rect, which is why the instrument panel — drawn
+ * by the caller, after this — cannot move. A vibrating readout is unreadable, and
+ * a HUD that shakes with the world is the fastest way to make a player stop
+ * trusting it.
  */
 
+import { TICK_SECONDS } from '../core/loop'
 import { PLAYFIELD_H, PLAYFIELD_W } from '../core/space'
 import type { Bullet, EnemyBullet, EnemyInstance, Hull, WorldView } from '../sim/entities'
-import { blitGlow, drawExplosions, drawHitFlash, drawInvulnRing, hitFlashStrength } from './effects'
+import {
+  blitGlow,
+  drawExplosions,
+  drawHitFlash,
+  drawInvulnRing,
+  drawTelegraph,
+  hitFlashStrength,
+} from './effects'
+import {
+  drawFeelLabels,
+  drawFeelSparks,
+  drawMuzzleGlow,
+  shakeOffset,
+  type FeelState,
+} from './feel'
 import { Palette } from './palette'
 import { drawEnemyShape, enemyTopOffset } from './shapes'
 import type { Starfield } from './starfield'
@@ -59,6 +81,47 @@ const DAMAGE_BAR_MIN_MAX_HP = 24
  * player must dodge losing that contest is the worst outcome in the file.
  */
 const MIN_BULLET_R = 3.2
+
+/**
+ * Tracer length range in virtual units, and the golden-ratio step that spreads
+ * variation across consecutive shots. See `tracerPhase`.
+ *
+ * The ceiling matters: 20 shots/second at 620 units/second puts consecutive rounds
+ * 31 units apart, so a tracer longer than that fuses the stream into one unbroken
+ * bar and the variation stops being visible at all. 22–30 keeps a gap between
+ * every round.
+ */
+const TRACER_MIN_LEN = 22
+const TRACER_LEN_RANGE = 8
+const TRACER_STEP = 0.6180339887
+
+/**
+ * A stable 0..1 signature for one player bullet.
+ *
+ * The problem this solves: 20 shots a second in a perfectly even column reads as a
+ * repeating texture — a ladder — rather than as gunfire. Varying the tracers fixes
+ * it, but the variation has to be *constant for the life of each bullet*, or every
+ * tracer flickers as it flies, which is both ugly and a strobe.
+ *
+ * Bullets carry no id, and hashing a position gives a different answer every tick.
+ * The trick is that `y / dy + tick` is invariant along a bullet's flight: the
+ * bullet loses exactly `dy` of `y` per tick, so the two terms cancel. What is left
+ * is a function of the tick the bullet was *fired* on, which is exactly the
+ * per-bullet identity needed — and because it survives interpolation, it does not
+ * change between frames within a tick either.
+ *
+ * Stepping by the golden ratio means consecutive shots land far apart in 0..1, so
+ * no short repeating pattern can form.
+ */
+function tracerPhase(y: number, vy: number, tickWithAlpha: number): number {
+  const dy = Math.abs(vy) * TICK_SECONDS
+  // A bullet that does not move vertically has no invariant to exploit; fall back
+  // to a constant rather than dividing by zero and drawing nothing.
+  if (!(dy > 0.0001)) return 0.5
+  const q = (y / dy + tickWithAlpha) * TRACER_STEP
+  const frac = q - Math.floor(q)
+  return Number.isFinite(frac) ? frac : 0.5
+}
 
 export function drawPlayfieldBackground(ctx: CanvasRenderingContext2D): void {
   ctx.fillStyle = Palette.void
@@ -114,6 +177,21 @@ function drawDamageBar(ctx: CanvasRenderingContext2D, e: EnemyInstance, x: numbe
 }
 
 /**
+ * 0..1 windup progress for an enemy, 1 being the tick the shot leaves.
+ *
+ * Defensive about both fields because the telegraph is new sim state: an enemy
+ * created before the sim populated them must render as "not winding up", never as
+ * NaN — a NaN line width silently drops the whole silhouette.
+ */
+function telegraphProgress(e: EnemyInstance): number {
+  const remaining = e.telegraphTicks ?? 0
+  const total = e.telegraphTotal ?? 0
+  if (!(remaining > 0) || !(total > 0)) return 0
+  const p = 1 - remaining / total
+  return p < 0 ? 0 : p > 1 ? 1 : p
+}
+
+/**
  * Enemies: silhouettes first, then one additive pass for hit flashes.
  *
  * Split into two passes on purpose. Interleaving them would flip the composite
@@ -132,8 +210,12 @@ function drawEnemies(
       elite: e.elite,
       flash: hitFlashStrength(e.hitFlashTicks),
       age: e.age + alpha,
+      charge: telegraphProgress(e),
     })
     drawDamageBar(ctx, e, x, y)
+    // Drawn per enemy rather than batched: only the handful of enemies actually
+    // winding up pay for it, and it must sit above its own silhouette.
+    drawTelegraph(ctx, x, y, e.radius, e.telegraphTicks ?? 0, e.telegraphTotal ?? 0)
   }
 
   ctx.globalCompositeOperation = 'lighter'
@@ -158,24 +240,53 @@ function drawEnemies(
  * The vertical-tracer silhouette is also half of how player and enemy fire are
  * told apart: tall and thin versus small and round. Hue is the other half, and
  * it is never the only one.
+ *
+ * **Variation is geometric only.** Each tracer gets its own length and one of two
+ * widths from `tracerPhase`, so the stream reads as individual rounds instead of a
+ * ladder — but the fill colours stay constant for the whole pass. Two fillStyles
+ * for two thousand projectiles is the difference between hitting the frame budget
+ * and missing it, and varying brightness per round would be a strobe at 20Hz
+ * besides. The length grows *downward* from the leading edge, so a tracer never
+ * draws its head anywhere except at the bullet's real position.
  */
 function drawPlayerBullets(
   ctx: CanvasRenderingContext2D,
   bullets: readonly Bullet[],
   alpha: number,
+  tick: number,
 ): void {
+  const tickWithAlpha = tick + alpha
+
   ctx.globalCompositeOperation = 'lighter'
   ctx.fillStyle = Palette.glowProjectile
   for (const b of bullets) {
     if (!b.alive) continue
-    ctx.fillRect(lerp(b.prevX, b.x, alpha) - 2, lerp(b.prevY, b.y, alpha) - 14, 4, 28)
+    const y = lerp(b.prevY, b.y, alpha)
+    const phase = tracerPhase(y, b.vy, tickWithAlpha)
+    ctx.fillRect(
+      lerp(b.prevX, b.x, alpha) - 2,
+      y - 14,
+      4,
+      TRACER_MIN_LEN + TRACER_LEN_RANGE * phase,
+    )
   }
   ctx.globalCompositeOperation = 'source-over'
 
   ctx.fillStyle = '#CFF4FA'
   for (const b of bullets) {
     if (!b.alive) continue
-    ctx.fillRect(lerp(b.prevX, b.x, alpha) - 0.75, lerp(b.prevY, b.y, alpha) - 11, 1.5, 22)
+    const y = lerp(b.prevY, b.y, alpha)
+    const phase = tracerPhase(y, b.vy, tickWithAlpha)
+    // Two widths rather than a continuum: a 0.4-unit difference is visible in the
+    // aggregate texture and costs nothing, while a per-bullet width computation
+    // that lands on fractional pixels just looks blurry.
+    const width = phase > 0.5 ? 1.9 : 1.5
+    ctx.fillRect(
+      lerp(b.prevX, b.x, alpha) - width / 2,
+      y - 11,
+      width,
+      (TRACER_MIN_LEN - 5) + TRACER_LEN_RANGE * 0.8 * phase,
+    )
   }
 }
 
@@ -285,7 +396,13 @@ function drawEnemyBullets(
   ctx.globalCompositeOperation = 'source-over'
 }
 
-function drawHull(ctx: CanvasRenderingContext2D, hull: Hull, alpha: number, tick: number): void {
+function drawHull(
+  ctx: CanvasRenderingContext2D,
+  hull: Hull,
+  alpha: number,
+  tick: number,
+  muzzleHeat: number,
+): void {
   const x = lerp(hull.prevX, hull.x, alpha)
   const y = lerp(hull.prevY, hull.y, alpha)
 
@@ -338,6 +455,10 @@ function drawHull(ctx: CanvasRenderingContext2D, hull: Hull, alpha: number, tick
   // to the exact hitbox centre under pressure.
   ctx.fillStyle = '#EAFDFF'
   ctx.fillRect(x - 1.5, y - 6, 3, 5)
+
+  // Muzzles, after the hull so the glow sits on the nose. A smoothed level, not a
+  // flash per shot — see `FeelState.muzzleHeat`.
+  drawMuzzleGlow(ctx, x, y - 13, muzzleHeat)
 
   drawInvulnRing(ctx, x, y, Math.max(hull.radius * 2.4, 21), tick, hull.invulnTicks)
 }
@@ -447,28 +568,86 @@ function drawLowIntegrityRim(ctx: CanvasRenderingContext2D, hull: Hull, tick: nu
   ctx.globalAlpha = 1
 }
 
+export interface SceneOptions {
+  /**
+   * Transient impact presentation: damage numbers, hit sparks, muzzle heat.
+   *
+   * Owned by the caller because it has to be advanced once per *simulation tick*
+   * (`feelTick`), and only the caller knows when a tick happened — a fast-forwarded
+   * frame runs up to 32 of them. Omit it and the scene simply draws without the
+   * labels and sparks.
+   */
+  feel?: FeelState
+  /**
+   * Screen-shake scale, 0..1. 0 disables shake completely, which is the
+   * reduced-motion path required by UI rule 10.
+   *
+   * A parameter rather than a settings lookup: rendering must not depend on where
+   * preferences live, and a test needs to be able to ask for zero.
+   */
+  shakeScale?: number
+}
+
 export function drawScene(
   ctx: CanvasRenderingContext2D,
   view: WorldView,
   starfield: Starfield,
   alpha: number,
+  options: SceneOptions = {},
 ): void {
   const tick = view.stats.tick
+  const feel = options.feel
 
+  /**
+   * Hitstop. The sim is frozen, so the interpolation fraction must be too.
+   *
+   * `alpha` keeps climbing while the sim is frozen — the render clock does not
+   * stop. Feeding it to `lerp` would slide every entity up to a full tick *past*
+   * its position into space it never occupied, and would keep ageing explosions
+   * whose `age` the sim is no longer advancing. Pinning it to 0 holds the exact
+   * frame of the impact, which is what makes hitstop read as contact rather than as
+   * a dropped frame. Nothing else about the frame changes: freeze is felt, not
+   * drawn.
+   */
+  const held = (view.freezeTicks ?? 0) > 0
+  const a = held ? 0 : alpha
+
+  // Background first and *unshifted*, so shaking the contents can never expose a
+  // gap at the playfield edge.
   drawPlayfieldBackground(ctx)
+
+  const shake = shakeOffset(tick, view.cosmetic?.shake ?? 0, options.shakeScale ?? 1)
+  const shaking = shake.x !== 0 || shake.y !== 0
+  if (shaking) {
+    ctx.save()
+    // The clip is what keeps the instrument panel column clean. Without it a
+    // shaken tracer at the right edge would smear into the HUD.
+    ctx.beginPath()
+    ctx.rect(0, 0, PLAYFIELD_W, PLAYFIELD_H)
+    ctx.clip()
+    ctx.translate(shake.x, shake.y)
+  }
+
   starfield.draw(ctx)
 
-  drawEnemies(ctx, view.enemies, alpha)
-  drawPlayerBullets(ctx, view.playerBullets, alpha)
+  drawEnemies(ctx, view.enemies, a)
+  drawPlayerBullets(ctx, view.playerBullets, a, tick)
   // Above the enemies, by design. See the header comment.
-  drawEnemyBullets(ctx, view.enemyBullets, alpha)
-  drawExplosions(ctx, view.explosions, alpha)
-  drawHull(ctx, view.hull, alpha, tick)
+  drawEnemyBullets(ctx, view.enemyBullets, a)
+  drawExplosions(ctx, view.explosions, a)
+  if (feel) drawFeelSparks(ctx, feel, a)
+  drawHull(ctx, view.hull, a, tick, feel ? feel.muzzleHeat : 0)
+
+  if (shaking) ctx.restore()
 
   drawVignette(ctx)
   // After the vignette: both of these are warnings that live at the edge, which
   // is exactly where the vignette is darkest. Muting a warning by 45% to
   // preserve draw-order purity would be the wrong trade.
   drawLowIntegrityRim(ctx, view.hull, tick)
-  drawThreatIndicators(ctx, view.enemies, alpha)
+  drawThreatIndicators(ctx, view.enemies, a)
+
+  // Last, and outside the shake: text is the one thing that must never rattle, and
+  // a number half-hidden by the vignette is a number nobody reads.
+  if (feel) drawFeelLabels(ctx, feel, a)
 }

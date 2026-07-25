@@ -59,6 +59,13 @@ const BINDINGS = {
   special: ['KeyX', 'KeyK', 'ShiftLeft', 'ShiftRight'],
   focus: ['ControlLeft', 'ControlRight', 'KeyC'],
   confirm: ['Enter', 'NumpadEnter', 'Space'],
+  /**
+   * `P` as well as Escape, because Escape is what browsers and OSes grab for
+   * fullscreen and overlays — a player who has lost Escape still needs to pause a
+   * permadeath run.
+   */
+  pause: ['Escape', 'KeyP'],
+  cancel: ['Escape'],
 } as const
 
 /** Keys we swallow so the page never scrolls out from under the game. */

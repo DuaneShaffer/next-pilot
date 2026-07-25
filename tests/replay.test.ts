@@ -92,6 +92,8 @@ function enemy(overrides: Partial<EnemyInstance> = {}): EnemyInstance {
     vx: 0,
     vy: 40,
     age: 30,
+    telegraphTicks: 0,
+    telegraphTotal: 0,
     phase: 'holding',
     fireCooldown: 12,
     contactDamage: 10,
@@ -147,6 +149,9 @@ function worldView(overrides: Partial<WorldView> = {}): WorldView {
     explosions: [explosion()],
     stats: stats(),
     incident: null,
+    events: [],
+    cosmetic: { shake: 0 },
+    freezeTicks: 0,
     ...overrides,
   }
 }
@@ -170,8 +175,36 @@ describe('state hashing', () => {
    * fails and the hasher was not deliberately changed, do not update the
    * constant; find out why the arithmetic moved.
    */
+  /**
+   * Re-recorded once, at M2, when `freezeTicks` and `telegraphTicks` entered the
+   * regression hash. Both are play-affecting state — hitstop consumes real ticks
+   * and a telegraph is real reaction time — so they belong in this digest, and its
+   * value legitimately moved. Previous constant: `a84510e42a86be74`.
+   *
+   * That is the only reason this number has ever changed, and the bar for changing
+   * it again is the same: name the play-affecting field that was added or removed.
+   * "The test went red" is not a reason.
+   */
   it('matches a recorded digest for a known world', () => {
-    expect(hashWorld(worldView())).toBe('a84510e42a86be74')
+    expect(hashWorld(worldView())).toBe('14e21cacdce8283e')
+  })
+
+  it('includes the M2 timing state that hitstop and telegraphs introduced', () => {
+    // Guards the re-record above: if either field silently stopped being hashed,
+    // the constant would still match and every fixture would go blind to a whole
+    // class of divergence.
+    const base = hashWorld(worldView())
+    expect(hashWorld(worldView({ freezeTicks: 3 }))).not.toBe(base)
+    expect(
+      hashWorld(
+        worldView({
+          enemies: [
+            enemy({ telegraphTicks: 12, telegraphTotal: 22 }),
+            enemy({ defId: 'lancer', elite: true, x: 300 }),
+          ],
+        }),
+      ),
+    ).not.toBe(base)
   })
 
   it('gives every play-affecting field its own influence', () => {

@@ -38,7 +38,9 @@ Never report work as complete without these:
   not intuition.
 - Anything that changes what the game looks like has a screenshot you have actually looked at.
   "It should render fine" is not verification.
-- The save schema still loads saves written by the previous version.
+- The save schema still loads saves written by the previous version. Adding a field means a new
+  numbered interface, a migration step, and a hand-written fixture test — never mutating a shipped
+  type. See `src/meta/save.ts`.
 
 ## Layout
 
@@ -52,7 +54,10 @@ src/content/ Data-driven definitions: hulls, weapons, items, enemies, sectors.
              interprets them so adding content never means editing the sim.
 src/render/  Canvas2D drawing. Consumes WorldView, never the World class.
 src/ui/      Screens and menus.
-src/meta/    Save, unlocks, replays, state hashing. Crosses runs.
+src/audio/   WebAudio synthesis, driven by SimEvents from the app layer. Never
+             imported by sim (contract 2). No audio files — everything synthesised.
+src/meta/    Save, settings, unlocks, replays, state hashing. Crosses runs.
+             save.ts owns schema migration; read its header before adding a field.
 tests/       Vitest. Sim tests run headless; determinism tests are load-bearing.
              tests/replays/ is the regression corpus — recorded runs that must
              reproduce bit-exactly forever.

@@ -26,12 +26,25 @@ import { SECTOR_ONE } from '../content/sectors'
 import type { EnemyDef } from '../content/types'
 import { circlesOverlap, segmentHitsCircle } from './collision'
 import {
+  addShake,
   applyEnemyDamage,
   applyHullDamage,
+  extendFreeze,
+  freezeForEnemyHit,
+  freezeForHullHit,
   HULL_COLLISION_RADIUS,
+  shakeForEnemyHit,
+  shakeForHullHit,
+  SHAKE_SHIELD_BROKEN,
   tickHullInvulnerability,
 } from './damage'
-import { fireDeathBurst, isEnemyOutOfPlay, updateEnemyMovement, updateEnemyWeapon } from './enemies'
+import {
+  ageEnemyCosmetics,
+  fireDeathBurst,
+  isEnemyOutOfPlay,
+  updateEnemyMovement,
+  updateEnemyWeapon,
+} from './enemies'
 import {
   advanceProjectiles,
   cullDead,
@@ -41,6 +54,7 @@ import {
 import { Spawner } from './spawner'
 import type {
   Bullet,
+  CosmeticState,
   EnemyInstance,
   Explosion,
   ExplosionKind,
@@ -48,6 +62,7 @@ import type {
   Incident,
   RunState,
   RunStats,
+  SimEvent,
   WorldView,
 } from './entities'
 
@@ -101,6 +116,33 @@ const EXPLOSION_BASE_TICKS = 18
 const HULL_EXPLOSION_TICKS = 48
 const HULL_EXPLOSION_RADIUS = 34
 
+/**
+ * Ceiling on events emitted in one tick.
+ *
+ * Sized against the worst legitimate tick: a screen-clearing moment can retire
+ * every live enemy at once, and each death emits a hit, a kill, and a scrap award.
+ * Past this we DROP the excess rather than growing the array, because a tick that
+ * wanted 300 events is a tick with a hundred simultaneous deaths, and the
+ * difference between 256 and 300 sound triggers is inaudible while an unbounded
+ * array in the hot path is not. This is stated here rather than left as a silent
+ * truncation: presentation may be missing events on such a tick, so nothing
+ * downstream may treat the event stream as a complete audit log — `stats` is the
+ * authority on counts, this is the authority on *when*.
+ */
+const MAX_EVENTS_PER_TICK = 256
+
+/**
+ * Shake decays geometrically, and snaps to exactly zero below the epsilon.
+ *
+ * 0.86/tick puts a full-strength impulse under the epsilon in about 0.7s, which
+ * outlasts the hitstop it arrived with without lingering into the next fight. The
+ * epsilon matters for more than tidiness: without it `shake` would approach zero
+ * asymptotically and never reach it, so "is the screen shaking" would be true
+ * forever and the cosmetic digest would never settle.
+ */
+const SHAKE_DECAY_PER_TICK = 0.86
+const SHAKE_EPSILON = 0.002
+
 export class World implements WorldView {
   readonly seed: string
   /** Which sector script this run is flying. One sector in M1. */
@@ -113,6 +155,21 @@ export class World implements WorldView {
   readonly enemies: EnemyInstance[] = []
   readonly explosions: Explosion[] = []
   incident: Incident | null = null
+
+  /** Cleared at the top of every tick — see SimEvent. Drain per tick, not per frame. */
+  readonly events: SimEvent[] = []
+  readonly cosmetic: CosmeticState = { shake: 0 }
+
+  /**
+   * Ticks of hitstop remaining. See WorldView.freezeTicks.
+   *
+   * Consumes real ticks: `stats.tick` still advances during a freeze, so a
+   * recorded input log keeps mapping 1:1 onto ticks and the wave script keeps its
+   * schedule. A freeze delays a wave's *release* by at most FREEZE_MAX_TICKS,
+   * because Spawner.update releases everything due at or before the tick it is
+   * handed; it can never skip one.
+   */
+  freezeTicks = 0
 
   readonly stats: RunStats = {
     tick: 0,
@@ -179,24 +236,49 @@ export class World implements WorldView {
    * hit is decided from one consistent set of positions rather than from a mix of
    * old and new ones. Dead things are reaped after collisions so a projectile can
    * only ever connect once.
+   *
+   * Three things happen on *every* tick, including frozen ones and ones after the
+   * run has ended, and the split is the whole design of hitstop:
+   *
+   *   - `stats.tick` advances. Hitstop spends real ticks, so one input byte still
+   *     means one tick and a replay stays reproducible.
+   *   - the event list is cleared, because events describe one tick.
+   *   - cosmetic countdowns age. Explosions, impact flashes, and shake keep
+   *     running through a freeze on purpose: a freeze in which *nothing* on screen
+   *     moves reads as a hang, and the point of hitstop is to sell the impact, not
+   *     to hide it. It also keeps every cosmetic lifetime bounded in real time
+   *     however many freezes overlap it.
+   *
+   * Everything else — movement, spawning, firing, collision, extraction — is
+   * gameplay and does not advance while frozen.
    */
   tick(input: InputSnapshot): void {
     this.stats.tick++
+    this.events.length = 0
+    this.advanceCosmetic()
+
+    // Read before decrementing: a freeze of n granted while resolving one tick
+    // freezes the n ticks that follow it, not n-1 of them.
+    const frozen = this.freezeTicks > 0
+    if (frozen) this.freezeTicks--
 
     // A finished run keeps only its cosmetic state running. The incident report is
     // drawn over the frozen playfield, and advancing the wave script behind it
     // would spawn enemies nobody can shoot and inflate the recorded run length.
-    if (this.runState !== 'active') {
-      this.advanceExplosions()
-      return
-    }
+    if (this.runState !== 'active') return
+    if (frozen) return
 
     tickHullInvulnerability(this.hull)
     this.moveHull(input)
     this.updateWeapon(input)
 
+    const wavesBefore = this.spawner.waveIndex
     this.spawner.update(this.stats.tick, this.enemies)
     this.stats.waveIndex = this.spawner.waveIndex
+    // One event per wave, even if the script releases two on the same tick.
+    for (let i = wavesBefore + 1; i <= this.stats.waveIndex; i++) {
+      this.emit({ kind: 'wave-released', index: i })
+    }
 
     this.updateEnemies()
     this.advanceAllProjectiles()
@@ -206,7 +288,6 @@ export class World implements WorldView {
     this.resolveContact()
 
     this.reapEnemies()
-    this.advanceExplosions()
     this.checkExtraction()
 
     const live = this.playerBullets.length + this.enemyBullets.length
@@ -241,10 +322,12 @@ export class World implements WorldView {
     if (!input.fire || this.fireCooldown > 0) return
 
     const offset = this.nextMuzzleIsLeft ? -MUZZLE_OFFSET : MUZZLE_OFFSET
+    const muzzleX = this.hull.x + offset
+    const muzzleY = this.hull.y - HULL_HALF_H
     const fired = spawnPlayerBullet(
       this.playerBullets,
-      this.hull.x + offset,
-      this.hull.y - HULL_HALF_H,
+      muzzleX,
+      muzzleY,
       0,
       -BULLET_SPEED,
       BULLET_DAMAGE,
@@ -258,6 +341,10 @@ export class World implements WorldView {
     this.fireCooldown = FIRE_INTERVAL_TICKS
     this.nextMuzzleIsLeft = !this.nextMuzzleIsLeft
     this.stats.shotsFired++
+    // At the muzzle, not at the hull centre: the flash has to come out of the
+    // barrel that actually fired, which is how alternating muzzles read as one
+    // stream instead of as a stutter.
+    this.emit({ kind: 'player-shot', x: muzzleX, y: muzzleY })
   }
 
   private updateEnemies(): void {
@@ -272,7 +359,11 @@ export class World implements WorldView {
         continue
       }
       updateEnemyMovement(e, def)
-      updateEnemyWeapon(e, def, hull.x, hull.y, this.enemyBullets)
+      if (updateEnemyWeapon(e, def, hull.x, hull.y, this.enemyBullets)) {
+        // Volleys only. A death burst is reported by `enemy-killed`, which the
+        // renderer and audio already treat as the louder event.
+        this.emit({ kind: 'enemy-shot', x: e.x, y: e.y, defId: e.defId })
+      }
     }
   }
 
@@ -292,8 +383,21 @@ export class World implements WorldView {
         // ~10 units per tick, enough to step clean over a small enemy.
         if (!segmentHitsCircle(b.prevX, b.prevY, b.x, b.y, e.x, e.y, e.radius + b.radius)) continue
 
-        applyEnemyDamage(e, b.damage)
+        const lethal = applyEnemyDamage(e, b.damage)
         this.stats.hits++
+        // Reported at the bullet, not at the target's centroid: the spark belongs
+        // where the round landed. A 30-unit hauler flashing at its centre reads as
+        // a hit on empty space. The bullet is inside the target by definition here,
+        // so this is never more than a radius away from it.
+        this.emit({
+          kind: 'enemy-hit',
+          x: b.x,
+          y: b.y,
+          damage: b.damage,
+          defId: e.defId,
+          lethal,
+        })
+        this.addImpact(freezeForEnemyHit(b.damage, lethal), shakeForEnemyHit(b.damage, lethal))
         // No piercing in M1: one bullet, one target.
         b.alive = false
         break
@@ -308,12 +412,14 @@ export class World implements WorldView {
     for (let i = bullets.length - 1; i >= 0; i--) {
       const b = bullets[i] as AttributedEnemyBullet
       if (!circlesOverlap(b.x, b.y, b.radius, hull.x, hull.y, hull.radius)) continue
+      const shieldBefore = hull.shield
+      const integrityBefore = hull.integrity
       // A bullet that arrives during invulnerability passes straight through
       // instead of being consumed — otherwise getting hit would clear the screen
       // and the safest play would be to take a hit on purpose.
       if (applyHullDamage(this, b.damage, 'enemy-fire', b.sourceDefId)) {
         b.alive = false
-        this.onHullDestroyed()
+        this.onHullHit(b.damage, shieldBefore, integrityBefore)
         break
       }
     }
@@ -326,6 +432,8 @@ export class World implements WorldView {
       const e = this.enemies[i] as EnemyInstance
       if (!e.alive) continue
       if (!circlesOverlap(e.x, e.y, e.radius, hull.x, hull.y, hull.radius)) continue
+      const shieldBefore = hull.shield
+      const integrityBefore = hull.integrity
       if (!applyHullDamage(this, e.contactDamage, 'collision', e.defId)) continue
 
       // Ramming is mutual, for every enemy, with no per-shape exception: it turns
@@ -333,7 +441,10 @@ export class World implements WorldView {
       // hull and chip it once per invulnerability window. Death bursts still fire,
       // which is what makes a mine a mine without the sim knowing about mines.
       e.alive = false
-      this.onHullDestroyed()
+      // The ram gets the hull hit's impact and no separate kill impact. That is not
+      // an oversight: taking contact damage already freezes harder than any kill,
+      // and `addImpact` takes the longer freeze rather than summing them.
+      this.onHullHit(e.contactDamage, shieldBefore, integrityBefore)
       break
     }
   }
@@ -354,6 +465,20 @@ export class World implements WorldView {
         // behaviour, so this stays a presentation mapping rather than a rule.
         const kind: ExplosionKind = e.shape === 'mine' ? 'mine' : 'enemy'
         this.spawnExplosion(e.x, e.y, kind, e.radius * 2.4, EXPLOSION_BASE_TICKS + Math.min(14, e.radius))
+        this.emit({
+          kind: 'enemy-killed',
+          x: e.x,
+          y: e.y,
+          defId: e.defId,
+          scrap: e.scrap,
+          elite: e.elite,
+        })
+        // There is no pickup entity yet: scrap is credited at the kill, so that is
+        // where it is collected and where the label belongs. When M3 adds dropped
+        // scrap this moves to the pickup and stops coinciding with the kill.
+        if (e.scrap > 0) {
+          this.emit({ kind: 'scrap-collected', x: e.x, y: e.y, amount: e.scrap })
+        }
       }
       // Enemies that simply left the playfield award nothing. Letting a wave
       // escape has to cost something, or ignoring everything would be optimal.
@@ -363,7 +488,11 @@ export class World implements WorldView {
     }
   }
 
-  private advanceExplosions(): void {
+  /**
+   * Age everything that exists only to be looked at. Runs on every tick — frozen,
+   * active, or after the run has ended. See `tick`.
+   */
+  private advanceCosmetic(): void {
     const list = this.explosions
     for (let i = list.length - 1; i >= 0; i--) {
       const x = list[i] as Explosion
@@ -373,6 +502,13 @@ export class World implements WorldView {
         list.pop()
       }
     }
+
+    for (let i = 0; i < this.enemies.length; i++) {
+      ageEnemyCosmetics(this.enemies[i] as EnemyInstance)
+    }
+
+    const shake = this.cosmetic.shake * SHAKE_DECAY_PER_TICK
+    this.cosmetic.shake = shake < SHAKE_EPSILON ? 0 : shake
   }
 
   private checkExtraction(): void {
@@ -392,16 +528,75 @@ export class World implements WorldView {
 
   // --- helpers --------------------------------------------------------------
 
-  private onHullDestroyed(): void {
-    if (this.runState !== 'lost') return
-    if (this.hull.integrity > 0) return
+  /**
+   * Everything that follows from a hit that actually landed on the hull.
+   *
+   * Called only when `applyHullDamage` returned true, so an ignored hit (during
+   * invulnerability, or after the run ended) produces no event, no shake, and no
+   * freeze — the player must never see impact feedback for a hit that did nothing.
+   *
+   * The shield and integrity readings from *before* the hit are passed in because
+   * `absorbedByShield` and the shield-break moment are only visible as a
+   * transition, and `applyHullDamage` owns the subtraction.
+   */
+  private onHullHit(damage: number, shieldBefore: number, integrityBefore: number): void {
+    const hull = this.hull
+    const fatal = this.runState === 'lost'
+
+    // Reported at the hull rather than at the projectile: the damage number belongs
+    // on the ship (UI rule 9), and both damage paths — fire and ramming — then
+    // agree on what the position means.
+    this.emit({
+      kind: 'hull-hit',
+      x: hull.x,
+      y: hull.y,
+      damage,
+      absorbedByShield: hull.integrity === integrityBefore,
+    })
+
+    let shake = shakeForHullHit(damage, fatal)
+    if (shieldBefore > 0 && hull.shield === 0) {
+      this.emit({ kind: 'shield-broken', x: hull.x, y: hull.y })
+      shake += SHAKE_SHIELD_BROKEN
+    }
+    this.addImpact(freezeForHullHit(damage, fatal), shake)
+
+    if (!fatal) return
+    if (hull.integrity > 0) return
+    this.emit({ kind: 'hull-lost', x: hull.x, y: hull.y })
     this.spawnExplosion(
-      this.hull.x,
-      this.hull.y,
+      hull.x,
+      hull.y,
       'hull',
       HULL_EXPLOSION_RADIUS,
       HULL_EXPLOSION_TICKS,
     )
+  }
+
+  /**
+   * Queue an event for this tick, or drop it at the cap.
+   *
+   * See MAX_EVENTS_PER_TICK: past the cap the *newest* events are refused rather
+   * than shifting the oldest out, because everything in one tick is simultaneous,
+   * so there is no "more recent" event to prefer and refusing is O(1).
+   */
+  private emit(event: SimEvent): void {
+    if (this.events.length >= MAX_EVENTS_PER_TICK) return
+    this.events.push(event)
+  }
+
+  /**
+   * Register a hit's feel response. Both rules live in damage.ts — see
+   * `extendFreeze` for why the freeze takes the longest rather than the sum.
+   *
+   * A freeze also cannot be *extended* by damage arriving during it, because no
+   * collision, movement, or firing phase runs while frozen: there is nothing that
+   * can land a hit to extend it with. That plus the ceiling in `extendFreeze` bounds
+   * every freeze at FREEZE_MAX_TICKS, full stop.
+   */
+  private addImpact(freezeTicks: number, shake: number): void {
+    this.freezeTicks = extendFreeze(this.freezeTicks, freezeTicks)
+    this.cosmetic.shake = addShake(this.cosmetic.shake, shake)
   }
 
   private spawnExplosion(

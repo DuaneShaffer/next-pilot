@@ -59,16 +59,61 @@ bit-exactly in a separate process from the one that recorded them; damage and de
 Priority two, and the milestone most easily skipped by mistake. Deliberately its own milestone so
 it can't be.
 
-- Hitstop on impact, scaled by damage
-- Screen shake with a hard cap and a settings toggle (UI rule 10)
-- Impact flashes, hit sparks, and layered explosions
-- Muzzle flash, shell ejection, tracer variation
-- WebAudio synthesis: weapon, impact, explosion, shield break, pickup, UI
-- Damage numbers and pickup labels near the ship (UI rule 9)
-- Enemy telegraphs — every attack readable before it lands
+- [x] Hitstop on impact, scaled by damage — **simulation state**, not a render trick. Capped at 8
+      ticks; a single 4-damage bullet buys zero freeze, because at 20 shots/second one tick per hit
+      would freeze the game a third of the time.
+- [x] Screen shake, capped at 6 virtual units at ~10.5Hz, clipped to the playfield so the panel
+      provably cannot move, and fully disableable from the pause menu (UI rule 10)
+- [x] Impact flashes, hit sparks, layered explosions
+- [x] Muzzle flash and tracer variation. **Shell ejection deliberately not done** — skipped to
+      protect the frame budget; see the note below rather than assuming it shipped.
+- [x] WebAudio synthesis, 14 cues, zero binary assets
+- [x] Damage numbers near the ship (UI rule 9), aggregated so 20 hits/second on one target is one
+      climbing number rather than twenty
+- [x] Enemy telegraphs — `windupTicks` of real reaction time before every volley
+- [x] Pause menu, which is also the settings screen, plus auto-pause on focus loss (an unfocused
+      window previously kept simulating and quietly killed runs)
+- [x] Save schema v2 with migration and a hand-written v1 fixture test
 
-**Exit:** a feel checklist reviewed against captured screenshots and frame-by-frame captures;
-frame time under 8ms p99 with 2,000 projectiles; no strobing above 1Hz anywhere.
+**Exit: met.** Measured in a real browser via `npm run perf`:
+
+| Budget | Limit | Measured |
+| --- | --- | --- |
+| Frame p99 | 8ms | **0.66ms** |
+| Sim tick p99 | 2ms | **0.07ms** |
+| Dropped ticks | 0 | **0** |
+
+Twelve times the frame headroom. Note what that run did *not* cover: it reached 64s of sector time,
+so the heaviest moments — the elite at 134s and the clear-out beats at 164-174s — are unmeasured in
+the browser. `tests/perf.test.ts` constructs the 2,000-projectile case directly, because real play
+peaks near 54 live projectiles and no browser pass can reach 2,000 at all.
+
+**Balance fixes, measured over 200 runs per policy:**
+
+| policy | M1 median | M2 median | change |
+| --- | --- | --- | --- |
+| greedy | 123.7s (p10 123.0 — a wall) | 156.7s (p10 143.6, p90 171.7) | **wall replaced by a 28s spread** |
+| random | 103.5s, wave 18/30 | 95.7s, wave 16/30 | less deep on noise |
+| aggressor | 41.2% clear | 56.5% clear | overshot the 35-50% target |
+| dodger | 141.2s | 120.2s | worse |
+
+The two stated defects are fixed: greedy no longer dies at a deterministic wall, and the upper
+playfield is usable again. But the fix overshot — aggressor now clears 56.5% against a 35-50%
+target, and dodger lost 21 seconds. **Tightening that is the first balance job of M6**, and it needs
+its own before/after sweep rather than being folded into a feel change.
+
+**Carried forward, honestly:**
+
+- **Shell ejection** is not implemented. The 12× frame headroom means it is clearly affordable, so
+  this is now a scope decision rather than a performance one: implement it, or delete this line.
+  It should not keep sitting here looking done.
+- **`Settings.reduceFlashes` exists in the save schema but is not offered in the pause menu**,
+  because the renderer does not consume it. A control that silently does nothing is worse than a
+  missing one: it tells a photosensitive player they are protected when they are not. Add the row
+  in the same change that makes the renderer honour it.
+- **Nobody has heard the audio.** See the blind spot in `docs/VERIFICATION.md`. The fix is an
+  `OfflineAudioContext` render in headless Chromium producing both measurements and WAVs; it needs
+  a context shim because the backend constructs its own.
 
 ## M3 — The roguelike loop
 

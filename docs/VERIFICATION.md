@@ -6,8 +6,8 @@ There is no human playtester in this project's loop. Duane sets a goal and steps
 quality has to be assessed by whoever is building it. That makes "I think this feels good" not a
 verification step, and it makes any quality signal that isn't automated effectively nonexistent.
 
-So the harness is a first-class part of the product. Five instruments, each answering a question
-that intuition can't.
+So the harness is a first-class part of the product. Six instruments, each answering a question that
+intuition can't — and one honest blind spot.
 
 ---
 
@@ -87,7 +87,43 @@ Asserted as tests so regressions fail the build rather than accumulating quietly
 `tests/world.test.ts` already asserts projectile-count budgets; the frame-time assertions land
 with the renderer work in M2.
 
-## 5. Contract enforcement
+## 5. Audio — a known blind spot
+
+**Question: does it sound right? Currently unanswerable.**
+
+Audio is the one part of this project with no instrument. Screenshots work because a rendered frame
+can be looked at; there is no equivalent for sound in a headless environment, and no audio device
+here at all.
+
+What *is* tested (32 tests, all headless): the event→sound mapping is total, verified by exhaustive
+`never` check rather than a hand-written list that can drift; voice limiting holds under 500 events
+in one tick; the mix *ordering* is locked so changing the hierarchy requires deliberately changing a
+test; mute genuinely starts no voices; unlock is idempotent.
+
+What is **not** verified, and should be read as engineering judgement rather than fact:
+
+- Whether any recipe sounds like the thing it is named after.
+- Whether the weapon click is tolerable across a 180-second sector at 20 shots/second. This is the
+  highest-risk item. Five mitigations are in place (the weapon is the quietest category at 0.26 vs
+  1.0 for alarms, 25ms mostly-broadband so it can't stack into a drone, round-robin pitch and
+  amplitude rotation rather than random draw, a 3-voice cap with a 28ms retrigger gap, and lowest
+  priority so it always loses a contested slot) — all principled, none heard.
+- Whether the absolute mix gaps are right. Ordering is tested; whether 0.26 makes the weapon vanish
+  is not.
+- Whether the telegraph reads as a windup, and whether stretching one recipe from 0.35s to 1s still
+  reads as the same cue.
+- Any real-device behaviour: iOS unlock, Safari's `webkitAudioContext`, limiter pumping under 16
+  voices, CPU cost of ~16 voices on a mid-range phone.
+
+**The fix, when it's worth building:** sounds are declarative `Layer` recipes interpreted by a
+backend, so the real backend can be driven inside headless Chromium against an `OfflineAudioContext`
+to render each cue to a buffer. That yields objective measurements (peak, RMS, duration, spectral
+centroid — enough to catch a "quiet" category that is actually loud because its envelope is long)
+*and* WAV files a human can listen to on their next check-in. Tracked, not done.
+
+Until then: audio claims in any report must be labelled as unheard.
+
+## 6. Contract enforcement
 
 **Question: are the three contracts still actually true?**
 

@@ -103,6 +103,20 @@ const SHOTS = [
     waitFor: 'screen === "incident"',
     holdMs: 500,
   },
+  {
+    name: 'pause-menu',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=12`,
+    waitFor: 'enemyCount >= 2',
+    pressAfter: ['Escape'],
+  },
+  {
+    // Third row down is the volume scale, so this frames a selected adjustable
+    // row rather than the default action row.
+    name: 'pause-menu-setting',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=12`,
+    waitFor: 'enemyCount >= 2',
+    pressAfter: ['Escape', 'ArrowDown', 'ArrowLeft'],
+  },
 ]
 
 /** The common case, plus a small window to catch layout breakage. */
@@ -235,6 +249,14 @@ async function capture() {
           if (shot.holdMs) await page.waitForTimeout(shot.holdMs)
         } else {
           await page.waitForTimeout(shot.settleMs ?? 300)
+        }
+
+        // Keys pressed *after* the wait condition, not before. Holding Escape
+        // from navigation would pause the run instantly and no enemy would ever
+        // spawn, so the condition the shot is waiting for could never come true.
+        for (const key of shot.pressAfter ?? []) {
+          await page.keyboard.press(key)
+          await page.waitForTimeout(180)
         }
 
         // Read the counters BEFORE capturing. page.screenshot() blocks the

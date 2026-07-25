@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { ENEMIES, SECTOR_ONE_MAX_CONTACT_DAMAGE, getEnemy } from '../src/content/enemies'
+import {
+  ENEMIES,
+  FORWARD_PLAY_Y_FRACTION,
+  PARKED_CLEARANCE,
+  PLAYER_BASELINE_DPS,
+  SECTOR_ONE_MAX_CONTACT_DAMAGE,
+  SECTOR_ONE_MAX_HP_SECONDS,
+  getEnemy,
+  maxParkedY,
+} from '../src/content/enemies'
 import { SECTOR_ONE } from '../src/content/sectors'
+import { PLAYFIELD_H } from '../src/core/space'
 import type { EnemyDef, FormationPattern, MovementKind, SectorDef } from '../src/content/types'
 
 /**
@@ -113,6 +123,49 @@ describe('enemy weapons', () => {
     }
   })
 
+  it('gives every armed enemy a readable telegraph', () => {
+    // The M2 mechanic. A volley with no windup arrives unannounced, which
+    // `types.ts` says should be rare and deliberate — in sector 1 it is simply
+    // wrong, because "nothing is unfair" is the sector's whole thesis.
+    //
+    // The 15-tick floor is 0.25s, roughly the time to see a cue and begin
+    // moving. Below that the tell exists in the data and not in the game.
+    for (const [key, def] of enemyEntries) {
+      if (!isArmed(def)) continue
+      expect(def.weapon.windupTicks, `${key} windupTicks`).toBeGreaterThanOrEqual(15)
+    }
+  })
+
+  it('keeps every telegraph under half its own firing interval', () => {
+    // Two reasons, and the second is why this is asserted rather than merely
+    // preferred.
+    //
+    // 1. A windup that fills most of the interval means the enemy is always
+    //    winding up, and a warning light that is never off is not a warning.
+    // 2. The sim has not landed the mechanic yet, and whether the windup runs
+    //    inside `intervalTicks` or is added on top of it changes the sector's
+    //    entire damage output. Simulating the additive reading took
+    //    `aggressor`'s clear rate from 40.3% to 76.3% across 300 seeds. Capping
+    //    the windup at half the interval bounds that blast radius to a factor
+    //    of 1.5 on cadence, and bounds the correction if it has to be made.
+    //    See the windup budget note at the top of `enemies.ts`.
+    for (const [key, def] of enemyEntries) {
+      if (!isArmed(def)) continue
+      expect(def.weapon.windupTicks, `${key} windup vs interval`).toBeLessThanOrEqual(
+        def.weapon.intervalTicks / 2,
+      )
+    }
+  })
+
+  it('leaves unarmed enemies with no telegraph', () => {
+    // An unarmed enemy that reports a windup would make the renderer draw a
+    // tell for a shot that never comes, which is worse than no tell at all.
+    for (const [key, def] of enemyEntries) {
+      if (isArmed(def)) continue
+      expect(def.weapon.windupTicks, key).toBe(0)
+    }
+  })
+
   it('gives every death burst a count, speed, and damage', () => {
     for (const [key, def] of enemyEntries) {
       const burst = def.deathBurst
@@ -154,6 +207,39 @@ describe('enemy movement', () => {
     }
   })
 
+  it('never parks an enemy inside the band a forward-flying pilot occupies', () => {
+    // THIS IS THE M1 DEFECT, WRITTEN DOWN. The lancer parked at y=216 and a
+    // pilot pushing forward sits at y=230; lancer radius 13 plus hull hitbox
+    // radius 7 is 20, so the enemy arrived already touching the pilot it was
+    // supposed to be warning. 41% of `greedy`'s deaths were `collision:lancer`
+    // and *none of the 82 measured happened during the dive* — the telegraph was
+    // being delivered after the impact. `greedy` therefore died at 124.1s with a
+    // 2.3-second interquartile range across 200 seeds: not a distribution, a
+    // wall, and half the playfield unusable from wave 21 on.
+    //
+    // The bug is not "the number was too big". It is that a stationary phase and
+    // contact damage are the same enemy: anything that stops moving becomes an
+    // obstacle, and an obstacle placed where the player flies is a hit, not a
+    // lesson. That is a class of mistake, not one typo, which is why it is
+    // asserted for every parking movement kind rather than for the lancer.
+    const parking: readonly MovementKind[] = ['hover', 'swoop', 'strafe']
+    for (const [key, def] of enemyEntries) {
+      if (!parking.includes(def.movement)) continue
+      const hold = def.movementParams.holdYFraction
+      expect(hold, `${key} parks but has no holdYFraction`).toBeDefined()
+      const holdY = (hold as number) * PLAYFIELD_H
+      expect(holdY + def.radius, `${key} parks at y=${holdY.toFixed(0)}`).toBeLessThanOrEqual(
+        maxParkedY(def.radius) + def.radius,
+      )
+      // Same assertion spelled out, so a failure reads as a distance rather than
+      // as two numbers the reader has to subtract.
+      const clearance = FORWARD_PLAY_Y_FRACTION * PLAYFIELD_H - holdY - def.radius
+      expect(clearance, `${key} clearance below its parking spot`).toBeGreaterThanOrEqual(
+        PARKED_CLEARANCE,
+      )
+    }
+  })
+
   it('keeps sine oscillation inside the playfield width', () => {
     for (const [key, def] of enemyEntries) {
       if (def.movement !== 'sine') continue
@@ -186,6 +272,26 @@ describe('sector 1 fairness constraints', () => {
       if (def.deathBurst !== undefined) {
         expect(def.deathBurst.bulletSpeed, `${key} deathBurst`).toBeLessThan(HULL_SPEED)
       }
+    }
+  })
+
+  it('keeps non-elite HP inside a killable window', () => {
+    // HP in this sector is authored as *seconds of the player's attention*, and
+    // 2.5s at the starting hull's 80 dps is the ceiling. The turret shipped at
+    // 220 (2.75s) in M1 and the sweep showed what that buys: `random` killed 15%
+    // of the turrets it met, 58% were still alive when its run ended, and 59% of
+    // its deaths were turret-attributed. Past this line an enemy stops forcing a
+    // priority call and starts simply outlasting the player, which reads as the
+    // game refusing to end rather than as difficulty.
+    //
+    // Elites are exempt by design — being fought across several windows is what
+    // makes one an elite.
+    const ceiling = SECTOR_ONE_MAX_HP_SECONDS * PLAYER_BASELINE_DPS
+    for (const [key, def] of enemyEntries) {
+      if (def.elite === true) continue
+      expect(def.hp, `${key} is ${(def.hp / PLAYER_BASELINE_DPS).toFixed(2)}s of fire`).toBeLessThanOrEqual(
+        ceiling,
+      )
     }
   })
 

@@ -64,6 +64,8 @@ export function createEnemy(def: EnemyDef, x: number, y: number): EnemyInstance 
     scrap: def.scrap,
     alive: true,
     hitFlashTicks: 0,
+    telegraphTicks: 0,
+    telegraphTotal: 0,
     originX: x,
     holdY: holdFraction * PLAYFIELD_H,
   }
@@ -190,19 +192,43 @@ export function updateEnemyMovement(e: EnemyInstance, def: EnemyDef): void {
   }
 
   e.age++
+}
+
+/**
+ * Age an enemy's render-only countdowns by one tick.
+ *
+ * Separate from `updateEnemyMovement` because it must keep running during
+ * hitstop, when movement deliberately does not — see `World.tick`. Folding it back
+ * into the movement script would freeze the impact flash for the duration of the
+ * freeze it caused, which is the one moment the player is looking straight at it.
+ */
+export function ageEnemyCosmetics(e: EnemyInstance): void {
   if (e.hitFlashTicks > 0) e.hitFlashTicks--
 }
 
 /**
- * Tick a weapon and fire when due.
+ * Tick a weapon and fire when due. Returns true on the tick a volley leaves.
  *
- * Two reactability rules, both deliberate:
+ * Four reactability rules, all deliberate:
  *
  *  1. The cadence clock is frozen while the enemy is still above the top edge.
  *     `firstDelayTicks` therefore counts from the moment the enemy is *visible*,
  *     not from spawn. Without this, a def with a 30-tick delay that takes 50
  *     ticks to descend into view arrives already shooting.
  *  2. Nothing fires from off-screen at all, for the same reason.
+ *  3. A windup may not *start* off-screen either. A telegraph the player cannot
+ *     see is not a telegraph, and a shot whose only warning played above the top
+ *     edge arrives just as unannounced as one with no warning at all.
+ *  4. A dead enemy fires nothing, including one killed part-way through its
+ *     windup. Committing to a shot is not the same as having taken it, so killing
+ *     something mid-telegraph has to be a reward.
+ *
+ * Cadence: `fireCooldown` is reset when the *windup starts*, not when the shot
+ * leaves, and it keeps counting down during the windup. So `intervalTicks` remains
+ * the shot-to-shot period it was before telegraphs existed. Charging the windup on
+ * top of the interval instead would have quietly cut every armed enemy's rate of
+ * fire — the turret by 21% — which is a balance change disguised as a feel change,
+ * and it would have meant re-tuning all of sector 1 to stand still.
  */
 export function updateEnemyWeapon(
   e: EnemyInstance,
@@ -210,17 +236,39 @@ export function updateEnemyWeapon(
   hullX: number,
   hullY: number,
   out: AttributedEnemyBullet[],
-): void {
+): boolean {
   const w = def.weapon
-  if (w.kind === 'none') return
-  if (e.y < e.radius) return
+  if (w.kind === 'none') return false
+  if (!e.alive) return false
+  if (e.y < e.radius) return false
 
   if (e.fireCooldown > 0) e.fireCooldown--
-  if (e.fireCooldown > 0) return
 
-  fireVolley(e, w, hullX, hullY, out)
+  // Already committed: count the telegraph down and fire when it runs out.
+  if (e.telegraphTicks > 0) {
+    e.telegraphTicks--
+    if (e.telegraphTicks > 0) return false
+    e.telegraphTotal = 0
+    fireVolley(e, w, hullX, hullY, out)
+    return true
+  }
+
+  if (e.fireCooldown > 0) return false
+
   // Guard against a zero interval turning one def into a projectile firehose.
   e.fireCooldown = Math.max(1, w.intervalTicks)
+
+  const windup = Number.isFinite(w.windupTicks) ? Math.floor(w.windupTicks) : 0
+  if (windup > 0) {
+    e.telegraphTicks = windup
+    e.telegraphTotal = windup
+    return false
+  }
+
+  // windupTicks 0 means the shot arrives unannounced. content/types.ts says that
+  // should be rare and deliberate; the sim still honours it.
+  fireVolley(e, w, hullX, hullY, out)
+  return true
 }
 
 function fireVolley(
