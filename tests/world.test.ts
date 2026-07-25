@@ -38,21 +38,64 @@ function runScript(seed: string, script: readonly InputSnapshot[]): World {
   return world
 }
 
-/** Everything that defines the outcome of a run. */
+/** Run with one held input for `ticks`. */
+function runHeld(seed: string, input: InputSnapshot, ticks: number): World {
+  const world = new World(seed)
+  for (let i = 0; i < ticks; i++) world.tick(input)
+  return world
+}
+
+const FIRING: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
+
+/**
+ * Everything that defines the outcome of a run.
+ *
+ * The whole state, not a summary. A determinism test that compared only stats
+ * would pass while enemies, projectiles, and death attribution diverged — which
+ * is precisely the class of drift this is here to catch, since a replay fixture
+ * is only as strong as what this function looks at.
+ */
 function snapshot(world: World): string {
   return JSON.stringify({
+    runState: world.runState,
+    incident: world.incident,
+    waveIndex: world.currentWaveIndex,
     hull: world.hull,
-    bullets: world.bullets,
+    playerBullets: world.playerBullets,
+    enemyBullets: world.enemyBullets,
+    enemies: world.enemies,
+    explosions: world.explosions,
     stats: world.stats,
   })
 }
 
 describe('World determinism', () => {
   it('reaches an identical state from the same seed and inputs', () => {
-    const script = inputScript('DETERMIN1SM2', 900)
+    const script = inputScript('DETERMIN1SM2', 3600)
     const a = runScript('K7F29XQM3RTV', script)
     const b = runScript('K7F29XQM3RTV', script)
     expect(snapshot(a)).toEqual(snapshot(b))
+
+    // The comparison is worthless unless the run actually exercised combat, so
+    // assert the coverage the snapshot is supposed to be protecting.
+    expect(a.currentWaveIndex).toBeGreaterThan(0)
+    expect(a.stats.hits).toBeGreaterThan(0)
+    expect(a.stats.kills).toBeGreaterThan(0)
+    expect(a.stats.damageTaken).toBeGreaterThan(0)
+    expect(a.explosions.length + a.stats.kills).toBeGreaterThan(0)
+  })
+
+  it('reproduces a run that ends in death, incident included', () => {
+    // A pilot who never moves and never shoots gets rammed. This is the only test
+    // that covers the death path through the full sim rather than through
+    // damage.ts directly, so it has to compare the filed incident too.
+    const a = runHeld('DEATHRUN1234', NEUTRAL_INPUT, 5400)
+    const b = runHeld('DEATHRUN1234', NEUTRAL_INPUT, 5400)
+
+    expect(a.runState).toBe('lost')
+    expect(a.incident).not.toBeNull()
+    expect(snapshot(a)).toEqual(snapshot(b))
+    expect(a.incident).toEqual(b.incident)
   })
 
   it('diverges when the inputs differ', () => {
@@ -61,22 +104,37 @@ describe('World determinism', () => {
     expect(snapshot(a)).not.toEqual(snapshot(b))
   })
 
-  it('keeps the RNG streams unconsumed by movement and firing', () => {
-    // Milestone 0 has no spawns or loot, so flying around must not advance those
-    // streams at all. When enemies land, this test should be replaced with one
-    // asserting spawn draws are stable for a fixed tick count.
-    const world = runScript('STREAMSTREA2', inputScript('STREAMIN9234', 600))
+  it('diverges when the seed differs', () => {
+    const script = inputScript('SAMESCRIPT12', 1800)
+    const a = runScript('SEEDAAAAAAA1', script)
+    const b = runScript('SEEDBBBBBBB2', script)
+    expect(snapshot(a)).not.toEqual(snapshot(b))
+  })
+
+  it('keeps the RNG streams independent', () => {
+    const world = runScript('STREAMSTREA2', inputScript('STREAMIN9234', 1800))
     const fresh = new World('STREAMSTREA2')
-    expect(world.spawnRng.state()).toEqual(fresh.spawnRng.state())
+
+    // Spawning waves must consume the spawn stream...
+    expect(world.spawnRng.state()).not.toEqual(fresh.spawnRng.state())
+    // ...and must not touch loot, which nothing rolls in M1. If this ever fails,
+    // a spawn decision has started drawing from the wrong stream and every
+    // recorded replay's item drops have shifted.
     expect(world.lootRng.state()).toEqual(fresh.lootRng.state())
+  })
+
+  it('consumes the spawn stream identically for identical runs', () => {
+    const script = inputScript('STREAMEQ1234', 1200)
+    const a = runScript('STREAMSEED12', script)
+    const b = runScript('STREAMSEED12', script)
+    expect(a.spawnRng.state()).toEqual(b.spawnRng.state())
   })
 })
 
 describe('Hull movement', () => {
   it('stays inside the playfield under sustained input', () => {
     const hard: InputSnapshot = { moveX: 1, moveY: -1, fire: false, special: false, focus: false }
-    const world = new World('BOUNDSBOUND2')
-    for (let i = 0; i < 1200; i++) world.tick(hard)
+    const world = runHeld('BOUNDSBOUND2', hard, 1200)
 
     expect(world.hull.x).toBeGreaterThanOrEqual(0)
     expect(world.hull.x).toBeLessThanOrEqual(Playfield.w)
@@ -128,18 +186,15 @@ describe('Weapon and projectiles', () => {
     // weapon fired 20, because it was reporting volleys and labelling them shots.
     // Tying the assertion to the exported constant means the HUD and the sim
     // cannot drift apart again without failing here.
-    const world = new World('CADENCECADE2')
-    const firing: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
-    for (let i = 0; i < TICK_HZ; i++) world.tick(firing)
+    const world = runHeld('CADENCECADE2', FIRING, TICK_HZ)
     expect(world.stats.shotsFired).toBe(SHOTS_PER_SECOND)
   })
 
   it('alternates muzzles so fire reads as one stream', () => {
-    const world = new World('MUZZLEMUZZL2')
-    const firing: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
-    for (let i = 0; i < 12; i++) world.tick(firing)
+    const world = runHeld('MUZZLEMUZZL2', FIRING, 12)
 
-    const offsets = world.bullets.map((b) => Math.sign(b.x - world.hull.x))
+    const offsets = world.playerBullets.map((b) => Math.sign(b.x - world.hull.x))
+    expect(offsets.length).toBeGreaterThan(2)
     // Consecutive shots must come from opposite sides.
     for (let i = 1; i < offsets.length; i++) {
       expect(offsets[i]).not.toBe(offsets[i - 1])
@@ -147,35 +202,38 @@ describe('Weapon and projectiles', () => {
   })
 
   it('fires nothing when the trigger is not held', () => {
-    const world = new World('NOFIRENOFIR2')
-    for (let i = 0; i < 120; i++) world.tick(NEUTRAL_INPUT)
+    const world = runHeld('NOFIRENOFIR2', NEUTRAL_INPUT, 120)
     expect(world.stats.shotsFired).toBe(0)
-    expect(world.bullets).toHaveLength(0)
+    expect(world.playerBullets).toHaveLength(0)
   })
 
   it('culls projectiles that leave the playfield', () => {
-    const world = new World('CULLCULLCUL2')
-    const firing: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
-    for (let i = 0; i < 600; i++) world.tick(firing)
+    const world = runHeld('CULLCULLCUL2', FIRING, 600)
 
     expect(world.stats.bulletsCulled).toBeGreaterThan(0)
     // Live count must stabilise rather than grow without bound.
-    expect(world.bullets.length).toBeLessThan(40)
+    expect(world.playerBullets.length).toBeLessThan(40)
   })
 
   it('holds the live projectile count under the frame budget', () => {
     const world = new World('BUDGETBUDGE2')
-    const firing: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
-    for (let i = 0; i < 3600; i++) world.tick(firing)
+    let peakPlayer = 0
+    for (let i = 0; i < 3600; i++) {
+      world.tick(FIRING)
+      if (world.playerBullets.length > peakPlayer) peakPlayer = world.playerBullets.length
+    }
     // Perf budget: the renderer is specced for low thousands of sprites, so a
-    // single weapon must stay far below that on its own.
-    expect(world.stats.peakBullets).toBeLessThan(64)
+    // single weapon must stay far below that on its own...
+    expect(peakPlayer).toBeLessThan(64)
+    // ...and a minute of sector 1 including everything shooting back must stay
+    // well inside the 2,000-projectile figure in docs/ARCHITECTURE.md.
+    expect(world.stats.peakProjectiles).toBeLessThan(600)
   })
 
   it('moves projectiles by exactly one tick of travel', () => {
     const world = new World('TRAVELTRAVE2')
-    world.tick({ moveX: 0, moveY: 0, fire: true, special: false, focus: false })
-    const bullet = world.bullets[0]
+    world.tick(FIRING)
+    const bullet = world.playerBullets[0]
     expect(bullet).toBeDefined()
     // Spawned at the muzzle, then advanced one tick upward in the same call.
     const travelled = (bullet as { prevY: number; y: number }).prevY - (bullet as { y: number }).y

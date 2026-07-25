@@ -29,8 +29,22 @@ export const Palette = {
   self: '#5CE0F0',
   /** Caution: low resources, timers running out, risky routes. */
   caution: '#F5B942',
-  /** DANGER ONLY. Enemy fire, incoming damage, lethal hazards, death. */
+  /**
+   * DANGER: things that can damage you *this instant* — enemy projectiles,
+   * hazard fields, incoming damage, death. Never anything else.
+   *
+   * Note this is narrower than "the enemy". Enemy bodies use `hostile` below,
+   * because if every hostile thing were danger-red, the projectile the player
+   * must actually dodge would stop standing out — the exact failure the colour
+   * rule exists to prevent.
+   */
   danger: '#FF4A38',
+  /** Enemy hulls and structures. Cold steel: present, readable, not screaming. */
+  hostile: '#93A1B5',
+  /** Enemy hull fill, dark enough that the outline carries the silhouette. */
+  hostileFill: '#1B2430',
+  /** Elite//reinforced enemy accent. */
+  hostileElite: '#F5B942',
   /** Confirmation, healing, gains, successful extraction. */
   good: '#4ADE9B',
   /** Rare/relic tier highlight. */
@@ -45,6 +59,8 @@ export const Palette = {
   glowProjectile: 'rgba(92, 224, 240, 0.30)',
   glowDanger: 'rgba(255, 74, 56, 0.5)',
   glowWarm: 'rgba(245, 185, 66, 0.45)',
+  /** Explosion core. Drawn additively over a short lifetime. */
+  glowExplosion: 'rgba(255, 176, 92, 0.55)',
 } as const
 
 /** Starfield layers, back to front: dimmer and slower behind. */

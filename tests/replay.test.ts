@@ -1,0 +1,724 @@
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { describe, expect, it } from 'vitest'
+
+import type { Axis, InputSnapshot } from '../src/core/input'
+import { NEUTRAL_INPUT, packInput, unpackInput } from '../src/core/input'
+import { Rng } from '../src/core/rng'
+import type {
+  Bullet,
+  EnemyBullet,
+  EnemyInstance,
+  Explosion,
+  Hull,
+  Incident,
+  RunStats,
+  WorldView,
+} from '../src/sim/entities'
+import type { BotName } from '../src/sim/bots'
+import { BOTS, BOT_NAMES } from '../src/sim/bots'
+import { World } from '../src/sim/world'
+import { diffDigests, digestWorld, Hasher, hashWorld } from '../src/meta/snapshot'
+import type { Replay, TickableWorld } from '../src/meta/replay'
+import {
+  decodeReplay,
+  encodeReplay,
+  inputAt,
+  playback,
+  ReplayError,
+  ReplayRecorder,
+  REPLAY_FORMAT_VERSION,
+  toSnapshots,
+} from '../src/meta/replay'
+
+// ---------------------------------------------------------------------------
+// synthetic worlds
+//
+// The hashing tests build WorldView objects by hand rather than running the sim.
+// That is deliberate: hashing is the foundation the whole replay corpus stands
+// on, and its tests must keep working (and keep failing honestly) regardless of
+// what state the simulation is in.
+// ---------------------------------------------------------------------------
+
+function hull(overrides: Partial<Hull> = {}): Hull {
+  return {
+    x: 224,
+    y: 610,
+    prevX: 224,
+    prevY: 610,
+    integrity: 100,
+    maxIntegrity: 100,
+    shield: 40,
+    maxShield: 40,
+    invulnTicks: 0,
+    radius: 7,
+    ...overrides,
+  }
+}
+
+function bullet(overrides: Partial<Bullet> = {}): Bullet {
+  return { x: 100, y: 200, prevX: 100, prevY: 210, vx: 0, vy: -620, damage: 4, radius: 2, alive: true, ...overrides }
+}
+
+function enemyBullet(overrides: Partial<EnemyBullet> = {}): EnemyBullet {
+  return {
+    x: 150,
+    y: 300,
+    prevX: 150,
+    prevY: 295,
+    vx: 10,
+    vy: 180,
+    damage: 8,
+    radius: 3,
+    alive: true,
+    kind: 'pellet',
+    ...overrides,
+  }
+}
+
+function enemy(overrides: Partial<EnemyInstance> = {}): EnemyInstance {
+  return {
+    x: 200,
+    y: 120,
+    prevX: 200,
+    prevY: 118,
+    defId: 'skiff',
+    hp: 12,
+    maxHp: 12,
+    radius: 10,
+    shape: 'skiff',
+    movement: 'sine',
+    elite: false,
+    vx: 0,
+    vy: 40,
+    age: 30,
+    phase: 'holding',
+    fireCooldown: 12,
+    contactDamage: 10,
+    scrap: 3,
+    alive: true,
+    hitFlashTicks: 0,
+    originX: 200,
+    holdY: 180,
+    ...overrides,
+  }
+}
+
+function explosion(overrides: Partial<Explosion> = {}): Explosion {
+  return { x: 90, y: 90, age: 2, lifetime: 18, radius: 14, kind: 'enemy', ...overrides }
+}
+
+function stats(overrides: Partial<RunStats> = {}): RunStats {
+  return {
+    tick: 900,
+    shotsFired: 300,
+    hits: 210,
+    kills: 14,
+    scrap: 42,
+    damageTaken: 18,
+    waveIndex: 3,
+    peakProjectiles: 96,
+    bulletsCulled: 88,
+    ...overrides,
+  }
+}
+
+function incident(overrides: Partial<Incident> = {}): Incident {
+  return {
+    causeKind: 'enemy-fire',
+    causeEnemyId: 'lancer',
+    tick: 900,
+    secondsSurvived: 15,
+    waveIndex: 3,
+    scrap: 42,
+    kills: 14,
+    ...overrides,
+  }
+}
+
+function worldView(overrides: Partial<WorldView> = {}): WorldView {
+  return {
+    seed: 'K7F29XQM3RTV',
+    runState: 'active',
+    hull: hull(),
+    playerBullets: [bullet(), bullet({ x: 130, damage: 6 })],
+    enemyBullets: [enemyBullet(), enemyBullet({ kind: 'tracker', vx: -30 })],
+    enemies: [enemy(), enemy({ defId: 'lancer', elite: true, x: 300 })],
+    explosions: [explosion()],
+    stats: stats(),
+    incident: null,
+    ...overrides,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// snapshot hashing
+// ---------------------------------------------------------------------------
+
+describe('state hashing', () => {
+  it('is stable across calls and independent instances', () => {
+    expect(hashWorld(worldView())).toBe(hashWorld(worldView()))
+  })
+
+  /**
+   * A golden constant, not a self-comparison.
+   *
+   * This is the only test that can catch the hash function itself drifting —
+   * a different Node version, a different platform's endianness, or someone
+   * "simplifying" the float encoding would all still pass every other test in
+   * this file while silently invalidating the entire replay corpus. If this
+   * fails and the hasher was not deliberately changed, do not update the
+   * constant; find out why the arithmetic moved.
+   */
+  it('matches a recorded digest for a known world', () => {
+    expect(hashWorld(worldView())).toBe('a84510e42a86be74')
+  })
+
+  it('gives every play-affecting field its own influence', () => {
+    const base = hashWorld(worldView())
+    const mutations: Array<[string, WorldView]> = [
+      ['seed', worldView({ seed: 'K7F29XQM3RTW' })],
+      ['runState', worldView({ runState: 'lost' })],
+      ['hull.x', worldView({ hull: hull({ x: 224.0001 }) })],
+      ['hull.integrity', worldView({ hull: hull({ integrity: 99 }) })],
+      ['hull.invulnTicks', worldView({ hull: hull({ invulnTicks: 1 }) })],
+      ['playerBullets.length', worldView({ playerBullets: [bullet()] })],
+      ['playerBullets[0].vy', worldView({ playerBullets: [bullet({ vy: -619 }), bullet({ x: 130, damage: 6 })] })],
+      ['enemyBullets[0].kind', worldView({ enemyBullets: [enemyBullet({ kind: 'shard' }), enemyBullet({ kind: 'tracker', vx: -30 })] })],
+      ['enemies[0].hp', worldView({ enemies: [enemy({ hp: 11 }), enemy({ defId: 'lancer', elite: true, x: 300 })] })],
+      ['enemies[0].phase', worldView({ enemies: [enemy({ phase: 'committed' }), enemy({ defId: 'lancer', elite: true, x: 300 })] })],
+      ['enemies[0].elite', worldView({ enemies: [enemy({ elite: true }), enemy({ defId: 'lancer', elite: true, x: 300 })] })],
+      ['stats.kills', worldView({ stats: stats({ kills: 15 }) })],
+      ['stats.waveIndex', worldView({ stats: stats({ waveIndex: 4 }) })],
+      ['incident', worldView({ runState: 'lost', incident: incident() })],
+    ]
+    for (const [label, mutated] of mutations) {
+      expect(hashWorld(mutated), `${label} did not change the hash`).not.toBe(base)
+    }
+  })
+
+  it('separates a null incident from an attributed one', () => {
+    const unattributed = worldView({ runState: 'lost', incident: incident({ causeEnemyId: null }) })
+    const attributed = worldView({ runState: 'lost', incident: incident({ causeEnemyId: 'hauler' }) })
+    expect(hashWorld(unattributed)).not.toBe(hashWorld(attributed))
+  })
+
+  it('treats array order as state', () => {
+    const forward = worldView({ playerBullets: [bullet({ x: 1 }), bullet({ x: 2 })] })
+    const reversed = worldView({ playerBullets: [bullet({ x: 2 }), bullet({ x: 1 })] })
+    // Swap-remove means array order encodes removal history; two sims that cull
+    // in a different order will diverge later even when the sets match now.
+    expect(hashWorld(forward)).not.toBe(hashWorld(reversed))
+  })
+
+  it('excludes cosmetic state from the regression hash but still reports it', () => {
+    const base = worldView()
+    const moreVfx = worldView({
+      explosions: [explosion(), explosion({ x: 10, kind: 'hull' })],
+      enemies: [enemy({ hitFlashTicks: 4 }), enemy({ defId: 'lancer', elite: true, x: 300 })],
+    })
+    expect(hashWorld(moreVfx)).toBe(hashWorld(base))
+    expect(digestWorld(moreVfx).cosmetic).not.toBe(digestWorld(base).cosmetic)
+    expect(diffDigests(digestWorld(base), digestWorld(moreVfx))).toEqual(['cosmetic'])
+  })
+
+  it('names only the components that actually differ', () => {
+    const a = digestWorld(worldView())
+    const b = digestWorld(worldView({ stats: stats({ kills: 99 }) }))
+    expect(diffDigests(a, b)).toEqual(['stats'])
+    expect(diffDigests(a, a)).toEqual([])
+  })
+
+  it('folds -0 onto 0 and every NaN onto one pattern', () => {
+    // -0 plays identically to 0, so failing a fixture over it would be noise.
+    expect(new Hasher().num(-0).digest()).toBe(new Hasher().num(0).digest())
+    // A NaN sim is broken, so it must hash differently from 0 — but which NaN
+    // it produced is not information worth distinguishing.
+    const nan = new Hasher().num(Number.NaN).digest()
+    expect(nan).not.toBe(new Hasher().num(0).digest())
+    expect(nan).toBe(new Hasher().num(Number.NaN * 2).digest())
+  })
+
+  it('distinguishes floats a decimal rounding would merge', () => {
+    const a = new Hasher().num(0.1 + 0.2).digest()
+    const b = new Hasher().num(0.3).digest()
+    // 0.1+0.2 !== 0.3 in IEEE-754, and a sim that produced one where it used to
+    // produce the other has changed. Hashing formatted strings would hide it.
+    expect(a).not.toBe(b)
+  })
+
+  it('length-prefixes strings so concatenations cannot collide', () => {
+    expect(new Hasher().str('ab').str('c').digest()).not.toBe(new Hasher().str('a').str('bc').digest())
+  })
+})
+
+// ---------------------------------------------------------------------------
+// replay encoding
+// ---------------------------------------------------------------------------
+
+/** A stub sim: records exactly the bytes it was ticked with. */
+class InputLogWorld implements TickableWorld {
+  readonly log: number[] = []
+  constructor(readonly seed: string) {}
+  tick(input: InputSnapshot): void {
+    this.log.push(packInput(input))
+  }
+}
+
+function randomInputs(seed: string, ticks: number, changeEvery = 9): InputSnapshot[] {
+  const rng = Rng.fromSeed(seed, 'test:replay-inputs')
+  const out: InputSnapshot[] = []
+  let current: InputSnapshot = NEUTRAL_INPUT
+  for (let i = 0; i < ticks; i++) {
+    if (i % changeEvery === 0) {
+      current = {
+        moveX: (rng.int(3) - 1) as Axis,
+        moveY: (rng.int(3) - 1) as Axis,
+        fire: rng.chance(0.8),
+        special: rng.chance(0.1),
+        focus: rng.chance(0.2),
+      }
+    }
+    out.push(current)
+  }
+  return out
+}
+
+function recordOf(seed: string, inputs: readonly InputSnapshot[]): ReplayRecorder {
+  const recorder = new ReplayRecorder(seed)
+  for (const input of inputs) recorder.record(input)
+  return recorder
+}
+
+/**
+ * An independent base64url + FNV implementation, used only to forge byte-level
+ * corruption cases.
+ *
+ * Duplicating the encoder in the test is intentional. Reaching into the module's
+ * internals would make these tests pass whenever the module is self-consistent,
+ * including when it is self-consistently wrong; an independent implementation
+ * cross-checks the real one.
+ */
+const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+
+function localBase64Url(bytes: readonly number[]): string {
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i] ?? 0
+    const b1 = bytes[i + 1]
+    const b2 = bytes[i + 2]
+    const n = (b0 << 16) | ((b1 ?? 0) << 8) | (b2 ?? 0)
+    out += B64.charAt((n >>> 18) & 63) + B64.charAt((n >>> 12) & 63)
+    if (b1 !== undefined) out += B64.charAt((n >>> 6) & 63)
+    if (b2 !== undefined) out += B64.charAt(n & 63)
+  }
+  return out
+}
+
+function localChecksum(bytes: readonly number[]): number {
+  let h = 0x811c9dc5 | 0
+  for (const byte of bytes) h = Math.imul(h ^ byte, 16777619)
+  return h >>> 0
+}
+
+/** Build a replay blob by hand, optionally with a deliberately wrong field. */
+function forgeReplay(options: {
+  magic?: readonly number[]
+  version?: number
+  seed?: string
+  tickCount?: number
+  runs?: ReadonlyArray<[number, number]>
+  breakChecksum?: boolean
+  extraTrailing?: readonly number[]
+}): string {
+  const magic = options.magic ?? [0x4e, 0x50, 0x52]
+  const version = options.version ?? REPLAY_FORMAT_VERSION
+  const seed = options.seed ?? 'ABCD'
+  const runs = options.runs ?? [[packInput(NEUTRAL_INPUT), 4]]
+  const tickCount = options.tickCount ?? runs.reduce((sum, [, count]) => sum + count, 0)
+
+  const bytes: number[] = [...magic, version, seed.length]
+  for (let i = 0; i < seed.length; i++) bytes.push(seed.charCodeAt(i))
+  const varint = (value: number): void => {
+    let v = value
+    while (v >= 0x80) {
+      bytes.push((v & 0x7f) | 0x80)
+      v = Math.floor(v / 128)
+    }
+    bytes.push(v & 0x7f)
+  }
+  varint(tickCount)
+  for (const [byte, count] of runs) {
+    bytes.push(byte)
+    varint(count)
+  }
+  if (options.extraTrailing) bytes.push(...options.extraTrailing)
+  const sum = localChecksum(bytes) ^ (options.breakChecksum === true ? 0xff : 0)
+  bytes.push(sum & 0xff, (sum >>> 8) & 0xff, (sum >>> 16) & 0xff, (sum >>> 24) & 0xff)
+  return localBase64Url(bytes)
+}
+
+describe('replay encoding', () => {
+  it('round-trips an arbitrary input sequence losslessly', () => {
+    const inputs = randomInputs('ROUNDTR1P234', 4_000)
+    const decoded = decodeReplay(recordOf('K7F29XQM3RTV', inputs).encode())
+    expect(decoded.version).toBe(REPLAY_FORMAT_VERSION)
+    expect(decoded.seed).toBe('K7F29XQM3RTV')
+    expect(decoded.inputs.length).toBe(inputs.length)
+    expect(toSnapshots(decoded)).toEqual(inputs)
+  })
+
+  it('round-trips every reachable input byte', () => {
+    // 3 x 3 x 2 x 2 x 2 = 72 distinct snapshots. Exhaustive is cheap here, and
+    // a packing bug in one rare combination is exactly the kind of thing a
+    // random sample misses.
+    const all: InputSnapshot[] = []
+    for (const moveX of [-1, 0, 1] as const) {
+      for (const moveY of [-1, 0, 1] as const) {
+        for (const fire of [false, true]) {
+          for (const special of [false, true]) {
+            for (const focus of [false, true]) {
+              all.push({ moveX, moveY, fire, special, focus })
+            }
+          }
+        }
+      }
+    }
+    const decoded = decodeReplay(recordOf('ABCD', all).encode())
+    expect(toSnapshots(decoded)).toEqual(all)
+  })
+
+  it('round-trips a zero-tick replay', () => {
+    const decoded = decodeReplay(new ReplayRecorder('ABCD').encode())
+    expect(decoded.inputs.length).toBe(0)
+    expect(decoded.seed).toBe('ABCD')
+  })
+
+  it('agrees with an independently written encoder', () => {
+    const recorder = recordOf('ABCD', [NEUTRAL_INPUT, NEUTRAL_INPUT, NEUTRAL_INPUT, NEUTRAL_INPUT])
+    expect(recorder.encode()).toBe(forgeReplay({ seed: 'ABCD', runs: [[packInput(NEUTRAL_INPUT), 4]] }))
+  })
+
+  it('reads back individual ticks', () => {
+    const inputs = randomInputs('TICKAT234567', 200)
+    const replay = decodeReplay(recordOf('ABCD', inputs).encode())
+    expect(inputAt(replay, 0)).toEqual(inputs[0])
+    expect(inputAt(replay, 199)).toEqual(inputs[199])
+    expect(() => inputAt(replay, 200)).toThrow(ReplayError)
+  })
+})
+
+describe('replay compression', () => {
+  const HELD: InputSnapshot = { moveX: 1, moveY: 0, fire: true, special: false, focus: false }
+
+  it('collapses a twenty-minute held run to a few hundred bytes', () => {
+    // 20 minutes at 60Hz. Uncompressed this is 72KB, ~96KB base64'd, which is
+    // far past what a URL carries. Held inputs dominate real play, so RLE is the
+    // difference between a shareable link and a file upload.
+    const ticks = 20 * 60 * 60
+    const encoded = recordOf('K7F29XQM3RTV', new Array<InputSnapshot>(ticks).fill(HELD)).encode()
+    expect(encoded.length).toBeLessThan(400)
+    expect(decodeReplay(encoded).inputs.length).toBe(ticks)
+  })
+
+  it('scales with input changes rather than with ticks', () => {
+    const held = recordOf('ABCD', new Array<InputSnapshot>(10_000).fill(HELD)).encode()
+    const alternating: InputSnapshot[] = []
+    for (let i = 0; i < 10_000; i++) alternating.push(i % 2 === 0 ? HELD : NEUTRAL_INPUT)
+    const churned = recordOf('ABCD', alternating).encode()
+    expect(churned.length).toBeGreaterThan(held.length * 100)
+    // Even worst-case churn must stay under the raw byte-per-tick cost, or RLE
+    // would be a pessimisation on frantic play.
+    expect(churned.length).toBeLessThan(10_000 * 3)
+  })
+
+  it('keeps a realistic bot-shaped run small enough for a URL', () => {
+    // A direction change every ~9 ticks is far twitchier than anyone plays, so
+    // this is a pessimistic three-minute run: it measures ~3.1KB, against 10.8KB
+    // raw and 14.4KB base64'd. Browsers and CDNs handle URLs of ~8KB, so the
+    // bound is set there rather than at the measured figure — this test guards
+    // "still fits in a link", not "the encoder never changes by a byte".
+    const encoded = recordOf('ABCD', randomInputs('REAL1ST1C234', 3 * 60 * 60)).encode()
+    expect(encoded.length).toBeLessThan(8_000)
+  })
+})
+
+describe('replay corruption is rejected, never guessed at', () => {
+  const valid = recordOf('K7F29XQM3RTV', randomInputs('CORRUPT23456', 1_200)).encode()
+
+  it('accepts the unmodified string', () => {
+    expect(decodeReplay(valid).inputs.length).toBe(1_200)
+  })
+
+  it('rejects an empty string', () => {
+    expect(() => decodeReplay('')).toThrow(ReplayError)
+  })
+
+  it('rejects a truncated string rather than replaying a prefix', () => {
+    // The failure this prevents: a decoder that silently plays 800 of 1,200
+    // ticks reports a reproduction mismatch and sends someone hunting a sim bug.
+    for (const cut of [1, 4, 8, 40, 200]) {
+      const truncated = valid.slice(0, valid.length - cut)
+      expect(() => decodeReplay(truncated), `cut ${cut}`).toThrow(ReplayError)
+    }
+  })
+
+  it('rejects a single flipped character anywhere in the payload', () => {
+    for (const index of [6, 12, 30, Math.floor(valid.length / 2), valid.length - 2]) {
+      const original = valid.charAt(index)
+      const replacement = original === 'A' ? 'B' : 'A'
+      const mangled = valid.slice(0, index) + replacement + valid.slice(index + 1)
+      expect(() => decodeReplay(mangled), `index ${index}`).toThrow(ReplayError)
+    }
+  })
+
+  it('rejects characters that are not base64url', () => {
+    expect(() => decodeReplay(`${valid.slice(0, 10)}!${valid.slice(11)}`)).toThrow(/not-base64url/)
+    expect(() => decodeReplay('###')).toThrow(/not-base64url/)
+  })
+
+  it('rejects something that is not a replay at all', () => {
+    expect(() => decodeReplay(forgeReplay({ magic: [0x41, 0x42, 0x43] }))).toThrow(/bad-magic/)
+    expect(() => decodeReplay('aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYSByZXBsYXk')).toThrow(ReplayError)
+  })
+
+  it('rejects a short string that cannot hold a header', () => {
+    expect(() => decodeReplay('AAAA')).toThrow(/too-short/)
+  })
+
+  it('rejects a broken checksum', () => {
+    expect(() => decodeReplay(forgeReplay({ breakChecksum: true }))).toThrow(/checksum-mismatch/)
+  })
+
+  it('rejects a run table that disagrees with the declared tick count', () => {
+    expect(() => decodeReplay(forgeReplay({ tickCount: 9, runs: [[0b0101, 4]] }))).toThrow(
+      /tick-count-mismatch/,
+    )
+    expect(() => decodeReplay(forgeReplay({ tickCount: 2, runs: [[0b0101, 4]] }))).toThrow(
+      /tick-count-mismatch/,
+    )
+  })
+
+  it('rejects a zero-length run', () => {
+    expect(() => decodeReplay(forgeReplay({ runs: [[0b0101, 0]], tickCount: 0 }))).toThrow(
+      /bad-run-count/,
+    )
+  })
+
+  it('rejects an input byte the packer could never produce', () => {
+    // 0b11 in an axis field and anything in bit 7 are unreachable from
+    // packInput, which makes them a free corruption check.
+    expect(() => decodeReplay(forgeReplay({ runs: [[0b0011, 2]] }))).toThrow(/bad-input-byte/)
+    expect(() => decodeReplay(forgeReplay({ runs: [[0b1100, 2]] }))).toThrow(/bad-input-byte/)
+    expect(() => decodeReplay(forgeReplay({ runs: [[0b10000000, 2]] }))).toThrow(/bad-input-byte/)
+  })
+
+  it('rejects an implausible seed', () => {
+    expect(() => decodeReplay(forgeReplay({ seed: '' }))).toThrow(/bad-seed/)
+    expect(() => decodeReplay(forgeReplay({ seed: 'AB CD' }))).toThrow(/bad-seed/)
+  })
+})
+
+describe('replay format versioning', () => {
+  it('stamps the current version', () => {
+    expect(decodeReplay(new ReplayRecorder('ABCD').encode()).version).toBe(REPLAY_FORMAT_VERSION)
+  })
+
+  it('refuses a future version instead of misreading it', () => {
+    // Without this the next format change would read old replays as plausible
+    // nonsense and blame the simulation for the mismatch.
+    expect(() => decodeReplay(forgeReplay({ version: REPLAY_FORMAT_VERSION + 1 }))).toThrow(
+      /version-mismatch/,
+    )
+    expect(() => decodeReplay(forgeReplay({ version: 0 }))).toThrow(/version-mismatch/)
+  })
+
+  it('reports the version it found and the version it wanted', () => {
+    expect(() => decodeReplay(forgeReplay({ version: 7 }))).toThrow(
+      new RegExp(`version 7.*reads ${REPLAY_FORMAT_VERSION}`),
+    )
+  })
+
+  it('refuses to encode a replay claiming another version', () => {
+    const wrong: Replay = { version: 99, seed: 'ABCD', inputs: new Uint8Array([0b0101]) }
+    expect(() => encodeReplay(wrong)).toThrow(/version-mismatch/)
+  })
+})
+
+describe('replay playback', () => {
+  it('drives a world with exactly the recorded inputs, in order', () => {
+    const inputs = randomInputs('PLAYBACK2345', 500)
+    const replay = decodeReplay(recordOf('SEEDSEEDSEED', inputs).encode())
+    const { world, ticks, stoppedEarly } = playback(replay, (seed) => new InputLogWorld(seed))
+    expect(world.seed).toBe('SEEDSEEDSEED')
+    expect(ticks).toBe(500)
+    expect(stoppedEarly).toBe(false)
+    expect(world.log).toEqual(inputs.map(packInput))
+  })
+
+  it('stops early when asked, and says so', () => {
+    const replay = decodeReplay(recordOf('ABCD', randomInputs('STOPEARLY234', 500)).encode())
+    const result = playback(replay, (seed) => new InputLogWorld(seed), {
+      stopWhen: (_world, tick) => tick === 100,
+    })
+    expect(result.ticks).toBe(100)
+    expect(result.stoppedEarly).toBe(true)
+  })
+
+  it('replays identically every time', () => {
+    const replay = decodeReplay(recordOf('ABCD', randomInputs('TW1CETW1CE23', 700)).encode())
+    const first = playback(replay, (seed) => new InputLogWorld(seed)).world.log
+    const second = playback(replay, (seed) => new InputLogWorld(seed)).world.log
+    expect(first).toEqual(second)
+  })
+
+  it('unpacks what the recorder packed', () => {
+    const inputs = randomInputs('PACKUNPACK23', 64)
+    const replay = decodeReplay(recordOf('ABCD', inputs).encode())
+    for (let i = 0; i < inputs.length; i++) {
+      expect(unpackInput(replay.inputs[i] ?? 0)).toEqual(inputs[i])
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// bots
+// ---------------------------------------------------------------------------
+
+/** Play a policy against a fresh World and return the recorder plus the digest. */
+function runPolicy(name: BotName, seed: string, maxTicks: number): { recorder: ReplayRecorder; hash: string } {
+  const world = new World(seed)
+  const view: WorldView = world
+  const policy = BOTS[name].create(seed)
+  const recorder = new ReplayRecorder(seed)
+  let ticks = 0
+  while (view.runState === 'active' && ticks < maxTicks) {
+    const input = policy(view)
+    recorder.record(input)
+    world.tick(input)
+    ticks++
+  }
+  return { recorder, hash: hashWorld(view) }
+}
+
+describe('bot policies', () => {
+  it.each(BOT_NAMES)('%s produces an identical run from the same seed', (name) => {
+    // Without this, every number the playtest sweep prints is unreproducible,
+    // and a balance finding that cannot be reproduced cannot be acted on.
+    const first = runPolicy(name, 'B0TSEED23456', 1_800)
+    const second = runPolicy(name, 'B0TSEED23456', 1_800)
+    expect(second.hash).toBe(first.hash)
+    expect(second.recorder.encode()).toBe(first.recorder.encode())
+  })
+
+  it.each(BOT_NAMES)('%s diverges on a different seed', (name) => {
+    const a = runPolicy(name, 'B0TSEED23456', 1_800)
+    const b = runPolicy(name, 'B0TSEED23457', 1_800)
+    expect(b.hash).not.toBe(a.hash)
+  })
+
+  it.each(BOT_NAMES)('a recorded %s run replays to the same state', (name) => {
+    // The live check that the static fixtures cannot make: recording and
+    // replaying agree *right now*, on a run recorded in this process.
+    const live = runPolicy(name, 'REC0RD234567', 2_400)
+    const replay = decodeReplay(live.recorder.encode())
+    const { world } = playback(replay, (seed) => new World(seed))
+    expect(hashWorld(world)).toBe(live.hash)
+  })
+
+  it('each policy behaves differently from the others', () => {
+    // Four probes that all played the same run would be one probe with three
+    // extra rows in the report.
+    const hashes = BOT_NAMES.map((name) => runPolicy(name, 'D1STINCT2345', 1_800).hash)
+    expect(new Set(hashes).size).toBe(BOT_NAMES.length)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// the regression corpus
+// ---------------------------------------------------------------------------
+
+interface Fixture {
+  file: string
+  fixtureVersion: number
+  name: string
+  policy: string
+  seed: string
+  ticks: number
+  replay: string
+  expected: {
+    runState: string
+    hash: string
+    components: Record<string, string>
+    counts: Record<string, number>
+    stats: Record<string, number>
+  }
+}
+
+const FIXTURE_DIR = fileURLToPath(new URL('./replays', import.meta.url))
+const FIXTURE_FORMAT_VERSION = 1
+
+function loadFixtures(): Fixture[] {
+  if (!existsSync(FIXTURE_DIR)) return []
+  return readdirSync(FIXTURE_DIR)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .map((file) => {
+      const parsed = JSON.parse(readFileSync(`${FIXTURE_DIR}/${file}`, 'utf8')) as Omit<Fixture, 'file'>
+      return { ...parsed, file }
+    })
+}
+
+const fixtures = loadFixtures()
+
+/**
+ * THE REGRESSION CORPUS (docs/VERIFICATION.md §1).
+ *
+ * Each fixture is a seed, a recorded input log, and the state hash the run ends
+ * on. Replaying it must reproduce that hash bit-exactly. When this fails it is
+ * usually a caught bug; when the change was an intended balance change, re-record
+ * with `npm run playtest -- --record-fixture=NAME --policy=P --seed=S` and let the
+ * diff in the commit show exactly what moved.
+ *
+ * Do not "fix" a failure by regenerating the fixture without reading the diff.
+ * That converts the highest-value instrument in this project into a rubber stamp.
+ */
+describe('recorded run regression', () => {
+  if (fixtures.length === 0) {
+    // Deliberately a visible skip rather than a silent pass. An empty corpus
+    // means this instrument is not running at all, which is the single most
+    // load-bearing fact about the current state of verification.
+    it.skip('CORPUS IS EMPTY — record one with: npm run playtest -- --record-fixture=NAME', () => {})
+    return
+  }
+
+  it.each(fixtures)('$file reproduces its recorded final state', (fixture) => {
+    expect(fixture.fixtureVersion).toBe(FIXTURE_FORMAT_VERSION)
+
+    const replay = decodeReplay(fixture.replay)
+    expect(replay.seed).toBe(fixture.seed)
+    expect(replay.inputs.length).toBe(fixture.ticks)
+
+    const { world } = playback(replay, (seed) => new World(seed))
+    const view: WorldView = world
+    const digest = digestWorld(view)
+
+    // Component-level assertions first: "enemies and stats moved, hull didn't"
+    // localises a regression in one line, where a single mismatched aggregate
+    // hash localises nothing.
+    for (const [component, expected] of Object.entries(fixture.expected.components)) {
+      expect(digest[component as keyof typeof digest], `component ${component}`).toBe(expected)
+    }
+    expect(view.runState).toBe(fixture.expected.runState)
+    expect(view.stats.kills).toBe(fixture.expected.stats['kills'])
+    expect(view.stats.waveIndex).toBe(fixture.expected.stats['waveIndex'])
+    expect(digest.hash).toBe(fixture.expected.hash)
+  })
+
+  it.each(fixtures)('$file replays identically twice in a row', (fixture) => {
+    const replay = decodeReplay(fixture.replay)
+    const once = hashWorld(playback(replay, (seed) => new World(seed)).world)
+    const twice = hashWorld(playback(replay, (seed) => new World(seed)).world)
+    expect(once).toBe(twice)
+  })
+})

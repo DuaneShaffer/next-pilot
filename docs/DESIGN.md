@@ -119,7 +119,43 @@ Determinism is architectural (see `docs/ARCHITECTURE.md`), so these come nearly 
 
 - **No multiplayer.** Static hosting, and it would consume the whole budget.
 - **No accounts or server.** Everything in `localStorage`; the URL is the only sharing channel.
-- **No mobile-first design.** Keyboard is the primary input; touch may come later, but designing
-  for it now would compromise the controls that matter.
+- **Not mobile-*first*.** Keyboard is the primary input and the controls are tuned for it. Mobile
+  support is planned (see below and `docs/ROADMAP.md`), but it follows the desktop feel rather
+  than compromising it.
 - **No procedurally generated art.** Code-defined geometry, hand-tuned. Procedural visuals
   usually read as noise.
+
+## Mobile support — the decision, made early
+
+Planned, not a non-goal. The architecture already handles the hard part, and one constraint is
+settled now so it doesn't get relitigated later.
+
+**Input is free.** The simulation only ever sees an `InputSnapshot` and never reads the keyboard,
+so touch is purely an input-layer concern: no sim changes, no risk to determinism, and a replay
+recorded on a phone stays valid on a desktop. The scheme is **relative drag** (the ship moves by
+the drag delta, so a thumb never covers the ship), **auto-fire always on** (a fire button is pure
+tax in a shmup), and focus as a second thumb zone.
+
+**THE FROZEN CONSTRAINT: the playfield's aspect ratio and virtual units never change.** 448×720,
+on every device, forever. Only the *panel's placement* is responsive — a right-hand column in
+landscape, a bottom bar in portrait.
+
+**Why this is not negotiable:** a wider playfield makes dodging easier and a narrower one makes it
+harder. If the play area flexed per device, seeded runs, daily contracts, and shared replays would
+stop being comparable, and the entire competitive feature set would quietly become meaningless.
+Letterboxing costs screen area; a flexible playfield costs fairness.
+
+Portrait works well under that constraint: on a 390×844 phone the playfield scales to 390×627 with
+a ~104px panel bar beneath it, using 731 of 844 available pixels.
+
+**Known traps, recorded now because they're cheaper to know than to debug:**
+
+- iOS will not play WebAudio until a user gesture has occurred. Audio synthesis initialised at
+  page load is silently muted on iPhone. Relevant to M2.
+- `overscroll-behavior: none` is needed or pull-to-refresh fires mid-run.
+- Safe-area insets matter on notched devices.
+- Additive glow at 3× DPR on a mid-range phone is a real performance risk. The frame-time budget
+  in `docs/VERIFICATION.md` is the instrument that will catch it.
+- `src/render/panel.ts` derives its content origin from `PLAYFIELD_W`. That is the one hardcoded
+  assumption that the panel is a right-hand column, and the thing to break when the panel is next
+  worked on.

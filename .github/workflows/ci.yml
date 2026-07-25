@@ -26,6 +26,12 @@ jobs:
 
       - run: npm ci
 
+      # The three contracts from CLAUDE.md, enforced rather than trusted. A single
+      # Math.random() in sim code would invalidate every recorded replay while
+      # passing typecheck and every test, so it fails here first and cheapest.
+      - name: Architectural contracts
+        run: npm run contracts
+
       - name: Typecheck
         run: npm run typecheck
 

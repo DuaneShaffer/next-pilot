@@ -24,19 +24,35 @@ Prove the whole pipeline end to end before building anything on it.
 
 **Exit:** the deployed page loads and is interactive; `npm run check` passes; bundle under 150KB.
 
-## M1 — Combat core
+## M1 — Combat core ✅
 
 The point at which it becomes a game: things shoot back and you can lose.
 
-- Enemy entities with data-driven definitions in `src/content/enemies.ts`
-- Wave spawner drawing from the `spawn` stream, deterministic per seed
-- Collision (circle/AABB), damage, shields, integrity, invulnerability frames
-- Enemy projectile patterns: aimed, spread, ring, and a slow tracker
-- Death, run-end, and an incident report screen
-- Sector 1 (Debris Shelf) fully populated, ~3 minutes of escalating waves
+- [x] Enemy entities with data-driven definitions in `src/content/enemies.ts` (7 defs)
+- [x] Wave spawner drawing from the `spawn` stream, deterministic per seed
+- [x] Collision (circle + swept segment), damage, shields, integrity, invulnerability frames
+- [x] Enemy projectile patterns: aimed, spread, ring, tracker
+- [x] Death, run-end, and an incident report screen
+- [x] Sector 1 (Debris Shelf) populated — 30 waves, 139 enemies, 180s
+- [x] Bot playtest harness with four policies, and a contract checker enforcing the three rules
 
-**Exit:** a bot can play a complete run and die; a recorded replay of that run reproduces
-bit-exactly; damage and death have tests; the first replay fixtures land in `tests/replays/`.
+**Exit criteria, all met:** bots play complete runs and die; three recorded replays reproduce
+bit-exactly in a separate process from the one that recorded them; damage and death have tests
+(51 in `tests/combat.test.ts`); fixtures live in `tests/replays/`. 193 tests total.
+
+**Known follow-ups carried into M2**, from real measurements rather than guesses:
+
+- `greedy` dies at 123.7s ± 0.7s across 500 seeds — a deterministic wall, not a distribution.
+  43% `collision:lancer` about 2s after the 121s wave. The playfield's upper half is effectively
+  unusable from wave 21 on.
+- `random` reaches wave 18 of 30 on pure noise, 57% through the sector. Not the alarm outright,
+  but close enough to check. 62% of its deaths come from one def (`turret`).
+- `waveIndex` is currently redundant with survival time — all 30 waves release on a fixed clock,
+  so "wave reached" is survival time re-expressed. It only becomes an independent signal once
+  clearing gates progression.
+- The instrument panel has a ~140-unit void reserved for held items (M3), which currently reads
+  as unfinished.
+- Impacts read complete but weightless. That is precisely what M2 is for.
 
 ## M2 — Game feel
 
@@ -104,9 +120,29 @@ spike above 35%).
 **Exit:** accessibility checklist complete; all budgets green; a first-run screenshot sequence
 that explains itself.
 
+## M7 — Mobile
+
+Deliberately after the desktop feel is settled, so touch follows the game rather than shaping it.
+The design decisions are already made in `docs/DESIGN.md` — read that section before starting, in
+particular the frozen playfield-aspect constraint.
+
+- Relative-drag touch controls (ship moves by drag delta so a thumb never covers it)
+- Auto-fire always on; focus as a second thumb zone
+- Responsive panel placement: right column in landscape, bottom bar in portrait. The playfield's
+  448×720 aspect and virtual units DO NOT change — that is what keeps seeds, daily contracts, and
+  replays comparable across devices.
+- Decouple `src/render/panel.ts` from `PLAYFIELD_W`
+- Replace keyboard-assuming UI text
+- `overscroll-behavior: none`, safe-area insets, WebAudio unlock on first gesture (iOS will not
+  play audio initialised at load)
+- Performance pass: additive glow at 3× DPR on a mid-range phone is the risk
+
+**Exit:** a real run completes on a phone in portrait at 60fps within the frame-time budget; a
+replay recorded on mobile reproduces bit-exactly on desktop; the frozen-aspect constraint is
+asserted by a test.
+
 ---
 
 ## Not scheduled
 
-Mobile/touch controls, multiplayer, accounts, Steam packaging. See the non-goals in
-`docs/DESIGN.md`.
+Multiplayer, accounts, Steam packaging. See the non-goals in `docs/DESIGN.md`.

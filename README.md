@@ -9,8 +9,10 @@ ends permanently, the incident is filed, and someone else is issued your equipme
 
 ▶ **[Play it](https://duaneshaffer.github.io/next-pilot/)**
 
-> **Status: early development (M0).** The pipeline is live — seeded runs, a controllable hull, and
-> the instrument panel. There is nothing to shoot at yet. See [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: early development (M1).** Playable: seeded runs, seven enemy types, five movement and
+> five weapon patterns, shields, permadeath, and a filed incident report when you die. Sector 1 is
+> ~3 minutes of escalating waves. No items or meta-progression yet — see
+> [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Controls
 
@@ -36,15 +38,19 @@ npm run dev        # http://localhost:5173
 | `npm run preview`   | Serve the production build                    |
 | `npm run typecheck` | TypeScript, no emit                           |
 | `npm test`          | Vitest run                                    |
-| `npm run check`     | Typecheck + tests. The gate before committing. |
+| `npm run check`     | Contracts + typecheck + tests. The gate before committing. |
+| `npm run contracts` | Statically enforces the three architectural contracts |
+| `npm run playtest`  | Headless bot sweep — the balance oracle |
+| `npm run screenshot`| Build, then capture every screen for visual review |
 
 Append `?seed=K7F2-9XQM-3RTV` to replay an exact run, or `?screen=sortie` to skip the title screen.
-Both exist for the automated test harness and are just as usable by hand.
+`?autopilot=dodger|aggressor|greedy|random` lets a bot fly it, and `?ff=N` fast-forwards the
+simulation. All four exist for the verification harness and are just as usable by hand.
 
 ## How it's built
 
 Vanilla TypeScript, Canvas2D, Vite. **No runtime dependencies**, no binary assets — ships are
-code-defined geometry and audio is synthesised at runtime. The production bundle is about 15KB.
+code-defined geometry and audio is synthesised at runtime. The production bundle is about 49KB (17KB gzipped).
 
 The design is built around one constraint: **the simulation is deterministic.** Same seed plus
 same inputs always produces the same run. It advances in fixed 60Hz ticks, draws all randomness

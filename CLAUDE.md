@@ -45,14 +45,23 @@ Never report work as complete without these:
 ```
 src/core/    Engine primitives. rng, loop, input, seed, space. No game content.
 src/sim/     Simulation. Headless, deterministic, no rendering imports.
+             entities.ts is the CONTRACT: entity shapes plus WorldView, the
+             read-only view that render and bots consume. Change it deliberately.
 src/content/ Data-driven definitions: hulls, weapons, items, enemies, sectors.
-src/render/  Canvas2D drawing. Reads sim state, never writes it.
+             types.ts documents what each movement/weapon kind means; the sim
+             interprets them so adding content never means editing the sim.
+src/render/  Canvas2D drawing. Consumes WorldView, never the World class.
 src/ui/      Screens and menus.
-src/meta/    Save, unlocks, replays. Crosses runs.
+src/meta/    Save, unlocks, replays, state hashing. Crosses runs.
 tests/       Vitest. Sim tests run headless; determinism tests are load-bearing.
-tools/       Verification harness: bot playtests, screenshot capture.
+             tests/replays/ is the regression corpus — recorded runs that must
+             reproduce bit-exactly forever.
+tools/       Verification harness: bot playtests (tsx), screenshot capture.
 docs/        Specs. DESIGN, UI, ARCHITECTURE, VERIFICATION, ROADMAP.
 ```
+
+**The dependency arrow is one-way:** `core ← sim ← render/ui`. Content is data consumed by sim.
+Anything that observes a run reads `WorldView`; nothing outside `src/sim/**` may hold a `World`.
 
 ## Conventions
 

@@ -13,9 +13,9 @@
 
 import { PANEL_W, PLAYFIELD_W, VIRTUAL_H } from '../core/space'
 import { formatSeed } from '../core/seed'
-import type { World } from '../sim/world'
-import { Palette } from './palette'
-import { drawLabel, drawText, drawValue } from './text'
+import type { WorldView } from '../sim/entities'
+import { Font, Palette } from './palette'
+import { drawLabel, drawText, drawValue, measureText } from './text'
 
 const PAD = 14
 const CONTENT_X = PLAYFIELD_W + PAD
@@ -123,20 +123,105 @@ function drawRow(
   return top + 33
 }
 
+/**
+ * A compact one-line readout: label left, value right-aligned on the same line.
+ *
+ * Used for the sortie log, where a dozen rows of the label-above-value form
+ * would out-shout the meters they sit beneath. Sharing a line makes ownership
+ * unambiguous — there is no vertical gap for the eye to misread, which is the
+ * failure mode that once made `FIRE RATE` look like a caption for the value
+ * above it.
+ *
+ * The hazard this form *does* have is the collision that put the warning in
+ * drawMeter's comment: a long label runs into a right-aligned value. Rather than
+ * trusting a character count, this measures both and drops the value onto its
+ * own line if they would not fit. Degrading to two lines is ugly; overlapping
+ * text is unreadable, and unreadable is a P0.
+ */
+const STAT_VALUE_SIZE = 13
+/** Mirrors drawValue's internal unit sizing, so the measurement matches the draw. */
+const STAT_UNIT_SIZE = Math.max(Font.minSizePx, STAT_VALUE_SIZE - 4)
+const STAT_MIN_GAP = 10
+
+function drawStatLine(
+  ctx: CanvasRenderingContext2D,
+  top: number,
+  label: string,
+  value: string,
+  unit = '',
+  valueColor: string = Palette.text,
+): number {
+  const right = CONTENT_X + CONTENT_W
+  const labelWidth = measureText(ctx, label.toUpperCase(), { size: 12, tracking: 1.4 })
+  const valueWidth = measureText(ctx, value, { size: STAT_VALUE_SIZE, weight: 600 })
+  const unitWidth = unit ? measureText(ctx, unit, { size: STAT_UNIT_SIZE }) : 0
+  const total = valueWidth + (unit ? 4 + unitWidth : 0)
+
+  // The label is a point smaller than the value and both are positioned from
+  // their tops, so it needs a unit of nudge to share an optical baseline.
+  drawLabel(ctx, label, CONTENT_X, top + 1, { baseline: 'top' })
+
+  if (labelWidth + STAT_MIN_GAP + total <= CONTENT_W) {
+    drawValue(ctx, value, unit, right - total, top, {
+      size: STAT_VALUE_SIZE,
+      baseline: 'top',
+      color: valueColor,
+    })
+    return top + 20
+  }
+
+  drawValue(ctx, value, unit, CONTENT_X, top + 15, {
+    size: STAT_VALUE_SIZE,
+    baseline: 'top',
+    color: valueColor,
+  })
+  return top + 34
+}
+
+/** A faint section heading. Marks a group as secondary to the meters above it. */
+function drawSectionHeading(ctx: CanvasRenderingContext2D, top: number, text: string): number {
+  drawText(ctx, text.toUpperCase(), CONTENT_X, top, {
+    size: 11,
+    tracking: 2.2,
+    baseline: 'top',
+    color: Palette.textFaint,
+  })
+  return top + 17
+}
+
+/**
+ * Accuracy as a percentage.
+ *
+ * Before the first shot there is no accuracy, and showing `0 %` would report a
+ * failure the player has not had the chance to commit. An em dash says
+ * "no data" without pretending to be a measurement.
+ */
+function formatAccuracy(hits: number, shotsFired: number): { value: string; unit: string } {
+  if (shotsFired <= 0) return { value: '—', unit: '' }
+  return { value: String(Math.round((hits / shotsFired) * 100)), unit: '%' }
+}
+
 export interface PanelState {
   pilotNumber: number
   hullName: string
   weaponName: string
   /** Shots per second, shown with a unit so it can't be mistaken for a multiplier. */
   fireRate: number
-  scrap: number
+  // No `scrap` field: scrap is read from the run's own stats, so a caller cannot
+  // hand the HUD a number that disagrees with the simulation.
   sector: number
   sectorCount: number
+  /**
+   * Waves in the current sector, for the progress readout. Omitted while the
+   * sector script is not known to the caller, in which case the readout reports
+   * waves released instead of a fraction — never a bare count.
+   */
+  waveCount?: number
 }
 
 export function drawPanel(
   ctx: CanvasRenderingContext2D,
-  world: World,
+  view: WorldView,
   state: PanelState,
 ): void {
   drawPanelFrame(ctx)
@@ -176,8 +261,8 @@ export function drawPanel(
   // longer than about 7 characters will not fit at this panel width.
   y = drawMeter(ctx, y, {
     label: 'Hull',
-    value: world.hull.integrity,
-    max: world.hull.maxIntegrity,
+    value: view.hull.integrity,
+    max: view.hull.maxIntegrity,
     unit: 'hp',
     color: Palette.good,
     warnBelow: 0.3,
@@ -186,8 +271,8 @@ export function drawPanel(
 
   y = drawMeter(ctx, y, {
     label: 'Shield',
-    value: world.hull.shield,
-    max: world.hull.maxShield,
+    value: view.hull.shield,
+    max: view.hull.maxShield,
     unit: 'sp',
     color: Palette.self,
     segments: 8,
@@ -200,18 +285,57 @@ export function drawPanel(
   y += BETWEEN_GROUPS
   y = drawRow(ctx, y, 'Fire rate', state.fireRate.toFixed(1), 'shots/s')
   y += BETWEEN_GROUPS
-  y = drawRow(ctx, y, 'Scrap', String(state.scrap), 'cr', Palette.caution)
+  // Scrap comes from the run, not the caller: a currency the HUD could get wrong
+  // is a currency the player cannot trust.
+  y = drawRow(ctx, y, 'Scrap', String(view.stats.scrap), 'cr', Palette.caution)
   y += BEFORE_DIVIDER
   drawDivider(ctx, y)
   y += AFTER_DIVIDER
 
-  drawRow(ctx, y, 'Sector', `${state.sector} / ${state.sectorCount}`)
-
+  // Progress group. Sector and wave sit tight together with no BETWEEN_GROUPS
+  // between them, because they answer one question — how far in am I — and
+  // proximity is what says so.
+  y = drawRow(ctx, y, 'Sector', `${state.sector} / ${state.sectorCount}`)
+  const waves = state.waveCount ?? 0
+  y = drawStatLine(
+    ctx,
+    y,
+    'Wave',
+    waves > 0 ? `${view.stats.waveIndex} / ${waves}` : String(view.stats.waveIndex),
+    waves > 0 ? 'waves' : 'waves released',
+  )
   // Footer: seed always visible, so any screenshot is a reproducible bug report.
   const footerTop = VIRTUAL_H - PAD - 34
-  drawDivider(ctx, footerTop - AFTER_DIVIDER)
+  const footerDivider = footerTop - AFTER_DIVIDER
+
+  // Sortie log: numbers a player checks *between* waves, not during one.
+  //
+  // Anchored up from the footer rather than flowed after the block above, for
+  // two reasons. It fixes the log's position, so a value cannot appear to move
+  // when a section above it grows — a readout that shifts is a readout you have
+  // to find again. And it puts the one deliberate gap in the middle of the
+  // column, where the held-items list belongs, instead of leaving a void at the
+  // bottom that reads as unfinished.
+  const LOG_H = 17 + 20 * 3
+  const logTop = footerDivider - AFTER_DIVIDER - LOG_H
+  drawDivider(ctx, logTop - AFTER_DIVIDER)
+
+  let logY = drawSectionHeading(ctx, logTop, 'Sortie log')
+  const accuracy = formatAccuracy(view.stats.hits, view.stats.shotsFired)
+  logY = drawStatLine(ctx, logY, 'Kills', String(view.stats.kills), 'confirmed')
+  logY = drawStatLine(ctx, logY, 'Accuracy', accuracy.value, accuracy.unit)
+  drawStatLine(
+    ctx,
+    logY,
+    'Hits',
+    `${view.stats.hits} / ${view.stats.shotsFired}`,
+    'shots',
+    Palette.textDim,
+  )
+
+  drawDivider(ctx, footerDivider)
   drawLabel(ctx, 'Seed', CONTENT_X, footerTop, { baseline: 'top' })
-  drawText(ctx, formatSeed(world.seed), CONTENT_X, footerTop + 15, {
+  drawText(ctx, formatSeed(view.seed), CONTENT_X, footerTop + 15, {
     size: 12,
     baseline: 'top',
     color: Palette.textDim,

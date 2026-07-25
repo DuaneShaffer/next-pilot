@@ -1,0 +1,41 @@
+{
+  "fixtureVersion": 1,
+  "name": "sector1-random",
+  "policy": "random",
+  "seed": "RND72QKM3HTV",
+  "ticks": 5454,
+  "note": "Recorded by tools/playtest.ts --record-fixture. Replaying these inputs must reproduce expected.hash exactly. If a deliberate balance change breaks this, re-record and let the diff show what moved.",
+  "replay": "TlBSAQxSTkQ3MlFLTTNIVFbOKgQJARk1BREVEA8FCBkSERAZFFIFGgsVBhoMMQwZERIQCg0VFBASQRcaGDkVEglaFQAJGA8SDBALFAwaDxkXBBEWDBASGBcJEBEMABoRBAUQChERDhUHCQkSBRAYEgQBExgMCQURCBoFGBc6BwYSGgQUEQgRCQgBDxQXCAQWDhAPGgQVDRoMFg8ZDwkQGg0BEgQXUAYCHRIHUBAJFRENURERBRAPChoQDhUaGgVVFRoSFQgEBxgSFRcRCBoIEQRGFhgNAg8KBBkJFg4FEBUHWgUECBkUEA8YBgAFEQ5EEykLGg1GCgUFBhFIBloRBgwSBBoWEAoYEhYRVA5gEQAYFg4KEBkQABgYBhIKCQcACxkOBgUBEgYIFAgaDhgLAQwGBzYIBAoSFBYGVAkICAYEEBQ5BVITBAwIBFIGGhAFChUSChdaDAoWEgwVFhoQAAoBDBkTBhAZFgkMUhQKBAINGQwKDhIOEAsAFAIIFBgFBwkYFARBFRUQEQQVBgEXGhBRFQQRAhUGCRIPBBc2EhkhBAYUDUgJGAwJFkURGRgKBAk0Eg8WChAYGRQRBhYNAgQqFxYMARYKGBkLCRMYCwAXVA8RDRYJAR0aFBgWGg8KDRQOGBYFDBAVGBgZFxoIAA4WFUEREQkYGAUQFQ4QBRoQGAwaDQgHVQUWEAEYVAcYDBoLARMQCwkGFAYKBRIHEAUVDwoLGhICExoHFQYaDRYIUg8WBxALFRQGERkQEQgUExAsAgQEFBIFBRYGExYMVQoUCBIFBhZAEzAXQgRAEQQKAAsaCBUJBRdKCAIMBhgFDBoECA4FEwkREAsYCwQZAhMZDwETFg0VFRgJABYwCmULMRJBCRkMERUWDhgUQBYVBBYGES8IEBYEGhESBhkLFQYBFUoVCRARCxIVGgcQGCIJFRESHxoHFgUUDwENGg4AGAgSARQADgQSFRUaCgQTEggIDDQNOQwAExATcgxxBgkHBgwFCwgGFgsCCRAHAA0YBRkXEQ0WEBoXWBECGxQFFQsUBBUFGA8pLfma",
+  "expected": {
+    "runState": "lost",
+    "hash": "0c74298af9d78fd2",
+    "components": {
+      "hull": "4aff06c7a35bd0ac",
+      "playerBullets": "5079ce609f4896b8",
+      "enemyBullets": "5f6f8fda9322e503",
+      "enemies": "975ca667bae0c5a7",
+      "stats": "0c95188b083b8f95",
+      "run": "c49f6d822e7d15b1"
+    },
+    "cosmetic": "96dfa7480e0f7865",
+    "counts": {
+      "playerBullets": 4,
+      "enemyBullets": 11,
+      "enemies": 4,
+      "explosions": 1
+    },
+    "stats": {
+      "tick": 5454,
+      "waveIndex": 15,
+      "kills": 26,
+      "scrap": 123,
+      "shotsFired": 1109,
+      "hits": 175,
+      "damageTaken": 142
+    },
+    "incident": {
+      "causeKind": "enemy-fire",
+      "causeEnemyId": "turret"
+    }
+  }
+}

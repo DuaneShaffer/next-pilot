@@ -32,6 +32,8 @@ const SEED = 'K7F29XQM3RTV'
 /** Whole-run ceiling. Generous for a slow machine, finite regardless. */
 const WATCHDOG_MS = 120_000
 const PAGE_TIMEOUT_MS = 15_000
+/** Per-shot ceiling for a waitFor predicate. Fast-forwarded runs are quick. */
+const WAIT_FOR_TIMEOUT_MS = 45_000
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -57,6 +59,49 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie`,
     keys: ['Space', 'ArrowLeft'],
     settleMs: 700,
+  },
+
+  // Combat and death states are reached by letting a bot policy drive the run
+  // with the sim fast-forwarded. Holding a key for 90 real seconds to reach a
+  // late wave is not viable in a capture pass, and hand-driving it would not be
+  // reproducible. `autopilot` + `ff` make these states exact and deterministic.
+  //
+  // These wait on a *predicate*, not a duration. A fixed settle time is a guess
+  // about how long a bot takes to reach a state, and the first version of this
+  // guessed wrong — the death capture stopped six seconds before the bot died and
+  // silently photographed a healthy ship. `waitFor` polls the real state instead,
+  // so a capture either shows what it claims or fails loudly.
+  {
+    name: 'combat-early',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=6`,
+    waitFor: 'enemyCount >= 1',
+    holdMs: 400,
+  },
+  {
+    name: 'combat-mid',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=12`,
+    waitFor: 'stats.tick > 3600 && enemyCount >= 2',
+    holdMs: 300,
+  },
+  {
+    name: 'combat-dense',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=20`,
+    waitFor: 'enemyCount >= 5',
+    holdMs: 200,
+  },
+  {
+    name: 'hull-critical',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=greedy&ff=20`,
+    // The low-integrity screen rim only appears below 30%, so this capture is
+    // the only check that it renders at all.
+    waitFor: 'runState === "active" && integrity <= 28',
+    holdMs: 0,
+  },
+  {
+    name: 'incident-report',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=random&ff=24`,
+    waitFor: 'screen === "incident"',
+    holdMs: 500,
   },
 ]
 
@@ -157,7 +202,40 @@ async function capture() {
         const before = await page.evaluate(() => window.__nextPilot?.stats?.droppedTicks ?? 0)
 
         for (const key of shot.keys ?? []) await page.keyboard.down(key)
-        await page.waitForTimeout(shot.settleMs)
+
+        if (shot.waitFor) {
+          // Poll the live state until the shot's condition holds. Reached via
+          // `new Function` over the debug view rather than a fixed sleep, so the
+          // capture is defined by the state it wants, not by a guess about how
+          // long a bot takes to get there.
+          try {
+            await page.waitForFunction(
+              (expression) => {
+                const api = window.__nextPilot
+                if (!api) return false
+                const view = {
+                  screen: api.screen,
+                  runState: api.runState,
+                  enemyCount: api.enemyCount,
+                  integrity: api.integrity,
+                  stats: api.stats,
+                }
+                // eslint-disable-next-line no-new-func
+                return Boolean(new Function('v', `with (v) { return (${expression}) }`)(view))
+              },
+              shot.waitFor,
+              { timeout: WAIT_FOR_TIMEOUT_MS, polling: 100 },
+            )
+          } catch {
+            problems.push(
+              `${shot.name}/${viewport.name}: waitFor never became true ` +
+                `(${shot.waitFor}) — the capture does not show what it claims`,
+            )
+          }
+          if (shot.holdMs) await page.waitForTimeout(shot.holdMs)
+        } else {
+          await page.waitForTimeout(shot.settleMs ?? 300)
+        }
 
         // Read the counters BEFORE capturing. page.screenshot() blocks the
         // renderer, so the loop resumes behind and records dropped ticks —
@@ -165,7 +243,15 @@ async function capture() {
         // as a game performance problem.
         const state = await page.evaluate(() => {
           const api = window.__nextPilot
-          return api ? { screen: api.screen, seed: api.seed, stats: api.stats } : null
+          if (!api) return null
+          return {
+            screen: api.screen,
+            seed: api.seed,
+            stats: api.stats,
+            runState: api.runState,
+            enemies: api.enemyCount,
+            integrity: api.integrity,
+          }
         })
         const droppedWhileRunning = (state?.stats?.droppedTicks ?? 0) - before
 
@@ -173,14 +259,31 @@ async function capture() {
         await page.screenshot({ path: file })
         for (const key of shot.keys ?? []) await page.keyboard.up(key)
         step(
-          `${file}  screen=${state?.screen ?? '?'} ticks=${state?.stats?.ticks ?? '?'} ` +
-            `bullets=${state?.stats?.peakBullets ?? '?'} dropped=${droppedWhileRunning}`,
+          `${file}  screen=${state?.screen ?? '?'} run=${state?.runState ?? '-'} ` +
+            `tick=${state?.stats?.tick ?? '?'} enemies=${state?.enemies ?? '?'} ` +
+            `hull=${state?.integrity ?? '?'} dropped=${droppedWhileRunning}`,
         )
 
         if (!state) problems.push(`${shot.name}/${viewport.name}: game never initialised`)
         if (droppedWhileRunning > 0) {
           problems.push(
             `${shot.name}/${viewport.name}: dropped ${droppedWhileRunning} ticks while running`,
+          )
+        }
+
+        // A capture that did not reach the state it is named after is worse than
+        // a missing capture: it looks like evidence while showing nothing. Assert
+        // the intent rather than trusting that the timings worked out.
+        if (shot.expect === 'enemies' && (state?.enemies ?? 0) === 0) {
+          problems.push(
+            `${shot.name}/${viewport.name}: expected enemies on screen, found none — ` +
+              `capture shows nothing useful`,
+          )
+        }
+        if (shot.expect === 'dead' && state?.screen !== 'incident') {
+          problems.push(
+            `${shot.name}/${viewport.name}: expected the incident report, got ` +
+              `screen=${state?.screen} run=${state?.runState}`,
           )
         }
       }

@@ -48,16 +48,29 @@ scanning stays fast. Where a stat can go either way, the sign is always shown �
 
 The palette in `src/render/palette.ts` assigns meaning:
 
-| Token     | Means                                              |
-| --------- | -------------------------------------------------- |
-| `self`    | You, your projectiles, focus and selection         |
-| `danger`  | Can hurt you **right now**. Nothing else. Ever.    |
-| `caution` | Resource running low, timer expiring, risky choice |
-| `good`    | Healing, gains, successful extraction              |
-| `relic`   | Rare tier                                          |
+| Token          | Means                                                    |
+| -------------- | -------------------------------------------------------- |
+| `self`         | You, your projectiles, focus and selection               |
+| `danger`       | Can hurt you **this instant**. Nothing else. Ever.       |
+| `hostile`      | Enemy hulls and structures                               |
+| `hostileElite` | Elite / reinforced enemy accent                          |
+| `caution`      | Resource running low, timer expiring, risky choice       |
+| `good`         | Healing, gains, successful extraction                    |
+| `relic`        | Rare tier                                                |
 
 **Why:** if `danger` red is also used for a decorative border, the player's threat-detection
 reflex gets trained on noise, and the one time it matters they don't look.
+
+**The `danger` / `hostile` split is deliberate and narrower than "the enemy."** Enemy
+*projectiles* are `danger` and are the most saturated, highest-contrast thing on screen. Enemy
+*hulls* are `hostile` — cold steel, clearly readable, not screaming. If everything hostile were
+danger-red, the projectile the player must actually dodge would stop standing out, which is the
+precise failure this rule exists to prevent. A bullet-hell screen has one job: make the bullets
+the loudest thing in the room.
+
+**Draw order enforces the same priority** (see `docs/ARCHITECTURE.md`): enemy projectiles are
+drawn *above* enemies, so incoming fire is never occluded by the thing that fired it, and the
+player's hull is drawn last so it is never hidden.
 
 **Also:** colour never carries information *alone* — roughly 1 in 12 men has some form of colour
 vision deficiency. Danger reads as red *and* has a distinct silhouette; a depleted meter reads

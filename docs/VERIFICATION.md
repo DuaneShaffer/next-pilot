@@ -6,7 +6,7 @@ There is no human playtester in this project's loop. Duane sets a goal and steps
 quality has to be assessed by whoever is building it. That makes "I think this feels good" not a
 verification step, and it makes any quality signal that isn't automated effectively nonexistent.
 
-So the harness is a first-class part of the product. Four instruments, each answering a question
+So the harness is a first-class part of the product. Five instruments, each answering a question
 that intuition can't.
 
 ---
@@ -33,8 +33,14 @@ determinism contract in `docs/ARCHITECTURE.md`.
 Since the sim runs headless with no renderer, thousands of full runs can be simulated in seconds.
 Bots aren't trying to be human — they're instrumented probes with defined policies:
 
-- **Dodger** — prioritises survival, minimal aggression. Establishes a survivability floor.
-- **Aggressor** — maximises damage output, accepts risk. Establishes a clear-speed ceiling.
+- **Dodger** — prioritises survival, minimal aggression.
+- **Aggressor** — maximises damage output, accepts risk.
+
+  **Do not read these as a floor and a ceiling.** That was the original framing and the first real
+  sweep disproved it: dodger survived 141s while aggressor survived 183s and was the only policy
+  that ever cleared the sector. Evasion without killing anything just delays being swarmed, so
+  dodger's number is bounded by its inability to clear, not by its dodging. Aggressor is closer to
+  a survivability *ceiling* than dodger is to a floor.
 - **Greedy** — always takes the scrap and the risky route. Stress-tests the economy.
 - **Random** — a control. If Random clears sector 3, the difficulty curve is broken.
 - **Build-focused** — forces a specific item combination, to measure a synergy's real strength.
@@ -80,6 +86,27 @@ Asserted as tests so regressions fail the build rather than accumulating quietly
 
 `tests/world.test.ts` already asserts projectile-count budgets; the frame-time assertions land
 with the renderer work in M2.
+
+## 5. Contract enforcement
+
+**Question: are the three contracts still actually true?**
+
+`npm run contracts` (`tools/check-contracts.mjs`) statically checks what `CLAUDE.md` only
+described in prose:
+
+- No `Math.random()` anywhere the simulation can reach. `src/core/seed.ts` is the sole exemption,
+  because choosing *which* run to play is not simulating it.
+- Nothing in `src/sim/**` or `src/content/**` imports rendering or UI, or touches the DOM, or
+  reads a clock. That is what lets the sim run headless.
+- `tick()` takes an `InputSnapshot` and nothing else.
+
+**Why this is worth a dedicated instrument:** each contract is breakable in one line, each break
+invalidates the entire verification story, and *none of them fail a typecheck or a test*. A stray
+`Math.random()` in spawn logic would make every recorded replay meaningless while the suite stayed
+green. Honour-system rules that nothing checks are rules that erode — especially on a project
+where work happens unattended.
+
+It runs first in CI, because it's the cheapest check that can invalidate everything downstream.
 
 ---
 

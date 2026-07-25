@@ -29,6 +29,15 @@ decision draws from `Rng.fromSeed(seed, streamName)`. Streams are independent by
 adding a cosmetic particle effect cannot shift which items drop. `tests/rng.test.ts` asserts this
 directly — draining a cosmetic stream 10,000 times leaves the loot stream untouched.
 
+**The honest limit on "bit-identical everywhere":** `Rng` itself is exact anywhere, because it uses
+only integer operations. But `Math.sin`, `Math.cos`, and `Math.atan2` are *implementation-defined*
+in ECMAScript, and the sim uses them for sine movement and spread-fire angles. So replays are
+bit-exact on the same JavaScript engine — which is the actual use case, including CI and the
+regression corpus — but cross-*engine* exactness is reasoned, not guaranteed. Enemy aiming
+normalises with `sqrt` rather than `atan2` partly to reduce the exposure. If literal cross-engine
+determinism is ever needed (verified leaderboards across browsers, say), the fix is a fixed-point
+trig lookup table, not more testing.
+
 Existing streams: `spawn`, `loot`, `cosmetic:starfield`. A new random concern gets a new stream;
 reusing one for a second purpose shifts every downstream roll and breaks recorded replays.
 
