@@ -1,0 +1,24 @@
+{
+  "name": "next-pilot",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "A vertical shooter roguelike. The company does not mourn you. It calls the next pilot.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run test",
+    "screenshot": "npm run build && node tools/screenshot.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "playwright": "^1.62.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4"
+  }
+}

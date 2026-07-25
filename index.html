@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Next Pilot — a vertical shooter roguelike</title>
+    <meta
+      name="description"
+      content="The company does not mourn you. It calls the next pilot. A seeded, permadeath vertical shooter roguelike that runs in your browser."
+    />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#05070B" />
+    <style>
+      /* The game owns the whole window; the page around it is just a mount. */
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #05070b;
+        color: #c9d7e6;
+        font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+        overflow: hidden;
+        /* Stop double-tap zoom and text selection from fighting the controls. */
+        -webkit-user-select: none;
+        user-select: none;
+        touch-action: manipulation;
+      }
+      #stage {
+        display: grid;
+        place-items: center;
+        height: 100%;
+      }
+      #game {
+        display: block;
+        /* Dark surround so the letterboxed area reads as bezel, not as a bug. */
+        box-shadow: 0 0 0 1px #22303f, 0 24px 80px rgba(0, 0, 0, 0.8);
+      }
+      /* Shown only if the script fails to boot, so a blank screen is never the
+         final answer. */
+      #boot-error {
+        display: none;
+        max-width: 42ch;
+        padding: 24px;
+        line-height: 1.6;
+        font-size: 13px;
+      }
+      #boot-error code {
+        color: #f5b942;
+      }
+      body.boot-failed #game {
+        display: none;
+      }
+      body.boot-failed #boot-error {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <canvas id="game" width="640" height="720" aria-label="Next Pilot game screen"></canvas>
+      <div id="boot-error" role="alert">
+        <strong>Next Pilot failed to start.</strong>
+        <p>
+          This build needs a browser with ES2022 module support. If you are running it locally,
+          serve it with <code>npm run dev</code> rather than opening the file directly.
+        </p>
+      </div>
+    </div>
+    <script>
+      // Registered before the module loads so a syntax error still surfaces.
+      window.addEventListener('error', function () {
+        document.body.classList.add('boot-failed')
+      })
+    </script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

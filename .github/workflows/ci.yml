@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push makes an in-flight run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Enforce bundle budget
+        # A bundle that quietly triples in size is a regression, so it fails here
+        # rather than being noticed months later. See docs/ARCHITECTURE.md.
+        run: |
+          BUDGET_BYTES=153600
+          SIZE=$(du -sb dist | cut -f1)
+          echo "dist is ${SIZE} bytes (budget ${BUDGET_BYTES})"
+          if [ "$SIZE" -gt "$BUDGET_BYTES" ]; then
+            echo "::error::Bundle exceeds the ${BUDGET_BYTES}-byte budget."
+            exit 1
+          fi
