@@ -14,7 +14,7 @@ import { Viewport } from './render/layout'
 import { drawPanel, type PanelState } from './render/panel'
 import { drawScene } from './render/scene'
 import { Starfield } from './render/starfield'
-import { World } from './sim/world'
+import { SHOTS_PER_SECOND, World } from './sim/world'
 import { drawTitleScreen } from './ui/titleScreen'
 
 const VERSION = 'v0.0.1 · m0'
@@ -88,7 +88,8 @@ function main(): void {
     pilotNumber: save.pilotNumber,
     hullName: 'Lien',
     weaponName: 'Twin Pulse',
-    fireRate: 10,
+    // Derived from the sim, never hand-written, so the HUD cannot lie about it.
+    fireRate: SHOTS_PER_SECOND,
     scrap: 0,
     sector: 1,
     sectorCount: 5,

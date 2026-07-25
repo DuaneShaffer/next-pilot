@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { TICK_SECONDS } from '../src/core/loop'
+import { TICK_HZ, TICK_SECONDS } from '../src/core/loop'
 import type { InputSnapshot } from '../src/core/input'
 import { NEUTRAL_INPUT } from '../src/core/input'
 import { Rng } from '../src/core/rng'
 import { Playfield } from '../src/core/space'
-import { World } from '../src/sim/world'
+import { SHOTS_PER_SECOND, World } from '../src/sim/world'
 
 /**
  * Build a reproducible input script.
@@ -123,12 +123,27 @@ describe('Hull movement', () => {
 })
 
 describe('Weapon and projectiles', () => {
-  it('fires at the advertised cadence', () => {
+  it('fires at exactly the rate the HUD advertises', () => {
+    // Guards a real bug this replaced: the panel displayed 10.0 shots/s while the
+    // weapon fired 20, because it was reporting volleys and labelling them shots.
+    // Tying the assertion to the exported constant means the HUD and the sim
+    // cannot drift apart again without failing here.
     const world = new World('CADENCECADE2')
     const firing: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
-    // One second of held fire: 10 volleys of 2 shots.
-    for (let i = 0; i < 60; i++) world.tick(firing)
-    expect(world.stats.shotsFired).toBe(20)
+    for (let i = 0; i < TICK_HZ; i++) world.tick(firing)
+    expect(world.stats.shotsFired).toBe(SHOTS_PER_SECOND)
+  })
+
+  it('alternates muzzles so fire reads as one stream', () => {
+    const world = new World('MUZZLEMUZZL2')
+    const firing: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
+    for (let i = 0; i < 12; i++) world.tick(firing)
+
+    const offsets = world.bullets.map((b) => Math.sign(b.x - world.hull.x))
+    // Consecutive shots must come from opposite sides.
+    for (let i = 1; i < offsets.length; i++) {
+      expect(offsets[i]).not.toBe(offsets[i - 1])
+    }
   })
 
   it('fires nothing when the trigger is not held', () => {

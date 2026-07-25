@@ -107,7 +107,7 @@ export function drawTitleScreen(
   // without flashing. Hard blinking is an accessibility problem, not polish.
   const pulse = 0.62 + 0.38 * Math.sin(state.tick * 0.065)
   ctx.globalAlpha = pulse
-  drawText(ctx, 'Press ENTER to report for duty', cx, VIRTUAL_H * 0.645, {
+  drawText(ctx, 'Press ENTER to report for duty', cx, VIRTUAL_H * 0.615, {
     size: 15,
     weight: 600,
     align: 'center',
@@ -120,25 +120,34 @@ export function drawTitleScreen(
     ctx,
     'Move: WASD / Arrows    Fire: Space    Focus: Ctrl',
     cx,
-    VIRTUAL_H * 0.71,
-    { size: 11, align: 'center', tracking: 0.5, color: Palette.textFaint },
+    VIRTUAL_H * 0.672,
+    { size: 12, align: 'center', tracking: 0.5, color: Palette.textFaint },
   )
 
   // Bottom corners: identity on the left, reproducibility on the right.
-  drawText(ctx, `Pilot #${String(state.pilotNumber).padStart(3, '0')} standing by`, 34, VIRTUAL_H - 34, {
-    size: 11,
-    tracking: 1,
-    color: Palette.textFaint,
-  })
-  drawText(ctx, `Seed ${formatSeed(state.seed)}`, VIRTUAL_W - 34, VIRTUAL_H - 34, {
-    size: 11,
+  //
+  // Positioned clear of the corner brackets, which occupy 26 units along each
+  // edge from an 18-unit inset. An earlier version put the version string at
+  // y-20 and it cut straight through the bottom-right bracket.
+  const footerTop = VIRTUAL_H - 62
+  drawText(
+    ctx,
+    `Pilot #${String(state.pilotNumber).padStart(3, '0')} standing by`,
+    52,
+    footerTop,
+    { size: 12, tracking: 1, baseline: 'top', color: Palette.textFaint },
+  )
+  drawText(ctx, `Seed ${formatSeed(state.seed)}`, VIRTUAL_W - 52, footerTop, {
+    size: 12,
     align: 'right',
     tracking: 1,
+    baseline: 'top',
     color: Palette.textFaint,
   })
-  drawText(ctx, state.version, VIRTUAL_W - 34, VIRTUAL_H - 20, {
-    size: 10,
+  drawText(ctx, state.version, VIRTUAL_W - 52, footerTop + 15, {
+    size: 12,
     align: 'right',
+    baseline: 'top',
     color: Palette.textFaint,
   })
 }

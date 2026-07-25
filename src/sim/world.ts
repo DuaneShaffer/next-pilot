@@ -14,7 +14,7 @@
  * the only ways this game gets verified. See docs/ARCHITECTURE.md.
  */
 
-import { TICK_SECONDS } from '../core/loop'
+import { TICK_HZ, TICK_SECONDS } from '../core/loop'
 import type { InputSnapshot } from '../core/input'
 import { Rng } from '../core/rng'
 import { clamp, isOutOfPlay, Playfield } from '../core/space'
@@ -23,8 +23,25 @@ import { clamp, isOutOfPlay, Playfield } from '../core/space'
 const HULL_SPEED = 210
 /** Multiplier applied while the focus key is held, for precise threading. */
 const FOCUS_FACTOR = 0.45
-/** Ticks between shots. 6 ticks at 60Hz is 10 shots/second. */
-const FIRE_INTERVAL_TICKS = 6
+/**
+ * Ticks between shots. 3 ticks at 60Hz is 20 shots/second.
+ *
+ * The muzzles alternate rather than firing together. Simultaneous twin shots
+ * rendered as two parallel columns with gaps between volleys, which read as pairs
+ * of tally marks marching up the screen instead of as gunfire. Alternating puts
+ * the same rate into one interleaved stream.
+ */
+const FIRE_INTERVAL_TICKS = 3
+
+/**
+ * Shots per second, derived from the tick rate so the HUD cannot drift out of
+ * sync with the simulation. An earlier build displayed 10.0 shots/s while
+ * actually firing 20 — it was showing volleys and calling them shots.
+ */
+export const SHOTS_PER_SECOND = TICK_HZ / FIRE_INTERVAL_TICKS
+
+/** Horizontal offset of each muzzle from the hull centreline. */
+const MUZZLE_OFFSET = 4.5
 const BULLET_SPEED = 620
 /** Hard ceiling on live projectiles, so a runaway weapon can't stall a frame. */
 const MAX_BULLETS = 768
@@ -76,6 +93,7 @@ export class World {
   private readonly rngLoot: Rng
 
   private fireCooldown = 0
+  private nextMuzzleIsLeft = true
 
   constructor(seed: string) {
     this.seed = seed
@@ -129,13 +147,13 @@ export class World {
   private updateWeapon(input: InputSnapshot): void {
     if (this.fireCooldown > 0) this.fireCooldown--
     if (!input.fire || this.fireCooldown > 0) return
-    if (this.bullets.length + 2 > MAX_BULLETS) return
+    if (this.bullets.length + 1 > MAX_BULLETS) return
 
     this.fireCooldown = FIRE_INTERVAL_TICKS
-    // Twin forward shots, offset from the hull's centreline.
-    this.spawnBullet(this.hull.x - 7, this.hull.y - HULL_HALF_H, 0, -BULLET_SPEED)
-    this.spawnBullet(this.hull.x + 7, this.hull.y - HULL_HALF_H, 0, -BULLET_SPEED)
-    this.stats.shotsFired += 2
+    const offset = this.nextMuzzleIsLeft ? -MUZZLE_OFFSET : MUZZLE_OFFSET
+    this.nextMuzzleIsLeft = !this.nextMuzzleIsLeft
+    this.spawnBullet(this.hull.x + offset, this.hull.y - HULL_HALF_H, 0, -BULLET_SPEED)
+    this.stats.shotsFired++
   }
 
   private spawnBullet(x: number, y: number, vx: number, vy: number): void {

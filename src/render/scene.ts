@@ -77,21 +77,30 @@ function drawHull(ctx: CanvasRenderingContext2D, hull: Hull, alpha: number, tick
   ctx.fillRect(x - 1.5, y - 6, 3, 5)
 }
 
+/**
+ * Player projectiles, drawn as long thin tracers.
+ *
+ * An earlier version used short wide rectangles at a wide muzzle offset, and the
+ * result read as pairs of tally marks marching up the screen rather than as
+ * gunfire — while also competing with the player's ship for attention. Tracers
+ * are narrow, long, and dimmer than the hull, so they imply a stream and stay
+ * subordinate to the thing the player must never lose track of.
+ */
 function drawBullets(ctx: CanvasRenderingContext2D, bullets: readonly Bullet[], alpha: number): void {
   ctx.globalCompositeOperation = 'lighter'
-  ctx.fillStyle = Palette.glowSelf
+  ctx.fillStyle = Palette.glowProjectile
   for (const b of bullets) {
     const x = lerp(b.prevX, b.x, alpha)
     const y = lerp(b.prevY, b.y, alpha)
-    ctx.fillRect(x - 3, y - 9, 6, 18)
+    ctx.fillRect(x - 2, y - 14, 4, 28)
   }
   ctx.globalCompositeOperation = 'source-over'
 
-  ctx.fillStyle = '#DFFBFF'
+  ctx.fillStyle = '#CFF4FA'
   for (const b of bullets) {
     const x = lerp(b.prevX, b.x, alpha)
     const y = lerp(b.prevY, b.y, alpha)
-    ctx.fillRect(x - 1, y - 6, 2, 12)
+    ctx.fillRect(x - 0.75, y - 11, 1.5, 22)
   }
 }
 

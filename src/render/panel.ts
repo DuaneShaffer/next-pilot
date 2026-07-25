@@ -48,33 +48,44 @@ interface MeterOptions {
 }
 
 /**
- * A segmented meter with its label and numeric value.
+ * A segmented meter: label and value on one line, bar beneath it.
  *
- * Returns the y coordinate below the meter, so callers stack sections without
+ * Everything is positioned from the *top* of the row, not a text baseline.
+ * Mixing tops and baselines is what let an earlier version draw the value
+ * string straight through the bar — a collision no unit test can see and a
+ * screenshot shows instantly.
+ *
+ * Returns the y coordinate below the meter so callers stack sections without
  * hard-coding positions.
  */
-function drawMeter(ctx: CanvasRenderingContext2D, y: number, options: MeterOptions): number {
+function drawMeter(ctx: CanvasRenderingContext2D, top: number, options: MeterOptions): number {
   const { label, value, max, unit, color, warnBelow = 0, segments = 12 } = options
   const fraction = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0
 
   const critical = fraction <= warnBelow
   const barColor = critical ? Palette.danger : color
 
-  drawLabel(ctx, label, CONTENT_X, y)
-  drawText(ctx, `${Math.round(value)}`, CONTENT_X + CONTENT_W, y, {
-    size: 12,
-    weight: 600,
-    align: 'right',
-    color: critical ? Palette.danger : Palette.text,
-  })
-  drawText(ctx, ` / ${max} ${unit}`, CONTENT_X + CONTENT_W, y + 13, {
+  drawLabel(ctx, label, CONTENT_X, top, { baseline: 'top' })
+
+  // Unit first, right-aligned to the edge, then the value to its left. Keeps the
+  // value's last digit a fixed distance from the edge as its width changes.
+  const right = CONTENT_X + CONTENT_W
+  const unitWidth = drawText(ctx, `/ ${max} ${unit}`, right, top + 2, {
     size: 10,
     align: 'right',
+    baseline: 'top',
     color: Palette.textDim,
   })
+  drawText(ctx, `${Math.round(value)}`, right - unitWidth - 5, top, {
+    size: 13,
+    weight: 600,
+    align: 'right',
+    baseline: 'top',
+    color: critical ? Palette.danger : Palette.text,
+  })
 
-  const barY = y + 7
-  const barH = 7
+  const barTop = top + 18
+  const barH = 8
   const gap = 2
   const segW = (CONTENT_W - gap * (segments - 1)) / segments
   const filledSegments = Math.round(fraction * segments)
@@ -82,24 +93,34 @@ function drawMeter(ctx: CanvasRenderingContext2D, y: number, options: MeterOptio
   for (let i = 0; i < segments; i++) {
     const x = CONTENT_X + i * (segW + gap)
     ctx.fillStyle = i < filledSegments ? barColor : Palette.panelRaised
-    ctx.fillRect(x, barY, segW, barH)
+    ctx.fillRect(x, barTop, segW, barH)
   }
 
-  return barY + barH
+  return barTop + barH
 }
 
-/** A label/value row for non-metered readouts. */
+/**
+ * A label/value readout.
+ *
+ * The gap *within* a group (label to its value) is smaller than the gap
+ * *between* groups, so proximity alone tells you which label owns which value.
+ * Without that, `FIRE RATE` reads as a caption for the line above it.
+ */
 function drawRow(
   ctx: CanvasRenderingContext2D,
-  y: number,
+  top: number,
   label: string,
   value: string,
   unit = '',
   valueColor: string = Palette.text,
 ): number {
-  drawLabel(ctx, label, CONTENT_X, y)
-  drawValue(ctx, value, unit, CONTENT_X, y + 20, { size: 15, color: valueColor })
-  return y + 26
+  drawLabel(ctx, label, CONTENT_X, top, { baseline: 'top' })
+  drawValue(ctx, value, unit, CONTENT_X, top + 14, {
+    size: 15,
+    baseline: 'top',
+    color: valueColor,
+  })
+  return top + 33
 }
 
 export interface PanelState {
@@ -120,36 +141,48 @@ export function drawPanel(
 ): void {
   drawPanelFrame(ctx)
 
-  let y = PAD + 10
+  // Spacing scale for this panel. BETWEEN_GROUPS is deliberately much larger
+  // than the internal label-to-value gap inside drawRow, so grouping is
+  // unambiguous by proximity alone.
+  const BETWEEN_GROUPS = 16
+  const BEFORE_DIVIDER = 14
+  const AFTER_DIVIDER = 16
+
+  let y = PAD + 8
 
   // Identity block — the title's premise, made literal.
-  drawLabel(ctx, 'Pilot', CONTENT_X, y)
+  drawLabel(ctx, 'Pilot', CONTENT_X, y, { baseline: 'top' })
   drawText(ctx, `#${String(state.pilotNumber).padStart(3, '0')}`, CONTENT_X + CONTENT_W, y, {
     size: 12,
     weight: 600,
     align: 'right',
+    baseline: 'top',
     color: Palette.textDim,
   })
-  y += 20
+  y += 18
   drawText(ctx, state.hullName.toUpperCase(), CONTENT_X, y, {
-    size: 17,
+    size: 18,
     weight: 700,
     tracking: 1,
+    baseline: 'top',
     color: Palette.self,
   })
-  y += 16
+  y += 22 + BEFORE_DIVIDER
   drawDivider(ctx, y)
-  y += 18
+  y += AFTER_DIVIDER
 
+  // Meter labels are kept short deliberately: the label sits on the same line as
+  // the right-aligned value, and a long one ("INTEGRITY") ran into it. Anything
+  // longer than about 7 characters will not fit at this panel width.
   y = drawMeter(ctx, y, {
-    label: 'Integrity',
+    label: 'Hull',
     value: world.hull.integrity,
     max: world.hull.maxIntegrity,
     unit: 'hp',
     color: Palette.good,
     warnBelow: 0.3,
   })
-  y += 22
+  y += BETWEEN_GROUPS
 
   y = drawMeter(ctx, y, {
     label: 'Shield',
@@ -159,34 +192,28 @@ export function drawPanel(
     color: Palette.self,
     segments: 8,
   })
-  y += 24
+  y += BEFORE_DIVIDER
   drawDivider(ctx, y)
-  y += 18
+  y += AFTER_DIVIDER
 
-  y = drawRow(ctx, y, 'Weapon', state.weaponName, '', Palette.text)
-  y += 6
-  y = drawRow(ctx, y, 'Fire rate', state.fireRate.toFixed(1), 'shots/s', Palette.text)
-  y += 6
+  y = drawRow(ctx, y, 'Weapon', state.weaponName)
+  y += BETWEEN_GROUPS
+  y = drawRow(ctx, y, 'Fire rate', state.fireRate.toFixed(1), 'shots/s')
+  y += BETWEEN_GROUPS
   y = drawRow(ctx, y, 'Scrap', String(state.scrap), 'cr', Palette.caution)
-  y += 10
+  y += BEFORE_DIVIDER
   drawDivider(ctx, y)
-  y += 18
+  y += AFTER_DIVIDER
 
-  y = drawRow(
-    ctx,
-    y,
-    'Sector',
-    `${state.sector} / ${state.sectorCount}`,
-    '',
-    Palette.text,
-  )
+  drawRow(ctx, y, 'Sector', `${state.sector} / ${state.sectorCount}`)
 
   // Footer: seed always visible, so any screenshot is a reproducible bug report.
-  const footerY = VIRTUAL_H - PAD - 22
-  drawDivider(ctx, footerY - 14)
-  drawLabel(ctx, 'Seed', CONTENT_X, footerY)
-  drawText(ctx, formatSeed(world.seed), CONTENT_X, footerY + 15, {
-    size: 11,
+  const footerTop = VIRTUAL_H - PAD - 34
+  drawDivider(ctx, footerTop - AFTER_DIVIDER)
+  drawLabel(ctx, 'Seed', CONTENT_X, footerTop, { baseline: 'top' })
+  drawText(ctx, formatSeed(world.seed), CONTENT_X, footerTop + 15, {
+    size: 12,
+    baseline: 'top',
     color: Palette.textDim,
   })
 }

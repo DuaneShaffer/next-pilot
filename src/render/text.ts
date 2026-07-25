@@ -6,7 +6,7 @@
  * everything is monospace, per-character advance is uniform and exact.
  */
 
-import { font, Palette } from './palette'
+import { font, Font, Palette } from './palette'
 
 export interface TextOptions {
   size?: number
@@ -76,9 +76,9 @@ export function drawLabel(
   options: TextOptions = {},
 ): number {
   return drawText(ctx, text.toUpperCase(), x, y, {
-    size: 11,
+    size: 12,
     color: Palette.textDim,
-    tracking: 1.5,
+    tracking: 1.4,
     ...options,
   })
 }
@@ -98,12 +98,15 @@ export function drawValue(
   y: number,
   options: TextOptions = {},
 ): number {
-  const { size = 16, color = Palette.text } = options
+  const { size = 16, color = Palette.text, baseline } = options
   const valueWidth = drawText(ctx, value, x, y, { ...options, size, weight: 600, color })
   if (!unit) return valueWidth
-  const unitWidth = drawText(ctx, unit, x + valueWidth + 3, y, {
-    size: Math.max(11, size - 5),
+  // The unit must inherit the caller's baseline, or it drifts off the value's
+  // line whenever the caller positions by top rather than by baseline.
+  const unitWidth = drawText(ctx, unit, x + valueWidth + 4, y, {
+    size: Math.max(Font.minSizePx, size - 4),
     color: Palette.textDim,
+    ...(baseline ? { baseline } : {}),
   })
-  return valueWidth + 3 + unitWidth
+  return valueWidth + 4 + unitWidth
 }

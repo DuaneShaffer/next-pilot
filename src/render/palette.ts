@@ -38,6 +38,11 @@ export const Palette = {
 
   /** Additive glow layers are drawn in these, always with 'lighter' compositing. */
   glowSelf: 'rgba(92, 224, 240, 0.55)',
+  /**
+   * Dimmer than `glowSelf` on purpose: a screen full of projectiles must not
+   * out-glow the single ship the player needs to track.
+   */
+  glowProjectile: 'rgba(92, 224, 240, 0.30)',
   glowDanger: 'rgba(255, 74, 56, 0.5)',
   glowWarm: 'rgba(245, 185, 66, 0.45)',
 } as const
@@ -58,8 +63,15 @@ export const StarLayers = [
  */
 export const Font = {
   stack: `ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace`,
-  /** Smallest size we will ever render. Below this, text stops being readable. */
-  minSizePx: 11,
+  /**
+   * Smallest size we will ever render, in *virtual* units.
+   *
+   * Note the limitation this does not solve: the viewport scales the whole
+   * virtual space to the window, so at a window smaller than the virtual height
+   * the effective size is lower than this. 12 here yields ~11 effective px at
+   * the smallest supported window. See UI.md rule 7.
+   */
+  minSizePx: 12,
 } as const
 
 export function font(sizePx: number, weight: 400 | 600 | 700 = 400): string {
