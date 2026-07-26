@@ -1138,8 +1138,27 @@ export const ITEMS: Record<string, ItemDef> = {
    * the clear rate by 1.9-2.6x, and seed B's +29.7 pp is the honest low end that the
    * broken metric had hidden behind a suspiciously stable +42/+42.
    *
-   * An item that triples the clear rate is not an item, it is the game's difficulty
-   * setting wearing a card. It also explained a separate failure that no design
+   * ## RE-MEASURED AGAIN after the shield started recharging, 2026-07-26
+   *
+   * The figures above are from before the shield recovered, and the recharge acts
+   * directly against this item: `repairOnKill` does nothing at full integrity, and a
+   * shield that comes back means integrity is at full more of the time. 900 runs per
+   * arm across three seed bases, aggressor:
+   *
+   *   clear rate, as shipped        31.7%  ->  62.3%   (x1.97, +30.6 pp)
+   *   clear rate, recovery off      21.3%  ->  55.2%   (x2.59)
+   *
+   * So the recharge cost this item about a quarter of its edge, and the old 1.9-2.6x
+   * band's TOP END is now the recovery-off figure rather than a live one. Read the two
+   * rows above as the range this item now spans, not as two measurements of one thing.
+   *
+   * **It is still the dominant variable by a distance.** Shield recovery ablated the
+   * same way is worth +13.3 pp against this item's +30.6 — one relic is worth roughly
+   * three shields. The paragraph below still stands, with a smaller multiplier.
+   *
+   * An item that doubles the clear rate is not an item, it is the game's difficulty
+   * setting wearing a card. (It said "triples" while the figure was 2.6x; at 1.97x
+   * that word is no longer accurate and the point is unchanged.) It also explained a separate failure that no design
    * document had predicted: Probate starts holding this relic and was clearing 29 pp
    * above the hull mean, which nothing in Probate's own stat line accounts for — its
    * effective health is 132 against Lien's 140 and its incoming damage rate is
