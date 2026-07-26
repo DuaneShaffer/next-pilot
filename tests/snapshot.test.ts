@@ -165,6 +165,24 @@ function stats(overrides: Partial<RunStats> = {}): RunStats {
 }
 
 const BULLET: Bullet = { x: 100, y: 200, prevX: 100, prevY: 210, vx: 0, vy: -620, damage: 4, radius: 2, alive: true }
+
+/**
+ * A round mid-flight through a piercing shot.
+ *
+ * Two pierces left and two enemies already struck, because the baseline has to be a
+ * state the sim actually reaches: a mutation test against a bullet that has never
+ * pierced would only prove the absent case is hashed.
+ */
+function piercing(overrides: Partial<Bullet> = {}): Bullet {
+  return { ...BULLET, pierceRemaining: 2, hitUids: [3, 7], ...overrides }
+}
+
+/** A bullet with an optional pierce field genuinely absent, not set to undefined. */
+function bulletWithout(key: 'pierceRemaining' | 'hitUids'): Bullet {
+  const b = piercing()
+  delete b[key]
+  return b
+}
 const ENEMY_BULLET: EnemyBullet = {
   x: 150, y: 300, prevX: 150, prevY: 295, vx: 10, vy: 180, damage: 8, radius: 3, alive: true, kind: 'pellet',
 }
@@ -191,7 +209,7 @@ function worldView(overrides: Partial<WorldView> = {}): WorldView {
     choiceResolve: { action: 'skip', ticksRemaining: 240, totalTicks: 600 },
     choiceSelection: 1,
     hull: hull(),
-    playerBullets: [BULLET],
+    playerBullets: [piercing()],
     enemyBullets: [ENEMY_BULLET],
     enemies: [enemy(), bossEnemy()],
     explosions: [],
@@ -292,6 +310,21 @@ describe('the play-affecting digest covers what M5 added', () => {
     ['route.reward.amount', worldView({ pendingChoice: choice({ routes: [route({ reward: { kind: 'scrap', amount: 181 } })] }) })],
     ['route.stageIndex', worldView({ pendingChoice: choice({ routes: [route({ stageIndex: 2 })] }) })],
 
+    // --- pierce state (review finding R3) ----------------------------------------
+    // Both fields are read by the next tick's hit resolution. Before this the digest
+    // could not see either, so a regression anywhere in the piercing path went green
+    // across the whole corpus.
+    ['pierceRemaining', worldView({ playerBullets: [piercing({ pierceRemaining: 1 })] })],
+    // Absent is NOT a synonym for any number: undefined means "take the build's
+    // current pierce count", a latched 0 means "stop at the next target".
+    ['pierceRemaining absent', worldView({ playerBullets: [bulletWithout('pierceRemaining')] })],
+    ['pierceRemaining 0 vs absent', worldView({ playerBullets: [piercing({ pierceRemaining: 0 })] })],
+    ['hitUids identity', worldView({ playerBullets: [piercing({ hitUids: [4, 9] })] })],
+    ['hitUids length', worldView({ playerBullets: [piercing({ hitUids: [3] })] })],
+    ['hitUids order', worldView({ playerBullets: [piercing({ hitUids: [7, 3] })] })],
+    ['hitUids absent', worldView({ playerBullets: [bulletWithout('hitUids')] })],
+    ['hitUids emptied', worldView({ playerBullets: [piercing({ hitUids: [] })] })],
+
     // --- how an open card resolves itself, and when -----------------------------
     // The digest's only view of the choice cursor: `openTicks` and `awaitingRelease`
     // are not on WorldView, so without these two a run one tick from auto-confirming
@@ -307,6 +340,44 @@ describe('the play-affecting digest covers what M5 added', () => {
 
   it.each(mutations)('%s changes the regression hash', (_label, mutated) => {
     expect(hashWorld(mutated)).not.toBe(base)
+  })
+
+  /**
+   * THE JUDGEMENT CALL IN R3, PINNED: identity, not count.
+   *
+   * `hitUids`' only consumer is `hitUids.includes(e.uid)`, a membership test. So two
+   * rounds that have hit the same NUMBER of enemies but different ones have different
+   * futures — the first will damage 4 and 9 again next tick, the second will skip
+   * them — and a digest that hashed only the length could not tell them apart.
+   *
+   * The objection is that this only matters while one of those enemies is alive and
+   * in the round's path. True, and not the digest's problem: it separates states that
+   * CAN produce different futures, because deciding whether one WILL means simulating
+   * forward, which is what a hash exists to avoid.
+   */
+  it('separates rounds that have hit the same number of different enemies', () => {
+    const byIdentity = (uids: number[]): string =>
+      digestWorld(worldView({ playerBullets: [piercing({ hitUids: uids })] })).playerBullets
+
+    expect(byIdentity([3, 7])).not.toBe(byIdentity([4, 9]))
+    expect(byIdentity([3, 7])).not.toBe(byIdentity([3, 8]))
+    // Length still matters too — a round with one pierce spent is not a round with two.
+    expect(byIdentity([3, 7])).not.toBe(byIdentity([3]))
+  })
+
+  it('length-prefixes hit lists so two rounds cannot pool their history', () => {
+    // Without the prefix, one round holding [3,7] beside an empty one hashes the same
+    // as [3] beside [7]. Those are different worlds: in the second, two rounds are
+    // each still free to strike the enemy the other already hit.
+    const pooled = worldView({ playerBullets: [piercing({ hitUids: [3, 7] }), piercing({ hitUids: [] })] })
+    const split = worldView({ playerBullets: [piercing({ hitUids: [3] }), piercing({ hitUids: [7] })] })
+    expect(digestWorld(pooled).playerBullets).not.toBe(digestWorld(split).playerBullets)
+  })
+
+  it('names playerBullets when only pierce state moved', () => {
+    const start = digestWorld(worldView())
+    const moved = digestWorld(worldView({ playerBullets: [piercing({ pierceRemaining: 1 })] }))
+    expect(diffDigests(start, moved)).toEqual(['playerBullets'])
   })
 
   /**

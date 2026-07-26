@@ -143,6 +143,29 @@ export function adjustSettingValue(
  * Display value for a shared setting. Percentages carry their unit; toggles read as
  * words, because 0% of a camera effect is a state rather than a quantity and a
  * player scanning for "off" should find that word.
+ *
+ * WHY A MUTED VOLUME STILL SHOWS ITS NUMBER. The row used to read just 'Muted', while
+ * `adjustSettingValue` went on writing `masterVolume` on every left/right press — so
+ * the press changed the setting, marked the state dirty and reached localStorage while
+ * nothing on screen moved. Three remedies were available and this is the one that
+ * survives being wrong:
+ *
+ *   - *Refuse the adjustment.* Honest, but the row still does not move, so the player
+ *     learns nothing except that two keys are dead. The settings screen could put an
+ *     explanation in its notice line; the pause card has no notice line, so the
+ *     feedback would exist on one screen and not the other — the exact divergence
+ *     these shared functions exist to make impossible.
+ *   - *Unmute on adjust.* Pressing LEFT — "quieter" — would turn the sound back ON,
+ *     and it contradicts the Mute row's own promise to silence audio "without changing
+ *     the volume". Un-silencing a game by surprise is a bad failure for the player who
+ *     reached for Mute in the first place.
+ *   - *Show the level beside the mute marker.* The change becomes visible, the state
+ *     stays stated, the pre-set-while-silent gesture keeps working, and the feedback
+ *     lives in this one formatter — so both screens get it by construction rather than
+ *     by discipline.
+ *
+ * 'Muted' stays first and in the bright half because silence is the headline; the level
+ * follows with its unit, per rule 2, so the number a keypress moves is on screen.
  */
 export function formatSettingDisplay(
   settings: UiSettings,
@@ -153,10 +176,12 @@ export function formatSettingDisplay(
       return settings.shake === 0
         ? { value: 'Off', unit: '' }
         : { value: String(Math.round(settings.shake * 100)), unit: '%' }
-    case 'volume':
+    case 'volume': {
+      const level = String(Math.round(settings.masterVolume * 100))
       return settings.muted
-        ? { value: 'Muted', unit: '' }
-        : { value: String(Math.round(settings.masterVolume * 100)), unit: '%' }
+        ? { value: `Muted at ${level}`, unit: '%' }
+        : { value: level, unit: '%' }
+    }
     case 'mute':
       return { value: settings.muted ? 'On' : 'Off', unit: '' }
     case 'flashes':

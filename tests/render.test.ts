@@ -1118,6 +1118,84 @@ describe('stage identity comes from the run', () => {
 })
 
 // ---------------------------------------------------------------------------
+// rule 2 — a readout is a number a player can read
+// ---------------------------------------------------------------------------
+
+/**
+ * A `mul` stat produces a float, and a float reaches the panel unrounded unless
+ * something rounds it.
+ *
+ * This is not hypothetical arithmetic: Probate is `maxIntegrity mul 0.64`, and one
+ * `+18` integrity item puts the run's real maximum at `(100 + 18) * 0.64 = 75.52`.
+ * The meter rounded only the left half, so at FULL health the most-read number on
+ * screen said `76 / 75.52 hp` — a value above its own maximum, four digits of
+ * spurious precision, on the one figure a player checks every few seconds.
+ */
+describe('UI rule 2: no panel readout prints an unrounded float', () => {
+  /** A hull whose maxima are what a `mul` hull plus an `add` item actually produce. */
+  function fractionalHull(integrity: number, maxIntegrity: number): Hull {
+    return {
+      x: 224,
+      y: 610,
+      prevX: 223,
+      prevY: 611,
+      integrity,
+      maxIntegrity,
+      shield: 25.6,
+      maxShield: 25.6,
+      invulnTicks: 0,
+      radius: 5,
+    }
+  }
+
+  const drawnText = (view: WorldView, state = panelState()): string[] => {
+    const { ctx, calls } = makeStub()
+    drawPanel(ctx, view, state)
+    return calls.filter((c) => c.name === 'fillText').map((c) => String(c.args[0]))
+  }
+
+  it('rounds a meter’s maximum the same way it rounds its value', () => {
+    const texts = drawnText(worldFixture({ hull: fractionalHull(75.52, 75.52) }))
+    const maxima = texts.filter((text) => text.startsWith('/ '))
+    // One per meter: hull and shield. Both take their max straight from a resolved
+    // stat, so both are exposed to the same defect.
+    expect(maxima).toEqual(['/ 75.5 hp', '/ 25.6 sp'])
+    // At full health the two halves of the meter must agree. They cannot disagree
+    // once one formatter produces both — which is the point of fixing it there.
+    expect(texts).toContain('75.5')
+    expect(texts).not.toContain('76')
+  })
+
+  it('prints at most one decimal anywhere in the column', () => {
+    // Swept rather than spot-checked: every one of these is a plausible product of
+    // a hull multiplier and an item addition, and the assertion is against every
+    // string the panel drew rather than the two it was written for.
+    for (const max of [75.52, 25.6, 100 / 3, 99.999, 118 * 0.64, 0.5]) {
+      const view = worldFixture({
+        hull: fractionalHull(max * 0.4137, max),
+        resolvedStats: { projectileDamage: 7.253 },
+        stats: { ...worldFixture().stats, scrap: 55 },
+      })
+      for (const text of drawnText(view, panelState({ fireRate: 6.4444 }))) {
+        expect(text, `"${text}" carries more precision than a player can use`).not.toMatch(
+          /\d\.\d{2,}/,
+        )
+      }
+    }
+  })
+
+  it('says so rather than printing NaN when a readout is not a number', () => {
+    // The file's own defensive-read rule: the panel is drawn from whatever it is
+    // handed, including by an older replay. `(NaN).toFixed(1)` is the string "NaN",
+    // which is worse than an em dash because it looks like a value.
+    const view = worldFixture({ hull: fractionalHull(Number.NaN, Number.NaN) })
+    const texts = drawnText(view, panelState({ fireRate: Number.NaN }))
+    expect(texts.join(' ')).not.toContain('NaN')
+    expect(texts).toContain('—')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // rule 10 — measured, not asserted by comment
 // ---------------------------------------------------------------------------
 

@@ -213,16 +213,19 @@ describe('state hashing', () => {
    *     `choiceResolve` entered the run component. It is the digest's only view of
    *     the choice cursor, which decides whether an untouched card auto-confirms or
    *     times out.
-   *   - Digest generation 4 (`d686a388a1795250` -> the constant below):
+   *   - Digest generation 4 (`d686a388a1795250` -> `68587bac3c17901f`):
    *     `choiceSelection` entered it too — the highlighted option, which decides
    *     *what* an auto-confirm takes.
+   *   - Digest generation 5 (`68587bac3c17901f` -> the constant below):
+   *     `Bullet.pierceRemaining` and `.hitUids` entered `playerBullets`. Review
+   *     finding R3: both are read by the next tick's hit resolution.
    *
    * The generation numbers are `DIGEST_GENERATION` in `src/meta/snapshot.ts`, and
    * `tests/simVersion.test.ts` explains why a digest change and a sim change have to
    * be counted separately.
    */
   it('matches a recorded digest for a known world', () => {
-    expect(hashWorld(worldView())).toBe('68587bac3c17901f')
+    expect(hashWorld(worldView())).toBe('9d27a50ec0d1a237')
   })
 
   it('includes the M2 timing state that hitstop and telegraphs introduced', () => {

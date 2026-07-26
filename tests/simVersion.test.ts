@@ -99,6 +99,26 @@ const CANONICAL_HISTORY: ReadonlyArray<{
    * cosmetic digest and every entity count are unchanged.
    */
   { version: 2, digest: 4, hash: '5515696d21c80412' },
+
+  /**
+   * Generation 5 added `Bullet.pierceRemaining` and `Bullet.hitUids` to the
+   * `playerBullets` component — review finding R3. Both are read by the next tick's
+   * hit resolution, so two worlds whose in-flight rounds differed in either hashed
+   * identically and diverged immediately after.
+   *
+   * Verified a re-base and not drift: rebuilt with the generation-4 `playerBullets`
+   * component, this build still produces `5515696d21c80412` to the bit, and every
+   * other component, the cosmetic digest and every entity count are unchanged.
+   *
+   * WHAT THIS PROBE STILL CANNOT SEE, and it is the same blind spot as the corpus:
+   * the canonical run holds no items, so `pierceCount` is 0, the piercing branch
+   * never runs, and all 15 of its in-flight rounds carry `undefined` for both new
+   * fields. The number below therefore moved only by the two absent-markers. The
+   * digest is now CAPABLE of catching a piercing regression; nothing in this file or
+   * in `tests/replays/` exercises it. `tests/snapshot.test.ts` is what guards those
+   * two fields, by mutation rather than by replay.
+   */
+  { version: 2, digest: 5, hash: 'de2ef870affd4a0a' },
 ]
 
 function makeWorld() {

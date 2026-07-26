@@ -90,11 +90,19 @@ describe('the row model', () => {
   })
 
   it('carries a unit on every numeric value', () => {
-    // UI rule 2: no bare numbers anywhere in the interface.
-    const base = state({ settings: settings({ shake: 0.5, masterVolume: 0.5 }) })
-    for (const row of SETTINGS_ROWS) {
-      const { value, unit } = formatRowValue(base, row)
-      if (/^\d+$/.test(value)) expect(unit.length, row.id).toBeGreaterThan(0)
+    // UI rule 2: no bare numbers anywhere in the interface. ANY digit counts, rather
+    // than a value that is *only* digits: `/^\d+$/` stopped matching the moment a
+    // value read "Muted at 50", which is exactly when it needed to.
+    //
+    // Binding rows are excluded because a key name is not a quantity — "F1" wants no
+    // unit — and only the shared settings produce measurements.
+    for (const muted of [false, true]) {
+      const base = state({ settings: settings({ shake: 0.5, masterVolume: 0.5, muted }) })
+      for (const row of SETTINGS_ROWS) {
+        if (row.kind === 'binding') continue
+        const { value, unit } = formatRowValue(base, row)
+        if (/\d/.test(value)) expect(unit.length, `${row.id}: "${value}"`).toBeGreaterThan(0)
+      }
     }
   })
 
@@ -171,17 +179,64 @@ describe('adjusting a setting', () => {
     }
   })
 
-  it('reads zero shake as a word and a muted volume as muted', () => {
+  it('reads zero shake as a word', () => {
     // "0 %" is a quantity; a player scanning for whether shake is off wants the
-    // word. And showing "80 %" while silent is a readout contradicting reality.
+    // word.
     expect(formatSettingDisplay(settings({ shake: 0 }), 'shake')).toEqual({
       value: 'Off',
       unit: '',
     })
-    expect(formatSettingDisplay(settings({ muted: true }), 'volume')).toEqual({
-      value: 'Muted',
-      unit: '',
+  })
+
+  it('says both that the audio is muted and what level it will return to', () => {
+    // The row said only 'Muted', so the stored level was invisible — while LEFT and
+    // RIGHT went on writing it to localStorage. Silence is the headline, so it stays
+    // first and stays in the bright half; the level follows it with its unit so the
+    // press a player just made has somewhere to show up.
+    expect(formatSettingDisplay(settings({ muted: true, masterVolume: 0.8 }), 'volume')).toEqual({
+      value: 'Muted at 80',
+      unit: '%',
     })
+    expect(formatSettingDisplay(settings({ muted: false, masterVolume: 0.8 }), 'volume')).toEqual({
+      value: '80',
+      unit: '%',
+    })
+  })
+
+  /**
+   * The invariant R7 broke, stated so that it holds whichever remedy is chosen.
+   *
+   * `adjustSettingValue` returning a new object means something was committed and
+   * will be persisted. If the row's display is unchanged by that, the player pressed
+   * a key, the game wrote to storage, and nothing on screen moved — which is
+   * indistinguishable from a dead key. Refusing the adjustment satisfies this too
+   * (nothing is committed, so nothing is skipped); silently committing does not.
+   */
+  it('never commits a change the row does not show', () => {
+    const matrix: readonly Partial<UiSettings>[] = [
+      {},
+      { muted: true },
+      { muted: true, masterVolume: 0 },
+      { muted: true, masterVolume: 1 },
+      { muted: false, masterVolume: 0.5 },
+      { shake: 0 },
+      { shake: 1 },
+      { reduceFlashes: true },
+      { autoFire: true },
+    ]
+    for (const id of ['shake', 'volume', 'mute', 'flashes', 'autofire'] as const) {
+      for (const overrides of matrix) {
+        for (const delta of [-1, 1]) {
+          const before = settings(overrides)
+          const after = adjustSettingValue(before, id, delta)
+          if (after === before) continue
+          expect(
+            formatSettingDisplay(after, id),
+            `${id} at ${JSON.stringify(overrides)} committed an invisible change`,
+          ).not.toEqual(formatSettingDisplay(before, id))
+        }
+      }
+    }
   })
 
   it('marks the state dirty only when something changed', () => {

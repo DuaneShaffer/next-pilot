@@ -19,7 +19,12 @@
  * and add a fixture test. It is deliberately more work than mutating a type,
  * because mutating a type is how progress gets silently destroyed.
  *
- * ## M5 (the five-sector run) DID NOT NEED A v4, and the reasoning is worth keeping
+ * ## THE FIVE-SECTOR RUN DID NOT DRIVE v4, and the reasoning is worth keeping
+ *
+ * v4 exists, and it exists for `Settings.autoFire` — see `SaveV4`. It is NOT a
+ * multi-sector migration, and the argument for why M5 needed no schema change of its
+ * own still stands, because the instinct to add "how far did it get" will come back
+ * the next time a sector is added.
  *
  * The obvious reading of the milestone says otherwise — a run now has five sectors,
  * so surely "how far did it get" needs a new field. Three things say no, and the
@@ -53,10 +58,10 @@
  * three ever meant anything, and the discipline that makes v1 loadable in v3 comes
  * from every bump being load-bearing.
  *
- * So: no v4. When the daily contract's screen starts *printing* depth, add
- * `sectorId` to `DailyRecord`, default it in `coerceDailyRecord`, and populate it in
- * `src/main.ts` — still no envelope bump. What WOULD need a v4 is a new store: a
- * per-sector best, a chosen hull remembered between runs, a route history.
+ * So: no schema change for depth. When the daily contract's screen starts *printing*
+ * it, add `sectorId` to `DailyRecord`, default it in `coerceDailyRecord`, and
+ * populate it in `src/main.ts` — still no envelope bump. What WOULD need one is a new
+ * store: a per-sector best, a chosen hull remembered between runs, a route history.
  */
 
 import {
@@ -174,14 +179,56 @@ interface SaveV4 {
 export type Save = SaveV4
 type AnySave = SaveV1 | SaveV2 | SaveV3 | SaveV4
 
-export const DEFAULT_SAVE: Save = {
-  version: 4,
-  pilotNumber: 1,
-  settings: { ...DEFAULT_SETTINGS },
-  certifications: DEFAULT_CERTIFICATIONS,
-  personnel: [],
-  daily: null,
+/**
+ * A FRESH default save, every call. Use this, never a spread of a shared constant.
+ *
+ * ## The bug this replaces, because it is subtle and it was live
+ *
+ * Every fallback path returned `defaultSave()`, which is a SHALLOW copy: the
+ * returned save's `settings` object, `certifications` object and `personnel` array
+ * were the very same instances every other default save got, and the same instances
+ * hanging off the exported module constant. So a caller doing the most natural thing
+ * in the world —
+ *
+ * ```ts
+ *   const save = loadSave()   // storage empty, so a default
+ *   save.settings.shake = 0   // player turned shake off
+ * ```
+ *
+ * — edited the module's own default. Verified before fixing: after that assignment,
+ * a *fresh* `loadSave(null)` reports `shake: 0` for the rest of the process. The
+ * settings screen writes exactly this way, and the failure is invisible in
+ * development because it needs an empty save to reproduce and then looks like the
+ * setting having been persisted correctly.
+ *
+ * `personnel` is the same shape of problem with a worse ending: one shared array
+ * means a `push` from any code path appends a dead pilot to every other default
+ * save's history.
+ *
+ * A function rather than a deep-freeze because the save is deliberately mutable —
+ * `src/main.ts` assigns to `save.pilotNumber` and `save.settings` throughout a
+ * session, and freezing would trade a silent corruption for a crash on a code path
+ * that is behaving reasonably.
+ */
+export function defaultSave(): Save {
+  return {
+    version: 4,
+    pilotNumber: 1,
+    settings: { ...DEFAULT_SETTINGS },
+    certifications: { unlocked: [], progress: {} },
+    personnel: [],
+    daily: null,
+  }
 }
+
+/**
+ * The default save's *shape*, for reading only.
+ *
+ * Kept exported because it reads as documentation of what a new player starts with.
+ * Never spread it to produce a save — the nested objects would be shared. Call
+ * `defaultSave()`.
+ */
+export const DEFAULT_SAVE: Readonly<Save> = defaultSave()
 
 /**
  * `MIGRATIONS[n]` upgrades a version-n save to version n+1.
@@ -210,7 +257,10 @@ const MIGRATIONS: Record<number, (save: AnySave) => AnySave> = {
       // with unlocks would hand out progression they never earned; starting them with
       // invented personnel files would put fiction in a history that is meant to be a
       // record of what actually happened.
-      certifications: DEFAULT_CERTIFICATIONS,
+      // Spread, not the constant itself: handing back `DEFAULT_CERTIFICATIONS` would
+      // give the migrated save the module's own object, and the first unlock filed
+      // against it would edit the default every later save starts from.
+      certifications: { ...DEFAULT_CERTIFICATIONS },
       personnel: [],
       daily: null,
     } satisfies SaveV3
@@ -247,39 +297,68 @@ function coerceSettings(raw: unknown): Settings {
 }
 
 /**
- * Bring any stored save up to the current version.
+ * What a load had to throw away.
+ *
+ * THE COMMENT INSIDE `migrate` PROMISED THIS AND THE CODE DID NOT DELIVER IT: it said
+ * each store "reports what it discarded rather than silently repairing — a save that
+ * quietly loses half a history is worse than one that says it did", and then the
+ * personnel coercion was called as `sanitizePersonnelHistory(...).history`, dropping
+ * the `skipped` and `dropped` counts on the floor. `personnel.ts` returns them
+ * specifically so a caller can *say so*, and the only caller ignored them, which is
+ * how a save silently loses half a history while every comment in the file claims
+ * otherwise.
+ *
+ * `reset` covers the other silent case: a corrupt or future-versioned save falls back
+ * to a fresh game, and the player deserves to be told that rather than discovering it
+ * by finding their pilot count back at 001.
+ */
+export interface SaveLoadReport {
+  /** The save was unreadable and defaults were substituted wholesale. */
+  readonly reset: boolean
+  /** Personnel entries that could not be read at all. Non-zero means damage. */
+  readonly personnelSkipped: number
+  /** Personnel records the retention cap forced out while reading, oldest first. */
+  readonly personnelDropped: readonly PersonnelRecord[]
+}
+
+const WAS_RESET: SaveLoadReport = { reset: true, personnelSkipped: 0, personnelDropped: [] }
+
+/**
+ * Bring any stored save up to the current version, and report what was lost.
  *
  * Exported separately from storage so migration is unit-testable against
- * fixtures without touching localStorage.
+ * fixtures without touching localStorage. `migrate` is the thin wrapper for the
+ * common case where the caller only wants the save.
  */
-export function migrate(raw: unknown): Save {
-  if (typeof raw !== 'object' || raw === null) return { ...DEFAULT_SAVE }
+export function migrateWithReport(raw: unknown): { save: Save; report: SaveLoadReport } {
+  if (typeof raw !== 'object' || raw === null) return { save: defaultSave(), report: WAS_RESET }
 
   const candidate = raw as { version?: unknown; pilotNumber?: unknown }
   let version = typeof candidate.version === 'number' ? candidate.version : 0
 
   // A save from a *newer* build cannot be understood by this one. Reading it
   // anyway would mean guessing at fields, so start fresh rather than corrupt it.
-  if (version > CURRENT_VERSION || version < 1) return { ...DEFAULT_SAVE }
+  if (version > CURRENT_VERSION || version < 1) return { save: defaultSave(), report: WAS_RESET }
   if (typeof candidate.pilotNumber !== 'number' || !Number.isFinite(candidate.pilotNumber)) {
-    return { ...DEFAULT_SAVE }
+    return { save: defaultSave(), report: WAS_RESET }
   }
 
   let save = raw as AnySave
   while (version < CURRENT_VERSION) {
     const step = MIGRATIONS[version]
     // A gap in the migration chain is a programming error, not a data problem.
-    if (!step) return { ...DEFAULT_SAVE }
+    if (!step) return { save: defaultSave(), report: WAS_RESET }
     save = step(save)
     version = save.version
   }
 
   const current = save as SaveV3
+  const personnel = sanitizePersonnelHistory(current.personnel)
   // Every store is coerced by the module that owns its shape. None of them throw on
   // hand-edited storage, and each reports what it discarded rather than silently
   // repairing — a save that quietly loses half a history is worse than one that says
-  // it did.
-  return {
+  // it did. That reporting is what `report` carries out of here.
+  const migrated: Save = {
     version: CURRENT_VERSION,
     pilotNumber: Math.max(1, Math.floor(current.pilotNumber)),
     settings: coerceSettings(current.settings),
@@ -287,21 +366,56 @@ export function migrate(raw: unknown): Save {
       unlocked: coerceUnlockedIds(current.certifications?.unlocked),
       progress: coerceProgress(current.certifications?.progress),
     },
-    personnel: sanitizePersonnelHistory(current.personnel).history,
+    personnel: personnel.history,
     daily: coerceDailyRecord(current.daily),
+  }
+  return {
+    save: migrated,
+    report: {
+      reset: false,
+      personnelSkipped: personnel.skipped,
+      personnelDropped: personnel.dropped,
+    },
+  }
+}
+
+/**
+ * Bring any stored save up to the current version.
+ *
+ * The report is discarded here on purpose, for callers that have nowhere to show it.
+ * Anything that can tell the player should use `migrateWithReport` — see
+ * `SaveLoadReport` for why throwing the counts away silently was a defect rather
+ * than a simplification.
+ */
+export function migrate(raw: unknown): Save {
+  return migrateWithReport(raw).save
+}
+
+/**
+ * Read the stored save, and say what reading it cost.
+ *
+ * `reset: false` with no losses is the ordinary case, INCLUDING an empty store — a
+ * brand-new player has not lost anything, and reporting a reset would put a scary
+ * notice in front of someone whose save is simply not there yet. `reset: true` means
+ * bytes existed and could not be used, which is the case worth telling them about.
+ */
+export function loadSaveWithReport(
+  storage: Storage | null = safeStorage(),
+): { save: Save; report: SaveLoadReport } {
+  if (!storage) return { save: defaultSave(), report: { reset: false, personnelSkipped: 0, personnelDropped: [] } }
+  try {
+    const raw = storage.getItem(STORAGE_KEY)
+    if (!raw) return { save: defaultSave(), report: { reset: false, personnelSkipped: 0, personnelDropped: [] } }
+    return migrateWithReport(JSON.parse(raw))
+  } catch {
+    // Malformed JSON, quota errors, or a locked store. Play anyway — but this one is a
+    // real loss, so it is reported as one.
+    return { save: defaultSave(), report: WAS_RESET }
   }
 }
 
 export function loadSave(storage: Storage | null = safeStorage()): Save {
-  if (!storage) return { ...DEFAULT_SAVE }
-  try {
-    const raw = storage.getItem(STORAGE_KEY)
-    if (!raw) return { ...DEFAULT_SAVE }
-    return migrate(JSON.parse(raw))
-  } catch {
-    // Malformed JSON, quota errors, or a locked store. Play anyway.
-    return { ...DEFAULT_SAVE }
-  }
+  return loadSaveWithReport(storage).save
 }
 
 export function persistSave(save: Save, storage: Storage | null = safeStorage()): void {

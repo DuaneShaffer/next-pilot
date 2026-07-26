@@ -161,10 +161,28 @@ const CARD_Y = (VIRTUAL_H - CARD_H) / 2
 const PAD = 26
 const ROW_H = 34
 export const PAUSE_CONTENT_W = CARD_W - PAD * 2
+/** The card itself, exported so tests measure containment against the real rect. */
+export const PAUSE_CARD = { x: CARD_X, y: CARD_Y, w: CARD_W, h: CARD_H } as const
 /** Point size the selected row's hint is drawn at. */
 export const PAUSE_HINT_SIZE = 11
 /** Point size of the controls footer. */
 export const PAUSE_FOOTER_SIZE = 10
+/** Point size shared by a row's label and its value. */
+export const PAUSE_ROW_TEXT_SIZE = 14
+/**
+ * The left/right adjust affordance.
+ *
+ * Both halves of it. A single `'<'` at a fixed x — 150 units from the label, unattached
+ * to anything — is what this row used to draw, so `Volume  <  75 %` pointed away from
+ * the value it modifies and said LEFT was the only key that did anything.
+ *
+ * The GUTTER is reserved on every adjustable row whether the arrows are drawn or not,
+ * so moving the cursor onto a row does not slide its number sideways. Text that moves
+ * when you press a key is text you have to find again.
+ */
+export const PAUSE_ARROW_SIZE = 12
+export const PAUSE_ARROW_GAP = 8
+export const PAUSE_ARROW_GUTTER = 14
 export const PAUSE_FOOTER_TEXT = 'Arrows adjust · ENTER confirm · ESC resume'
 
 export function drawPauseMenu(ctx: CanvasRenderingContext2D, state: PauseMenuState): void {
@@ -245,7 +263,7 @@ export function drawPauseMenu(ctx: CanvasRenderingContext2D, state: PauseMenuSta
       ctx.fillRect(contentX - 8, rowY - 2, 2, ROW_H - 10)
     }
     drawText(ctx, item.label, contentX, rowY, {
-      size: 14,
+      size: PAUSE_ROW_TEXT_SIZE,
       weight: isSelected || isDestructive ? 600 : 400,
       baseline: 'top',
       color: isSelected || isDestructive ? Palette.text : Palette.textDim,
@@ -253,26 +271,40 @@ export function drawPauseMenu(ctx: CanvasRenderingContext2D, state: PauseMenuSta
 
     const { value, unit } = formatSettingValue(state.settings, item.id)
     if (value) {
+      // The gutter is held open on every row that has a value, so the number sits at
+      // the same x whether or not the cursor is on it. See PAUSE_ARROW_GUTTER.
+      const valueRight = contentRight - PAUSE_ARROW_GUTTER
       const unitWidth = unit
-        ? drawText(ctx, unit, contentRight, rowY + 2, {
+        ? drawText(ctx, unit, valueRight, rowY + 2, {
             size: 11,
             align: 'right',
             baseline: 'top',
             color: Palette.textDim,
           })
         : 0
-      drawText(ctx, value, contentRight - (unit ? unitWidth + 4 : 0), rowY, {
-        size: 14,
+      const valueX = valueRight - (unit ? unitWidth + 4 : 0)
+      const valueWidth = drawText(ctx, value, valueX, rowY, {
+        size: PAUSE_ROW_TEXT_SIZE,
         weight: 600,
         align: 'right',
         baseline: 'top',
         color: isSelected ? Palette.self : Palette.text,
       })
       // Arrows only on the selected adjustable row, so the affordance appears
-      // exactly where it applies instead of decorating every line.
+      // exactly where it applies instead of decorating every line — but BOTH of them,
+      // bracketing the value, because left and right both do something on every one of
+      // these rows. Positioned from the value's measured extent rather than at a fixed
+      // x, so they stay attached to the thing they modify however wide it reads.
       if (isSelected && item.kind !== 'action') {
-        drawText(ctx, '<', contentX + 150, rowY, {
-          size: 12,
+        drawText(ctx, '<', valueX - valueWidth - PAUSE_ARROW_GAP, rowY, {
+          size: PAUSE_ARROW_SIZE,
+          align: 'right',
+          baseline: 'top',
+          color: Palette.textFaint,
+        })
+        drawText(ctx, '>', contentRight, rowY, {
+          size: PAUSE_ARROW_SIZE,
+          align: 'right',
           baseline: 'top',
           color: Palette.textFaint,
         })

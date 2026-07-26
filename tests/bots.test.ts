@@ -46,9 +46,15 @@ import {
   BOT_NAMES,
   BUILD_FOCUSED_TARGET,
   MAX_CHOICE_RESOLUTION_TICKS,
+  choiceOpenTicks,
   createBuildFocused,
 } from '../src/sim/bots'
-import { CHOICE_TIMEOUT_TICKS } from '../src/sim/progression'
+import {
+  CHOICE_TIMEOUT_TICKS,
+  HELD_CONFIRM_DWELL_TICKS,
+  newCursor,
+  updateCursor,
+} from '../src/sim/progression'
 import { World, type RunContent } from '../src/sim/world'
 import { hashWorld } from '../src/meta/snapshot'
 
@@ -106,6 +112,15 @@ interface SeenChoice {
   frozenTicks: number
   /** Items already held when the screen opened. A re-offer is not a fresh offer. */
   heldAtOpen: readonly string[]
+  /**
+   * True when this card opened in the same tick the previous one closed.
+   *
+   * Recorded because it is the case the harness could not see: "pendingChoice went
+   * from null to non-null" misses every card after the first at a seam, so the three
+   * cards of a seam were counted as one long card and the bug in R1 had nowhere to
+   * show up.
+   */
+  chained: boolean
 }
 
 interface Played {
@@ -125,6 +140,14 @@ interface Played {
  * Deliberately does not import the sweep runner from `tools/playtest.ts`: these
  * tests have to be able to fail when the tool is wrong, which they cannot do if
  * they measure through it.
+ *
+ * IT WATCHES FOR CHAINED CARDS, and the reason is R1. `advanceTransition` opens the
+ * next card in the tick the previous one resolves, so "pendingChoice became
+ * non-null" only ever sees the FIRST card of a seam. Everything after it was folded
+ * into that card's record — three decisions counted as one, its 1,200-tick stall
+ * counted as one long route card — which is why no assertion in this file could see
+ * the bug. `choiceOpenTicks` is the sim's own per-card counter, and it going
+ * backwards is a card swap.
  */
 function play(policy: BotPolicy, seed: string, content?: RunContent, maxTicks = FULL_RUN_TICKS): Played {
   const world = content === undefined ? new World(seed) : new World(seed, content)
@@ -133,7 +156,26 @@ function play(policy: BotPolicy, seed: string, content?: RunContent, maxTicks = 
   const choices: SeenChoice[] = []
 
   let open: (SeenChoice & { openedAtTick: number; countsBefore: Map<string, number> }) | null = null
+  let lastOpenTicks = -1
   let ticks = 0
+
+  const record = (card: NonNullable<typeof open>): void => {
+    let taken: string | null = null
+    for (const entry of view.inventory) {
+      if (entry.count > (card.countsBefore.get(entry.defId) ?? 0)) taken = entry.defId
+    }
+    choices.push({
+      kind: card.kind,
+      offeredIds: card.offeredIds,
+      costs: card.costs,
+      scrapAtOpen: card.scrapAtOpen,
+      takenId: taken,
+      ticksOpen: ticks - card.openedAtTick,
+      frozenTicks: card.frozenTicks,
+      heldAtOpen: card.heldAtOpen,
+      chained: card.chained,
+    })
+  }
 
   while (view.runState === 'active' && ticks < maxTicks) {
     const wasOpen = open
@@ -145,6 +187,16 @@ function play(policy: BotPolicy, seed: string, content?: RunContent, maxTicks = 
     if (wasOpen !== null && frozen) wasOpen.frozenTicks++
 
     const pending = view.pendingChoice
+    const openTicks = choiceOpenTicks(view)
+    // A frozen tick never reaches `updateChoice`, so the sim's counter stands still
+    // and a stall would read as a swap. No card can resolve on a frozen tick either,
+    // so there is nothing to detect on one.
+    const chained =
+      pending !== null && open !== null && !frozen && openTicks !== null && openTicks <= lastOpenTicks
+    if (open !== null && (pending === null || chained)) {
+      record(open)
+      open = null
+    }
     if (pending !== null && open === null) {
       open = {
         kind: pending.kind,
@@ -155,26 +207,13 @@ function play(policy: BotPolicy, seed: string, content?: RunContent, maxTicks = 
         ticksOpen: 0,
         frozenTicks: 0,
         heldAtOpen: view.inventory.map((entry) => entry.defId),
+        chained,
         openedAtTick: ticks,
         countsBefore: new Map(view.inventory.map((entry) => [entry.defId, entry.count])),
       }
-    } else if (pending === null && open !== null) {
-      let taken: string | null = null
-      for (const entry of view.inventory) {
-        if (entry.count > (open.countsBefore.get(entry.defId) ?? 0)) taken = entry.defId
-      }
-      choices.push({
-        kind: open.kind,
-        offeredIds: open.offeredIds,
-        costs: open.costs,
-        scrapAtOpen: open.scrapAtOpen,
-        takenId: taken,
-        ticksOpen: ticks - open.openedAtTick,
-        frozenTicks: open.frozenTicks,
-        heldAtOpen: open.heldAtOpen,
-      })
-      open = null
     }
+    if (pending !== null && !frozen) lastOpenTicks = openTicks ?? lastOpenTicks + 1
+    if (pending === null) lastOpenTicks = -1
   }
 
   return {
@@ -585,6 +624,185 @@ describe('policies resolve the world map', () => {
     }
     expect(armed('direct')).toBe(0)
     expect(armed('rewarding')).toBeGreaterThan(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 3c. cards that CHAIN — the seam, where two cards share one tick
+// ---------------------------------------------------------------------------
+
+/**
+ * One card resolved by a policy, as the sim saw it.
+ *
+ * `index` is the *cursor position the confirm landed on*, which is the only
+ * evidence that the navigation script ran: a policy that never navigates confirms
+ * index 0 on every card and is indistinguishable from a policy whose preference
+ * happens to be 0.
+ */
+interface ResolvedCard {
+  kind: PendingChoiceKind
+  action: 'confirm' | 'skip'
+  index: number
+  /** Ticks the card was open. The 6-tick budget is measured against this. */
+  ticks: number
+}
+
+/**
+ * Drive a policy through a SEQUENCE of cards the way `advanceTransition` does:
+ * the moment one resolves, the next is already open, with no tick in between.
+ *
+ * The real `updateCursor` and the real `World.choiceResolve` arithmetic, because a
+ * hand-rolled cursor would agree with whatever the bot did. This is the shape the
+ * sim actually produces at a seam — `takeRoute` nulls `pendingChoice` and calls
+ * `advanceTransition`, which opens the transit item card in the same tick — and it
+ * is the shape no test covered: the timeout tests fly single-sector `LIVE_CONTENT`,
+ * which never chains two cards.
+ */
+function driveChain(policy: BotPolicy, cards: readonly PendingChoice[], maxTicks: number): ResolvedCard[] {
+  const out: ResolvedCard[] = []
+  let cursor = newCursor()
+  let card = 0
+  let openedAt = 0
+  for (let tick = 0; tick < maxTicks && card < cards.length; tick++) {
+    const choice = cards[card] as PendingChoice
+    const optionCount =
+      choice.kind === 'work-order'
+        ? choice.workOrders.length
+        : choice.kind === 'route'
+          ? choice.routes.length
+          : choice.offers.length
+    // Mirrors the `World.choiceResolve` getter exactly, including the branch switch:
+    // a card whose trigger has not been released yet counts down the dwell, and one
+    // that has is counting down the timeout.
+    const resolve = cursor.awaitingRelease
+      ? {
+          action: 'confirm' as const,
+          ticksRemaining: Math.max(0, HELD_CONFIRM_DWELL_TICKS - cursor.openTicks),
+          totalTicks: HELD_CONFIRM_DWELL_TICKS,
+        }
+      : {
+          action: 'skip' as const,
+          ticksRemaining: Math.max(0, CHOICE_TIMEOUT_TICKS - cursor.openTicks),
+          totalTicks: CHOICE_TIMEOUT_TICKS,
+        }
+    const view = fakeView(choice, {
+      choiceResolve: resolve,
+      choiceSelection: cursor.index,
+      stats: fakeStats({ scrap: 500 }),
+    })
+    const action = updateCursor(cursor, policy(view), optionCount)
+    if (action.kind === 'none') continue
+    out.push({
+      kind: choice.kind,
+      action: action.kind === 'confirm' ? 'confirm' : 'skip',
+      index: action.kind === 'confirm' ? action.index : -1,
+      ticks: tick + 1 - openedAt,
+    })
+    // The chain: the next card is open on the NEXT tick, and `pendingChoice` was
+    // never null in between. This is the whole bug — a resolver that resets on a
+    // null gap never resets again after the first card of a run.
+    card++
+    cursor = newCursor()
+    openedAt = tick + 1
+  }
+  return out
+}
+
+describe('a card that opens in the same tick the previous one closed is still chosen, not mashed', () => {
+  /**
+   * Option 2 is the one every deterministic policy wants: it is the only offer with
+   * a stated interaction (`synergy` and `build` score that first) AND the dearest
+   * affordable one (`expensive` scores price first). So a confirm on index 2 proves
+   * the navigation script ran, and a confirm on index 0 proves it did not.
+   */
+  const preferSecond: PendingChoice = {
+    kind: 'shop',
+    offers: [
+      { defId: 'plain-a', tier: 'common', interactionText: [] },
+      { defId: 'plain-b', tier: 'common', interactionText: [] },
+      { defId: 'wanted', tier: 'rare', interactionText: ['pairs with what you hold'] },
+    ],
+    costs: [10, 20, 60],
+    workOrders: [],
+    routes: [],
+  }
+
+  /** A one-option route card: every route style resolves it to index 0 in 2 ticks. */
+  const singleRoute = routeCard([{ kind: 'none' }])
+
+  it.each(['dodger', 'aggressor', 'greedy', 'build-focused'] as BotName[])(
+    '%s navigates the SECOND card of a chain instead of confirming index 0',
+    (name) => {
+      const resolved = driveChain(BOTS[name].create('CHA1NED23456'), [singleRoute, preferSecond], 40)
+      expect(resolved.length, `${name} never resolved both cards`).toBe(2)
+      const second = resolved[1] as ResolvedCard
+      expect(second.action, `${name} skipped the chained card`).toBe('confirm')
+      // THE ASSERTION. Before the reset condition was fixed this was 0: the resolver
+      // only reset `open` when `pendingChoice` became null, which never happens at a
+      // seam, so the second card fell through to the retry branch and re-confirmed
+      // whatever the cursor started on.
+      expect(second.index, `${name} confirmed option ${second.index}, not its preference`).toBe(2)
+      expect(second.ticks, `${name} took ${second.ticks} ticks on the chained card`).toBeLessThanOrEqual(
+        MAX_CHOICE_RESOLUTION_TICKS,
+      )
+    },
+  )
+
+  it('a chained card the policy cannot afford is DECLINED rather than stalling to the timeout', () => {
+    // The 1,200-tick stall, as a unit. The retry branch repeats the previous card's
+    // action, so a chain that ended in a confirm re-confirmed an unaffordable option
+    // every other tick — the world refuses, the card stays open, and the run pays the
+    // full timeout. Measured at 1,201 ticks per occurrence in a five-sector sweep.
+    const unaffordable: PendingChoice = {
+      kind: 'shop',
+      offers: [
+        { defId: 'a', tier: 'common', interactionText: [] },
+        { defId: 'b', tier: 'common', interactionText: [] },
+      ],
+      costs: [9999, 9999],
+      workOrders: [],
+      routes: [],
+    }
+    for (const name of BOT_NAMES) {
+      // Scrap is 500 in `driveChain`, so nothing on this card is affordable.
+      const resolved = driveChain(BOTS[name].create('BR0KECHA1N12'), [singleRoute, unaffordable], 2000)
+      expect(resolved.length, `${name} never resolved the chained shop`).toBe(2)
+      const second = resolved[1] as ResolvedCard
+      expect(second.action, `${name} confirmed something it could not afford`).toBe('skip')
+      expect(
+        second.ticks,
+        `${name} spent ${second.ticks} ticks on an unaffordable chained shop`,
+      ).toBeLessThanOrEqual(MAX_CHOICE_RESOLUTION_TICKS)
+    }
+  })
+
+  it('resolves a three-card chain, which is what a route paying an item actually opens', () => {
+    // route -> transit item -> transit shop, all sharing two ticks' worth of seams.
+    // `greedy` accepts a paying route, so this is its real seam sequence.
+    const item: PendingChoice = {
+      kind: 'item',
+      offers: [
+        { defId: 'x', tier: 'common', interactionText: [] },
+        { defId: 'y', tier: 'common', interactionText: ['stated'] },
+      ],
+      costs: [0, 0],
+      workOrders: [],
+      routes: [],
+    }
+    const resolved = driveChain(
+      BOTS.greedy.create('THR33CARD123'),
+      [singleRoute, item, preferSecond],
+      60,
+    )
+    expect(resolved.map((r) => r.kind)).toEqual(['route', 'item', 'shop'])
+    // `expensive` breaks a free-choice tie on the synergy score, so index 1 here.
+    expect(resolved[1]?.index).toBe(1)
+    expect(resolved[2]?.index).toBe(2)
+    for (const card of resolved) {
+      expect(card.ticks, `a ${card.kind} card took ${card.ticks} ticks`).toBeLessThanOrEqual(
+        MAX_CHOICE_RESOLUTION_TICKS,
+      )
+    }
   })
 })
 

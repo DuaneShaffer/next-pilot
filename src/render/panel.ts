@@ -69,6 +69,25 @@ function drawDivider(ctx: CanvasRenderingContext2D, y: number): void {
   ctx.fillRect(CONTENT_X, y, CONTENT_W, 1)
 }
 
+/**
+ * At most one decimal, and no trailing `.0`. The panel's ONE rounding convention.
+ *
+ * Deliberately the same rule as `numeral()` in `src/ui/hullSelect.ts` rather than a
+ * second one: the hangar and the HUD describing the same max integrity differently is
+ * the class of defect this file's other comments keep recording. It is re-implemented
+ * instead of imported because render must not depend on a screen — the dependency
+ * arrow is core ← sim ← render/ui — and if a third caller ever wants it, it belongs in
+ * `src/render/text.ts` where both can reach it.
+ *
+ * A non-finite value returns an em dash. `(NaN).toFixed(1)` is the string "NaN", which
+ * is worse than "no data" because it looks like a reading.
+ */
+function numeral(value: number): string {
+  if (!Number.isFinite(value)) return '—'
+  const rounded = Math.round(value * 10) / 10
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+}
+
 interface MeterOptions {
   label: string
   value: number
@@ -102,14 +121,21 @@ function drawMeter(ctx: CanvasRenderingContext2D, top: number, options: MeterOpt
 
   // Unit first, right-aligned to the edge, then the value to its left. Keeps the
   // value's last digit a fixed distance from the edge as its width changes.
+  //
+  // BOTH HALVES GO THROUGH ONE FORMATTER. `max` arrives straight from a resolved
+  // stat, so a hull with a `mul` on it plus an item with an `add` produces a genuine
+  // float: Probate at `maxIntegrity mul 0.64` plus a `+18` item is exactly 75.52.
+  // Rounding only the value printed `76 / 75.52 hp` at FULL health — a reading above
+  // its own maximum, on the number the player checks most often. Formatting them the
+  // same way is what makes "full" look full.
   const right = CONTENT_X + CONTENT_W
-  const unitWidth = drawText(ctx, `/ ${max} ${unit}`, right, top + 2, {
+  const unitWidth = drawText(ctx, `/ ${numeral(max)} ${unit}`, right, top + 2, {
     size: 10,
     align: 'right',
     baseline: 'top',
     color: Palette.textDim,
   })
-  drawText(ctx, `${Math.round(value)}`, right - unitWidth - 5, top, {
+  drawText(ctx, numeral(value), right - unitWidth - 5, top, {
     size: 13,
     weight: 600,
     align: 'right',
@@ -281,11 +307,6 @@ function prettifyId(id: string): string {
     .join(' ')
 }
 
-/** At most one decimal: items produce values like 5.8 and 7.25, not integers. */
-function formatStat(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1)
-}
-
 /**
  * Draw the build between `top` and `bottom`, and return nothing — the block is
  * anchored, not flowed, so nothing below it depends on how tall it turned out.
@@ -324,7 +345,7 @@ function drawHeldBuild(
   // may draw at a y the caller did not grant.
   const damage = view.resolvedStats.projectileDamage
   if (damage !== undefined && y + 20 <= bottom) {
-    y = drawStatLine(ctx, y, 'Damage', formatStat(damage), 'per shot')
+    y = drawStatLine(ctx, y, 'Damage', numeral(damage), 'per shot')
   }
 
   if (view.inventory.length === 0) {
@@ -624,11 +645,20 @@ export function drawPanel(
   // cannot turn into an overlap.
   y = drawStatLine(ctx, y, 'Weapon', state.weaponName)
   y += BETWEEN_GROUPS
-  y = drawStatLine(ctx, y, 'Fire rate', state.fireRate.toFixed(1), 'shots/s')
+  // A rate keeps its decimal place — 6.0 and 6.4 shots/s are different weapons and a
+  // tabular last digit is how you see one become the other — but not at the cost of
+  // printing "NaN shots/s" if the caller's arithmetic ever divides by zero.
+  y = drawStatLine(
+    ctx,
+    y,
+    'Fire rate',
+    Number.isFinite(state.fireRate) ? state.fireRate.toFixed(1) : '—',
+    'shots/s',
+  )
   y += BETWEEN_GROUPS
   // Scrap comes from the run, not the caller: a currency the HUD could get wrong
   // is a currency the player cannot trust.
-  y = drawStatLine(ctx, y, 'Scrap', String(view.stats.scrap), 'cr', Palette.caution)
+  y = drawStatLine(ctx, y, 'Scrap', numeral(view.stats.scrap), 'cr', Palette.caution)
   y += BEFORE_DIVIDER
   drawDivider(ctx, y)
   y += AFTER_DIVIDER

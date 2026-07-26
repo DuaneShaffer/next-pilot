@@ -280,9 +280,11 @@ export const BUILD_FOCUSED_TARGET: readonly string[] = ['split-shot', 'warheads'
  * One release tick, then up to two navigation press/release pairs for a
  * three-option screen, then the confirm: 1 + 4 + 1 = 6. Asserted in
  * `tests/bots.test.ts` against a real run, because the alternative failure mode is
- * silent — the sim's `CHOICE_TIMEOUT_TICKS` backstop is 3,600 ticks, and a policy
- * that quietly leans on it adds a minute of dead sim time per choice and corrupts
- * every survival number in the report.
+ * silent — the sim's `CHOICE_TIMEOUT_TICKS` backstop is 1,200 ticks (20 seconds),
+ * and a policy that quietly leans on it adds twenty seconds of dead sim time per
+ * choice and corrupts every survival number in the report. That is not
+ * hypothetical: it happened, at 1,201 ticks a seam, for as long as `ChoiceResolver`
+ * only reset on a null gap. See `ChoiceResolver.cardOpenTicks`.
  */
 export const MAX_CHOICE_RESOLUTION_TICKS = 6
 
@@ -518,6 +520,36 @@ function scriptFor(steps: number, confirm: boolean): InputSnapshot[] {
 }
 
 /**
+ * How long the open card has been open, as the sim counts it, or null if it will
+ * not say.
+ *
+ * `ChoiceCursor.openTicks` is not on `WorldView`, but `choiceResolve` is a
+ * countdown derived from it, so the elapsed half is recoverable: a card resets its
+ * cursor when it opens, which resets this to 0 and makes it the one observable
+ * signal that says "this is a DIFFERENT card from the one you were scripting".
+ *
+ * Both branches of the `World.choiceResolve` getter are counting the same
+ * `openTicks` — the dwell while the trigger has not been released, the timeout once
+ * it has — so the difference is correct across the switch between them, which
+ * happens on the second tick of every card a bot resolves.
+ *
+ * Null for a fabricated view that carries a card without a countdown (the test
+ * fixtures do this deliberately). A static fixture cannot chain, so the fallback is
+ * simply "the card I already have".
+ *
+ * Exported because `tools/playtest.ts` and `tests/bots.test.ts` need the same
+ * question answered — "is this the card I was already watching?" — and two copies of
+ * this arithmetic would be two chances for one of them to drift. An observer that
+ * cannot see a chained card counts a seam's three cards as one, which is how the
+ * 1,200-tick stalls above stayed out of every report.
+ */
+export function choiceOpenTicks(view: WorldView): number | null {
+  const resolve = view.choiceResolve
+  if (resolve === null) return null
+  return resolve.totalTicks - resolve.ticksRemaining
+}
+
+/**
  * Drives one choice screen to a decision.
  *
  * The cursor lives inside the sim and is not on `WorldView`, so this mirrors it
@@ -526,10 +558,36 @@ function scriptFor(steps: number, confirm: boolean): InputSnapshot[] {
  * and the guard against it drifting is the queue-exhaustion branch below plus the
  * measured `maxChoiceTicks` the sweep prints — if the mirror is ever wrong, a
  * choice takes longer than `MAX_CHOICE_RESOLUTION_TICKS` and the report says so.
+ *
+ * ## WHAT COUNTS AS A NEW CARD, and why it is not "pendingChoice became null"
+ *
+ * It was, and that was wrong for every card after the first. `advanceTransition`
+ * opens the next card in the *same tick* the previous one confirms — route, then the
+ * transit item the route paid for, then the transit shop — so at a seam there is
+ * never a null gap to reset on. The consequence was silent and total: the second and
+ * third cards of every seam fell through to the retry branch, which navigates
+ * nothing and repeats the previous card's action, so `chooseOffer` was never
+ * consulted at a seam and the pick was whatever index 0 happened to be. When index 0
+ * was unaffordable the world refused it, the branch re-confirmed, and the card sat
+ * there for the full 1,200-tick timeout: measured at 7-9 stalls per 100 five-sector
+ * runs before the fix, ~8,400 dead ticks per 100 runs.
+ *
+ * So the reset condition is the sim's own per-card tick counter going backwards.
+ * That is exact rather than heuristic — the sim builds a fresh `ChoiceCursor` for
+ * every card, and within one card the count rises by exactly one per unfrozen tick,
+ * which is exactly the set of ticks this method scripts.
  */
 class ChoiceResolver {
   private queue: InputSnapshot[] = []
   private open = false
+  /**
+   * The sim's `openTicks` for the card being scripted, as last observed. -1 when
+   * no card is open.
+   *
+   * Compared rather than trusted: a drop means the sim swapped the card underneath
+   * this resolver, which is what a seam does three times in three ticks.
+   */
+  private cardOpenTicks = -1
   /**
    * The action this screen was resolved with, for the retry branch.
    *
@@ -546,6 +604,7 @@ class ChoiceResolver {
     if (choice === null) {
       this.open = false
       this.queue.length = 0
+      this.cardOpenTicks = -1
       return null
     }
 
@@ -553,15 +612,24 @@ class ChoiceResolver {
     // script must not advance or a press would be eaten and the cursor would end
     // up somewhere this class does not think it is. `freezeTicks` is read before
     // the sim decrements it, so this is exactly the set of ticks that get skipped.
+    // It also means `openTicks` does not move on a frozen tick, which is why the
+    // comparison below only ever sees ticks the sim actually counted.
     if (view.freezeTicks > 0) return NEUTRAL_INPUT
 
-    if (!this.open) {
+    const openTicks = choiceOpenTicks(view)
+    // A card is new when this resolver has none, or when the sim's per-card counter
+    // failed to advance — which is a card swap, not a slow tick.
+    const fresh = !this.open || (openTicks !== null && openTicks <= this.cardOpenTicks)
+    this.cardOpenTicks = openTicks ?? this.cardOpenTicks + 1
+
+    if (fresh) {
       this.open = true
+      this.queue.length = 0
       const count = optionCountOf(choice)
       if (count === 0) {
         // Zero options cannot be confirmed at all — the sim requires
         // `optionCount > 0` — so the only exit is a skip. Without this branch the
-        // run sits on an empty screen until the 60-second timeout fires.
+        // run sits on an empty screen until the 20-second timeout fires.
         this.queue = scriptFor(0, false)
         this.action = PRESS_SKIP
       } else {
@@ -577,7 +645,7 @@ class ChoiceResolver {
 
     // The script ran out with the choice still open, so an input this class
     // expected to land did not. Repeat the decision rather than waiting out the
-    // sim's 60-second backstop: acting on the wrong cursor position is one skewed
+    // sim's 20-second backstop: acting on the wrong cursor position is one skewed
     // row in a pick table, and a timeout skews every survival number in the sweep.
     this.queue = [this.action]
     return NEUTRAL_INPUT

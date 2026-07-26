@@ -59,7 +59,14 @@
  *     the digest gets of the choice cursor. `openTicks` and `awaitingRelease` decide
  *     whether an untouched card auto-confirms or times out, and neither is exposed
  *     on `WorldView`. `.totalTicks` is the bar's denominator and is cosmetic.
- *
+ *   - `Bullet.pierceRemaining` and `Bullet.hitUids` — IN. Both are read by the next
+ *     tick's hit resolution: the first decides whether a round continues through its
+ *     next target, the second decides which targets it may still damage at all. Two
+ *     worlds whose in-flight rounds differed in either hashed identically and
+ *     diverged on the following tick, so a regression anywhere in the piercing path
+ *     went green across the whole corpus. `hitUids` is hashed by identity rather than
+ *     by length because its only consumer is `includes`; the argument is at the call
+ *     site in `hashPlayerBullets`.
  *   - `choiceSelection` — IN. Previously impossible: it was a `World` getter and not
  *     on the view, so two runs sitting on one card with different options highlighted
  *     hashed identically while being one auto-confirm away from taking different
@@ -118,8 +125,11 @@ import type {
  *   3. `choiceResolve` into `run` — the cursor's auto-confirm and timeout clock.
  *   4. `choiceSelection` into `run` — the highlighted option, which decides *what*
  *      an auto-confirm takes.
+ *   5. `Bullet.pierceRemaining` and `.hitUids` into `playerBullets` — how many
+ *      targets an in-flight round may still pass through, and which it has already
+ *      hit. Review finding R3.
  */
-export const DIGEST_GENERATION = 4
+export const DIGEST_GENERATION = 5
 
 /**
  * Tags for optional sub-objects.
@@ -251,6 +261,50 @@ function hashPlayerBullets(bullets: readonly Bullet[]): string {
   for (const b of bullets) {
     hashInterpolated(h, b)
     h.num(b.vx).num(b.vy).num(b.damage).num(b.radius).bool(b.alive)
+
+    /**
+     * Pierce state. Both fields are read by the NEXT tick's hit resolution, which is
+     * the only test that decides whether something belongs in this digest.
+     *
+     * `pierceRemaining` is read as `b.pierceRemaining ?? effects.pierceCount`, so
+     * three states are genuinely distinct and absent is not a synonym for any number:
+     * undefined means "has not pierced yet, take the build's CURRENT value", which is
+     * a different future from a latched 0 the moment the build's pierce count changes
+     * mid-flight. Hence the sentinel rather than a `?? -1`.
+     */
+    const pierce = b.pierceRemaining
+    if (pierce === undefined) h.u32(ABSENT)
+    else h.u32(PRESENT).num(pierce)
+
+    /**
+     * `hitUids` is hashed BY IDENTITY, not by count, and the reason is that its only
+     * consumer is a membership test — `hitUids.includes(e.uid)`. A round that has hit
+     * uids 3 and 7 and one that has hit 4 and 9 have the same length and different
+     * futures: the first will damage 4 and 9 again on the next tick, the second will
+     * skip them. Length alone cannot separate those, so length alone is not the
+     * play-affecting part.
+     *
+     * The counter-argument is that it only matters if one of those enemies is still
+     * alive and in the round's path — true, and beside the point. This digest
+     * distinguishes states that CAN produce different futures; deciding whether one
+     * will requires simulating forward, which is the thing a hash exists to avoid.
+     * The sim also never prunes reaped uids from the array, so two rounds differing
+     * only in stale entries hash differently while behaving alike. That is the
+     * correct trade: those states arise from genuinely different hit histories, and
+     * the cost of separating them is nothing next to missing the live case.
+     *
+     * Length-prefixed, so one bullet holding [3,7] beside an empty one cannot collide
+     * with [3] beside [7]. Order is preserved but is NOT itself read — it is hit
+     * history, and hashing it as stored is both simpler and strictly more sensitive
+     * than sorting first.
+     */
+    const hits = b.hitUids
+    if (hits === undefined) {
+      h.u32(ABSENT)
+    } else {
+      h.u32(PRESENT).u32(hits.length)
+      for (const uid of hits) h.num(uid)
+    }
   }
   return h.digest()
 }

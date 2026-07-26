@@ -1,12 +1,17 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   CURRENT_VERSION,
+  DEFAULT_SAVE,
   DEFAULT_SETTINGS,
+  defaultSave,
+  loadSaveWithReport,
+  migrateWithReport,
   adoptLegacySave,
   loadSave,
   migrate,
   persistSave,
 } from '../src/meta/save'
+import type { PersonnelRecord } from '../src/meta/personnel'
 
 /**
  * A minimal in-memory Storage, so these tests exercise the real load/persist
@@ -34,6 +39,45 @@ function memoryStorage(initial: Record<string, string> = {}): Storage {
  * would test that the code agrees with itself.
  */
 const V1_FIXTURE = { version: 1, pilotNumber: 37 }
+
+/**
+ * A real v3 personnel record, as an M4 build wrote it.
+ *
+ * Hand-written and frozen. `sectorId` and `waveIndex` are the two fields the "how
+ * far did it get" question turns on.
+ */
+const V3_PERSONNEL_RECORD = {
+  v: 1,
+  pilotNumber: 12,
+  hullId: 'lien',
+  outcome: 'lost',
+  causeKind: 'enemy-fire',
+  causeEnemyId: 'turret-heavy',
+  sectorId: 'debris-shelf',
+  waveIndex: 22,
+  ticks: 8_040,
+  kills: 96,
+  scrap: 310,
+  shotsFired: 2_400,
+  hits: 620,
+  seed: 'K7F29XQM3RTV',
+  items: [{ id: 'warheads', count: 1 }],
+  itemsOmitted: 0,
+  poolFingerprint: '0123456789abcdef',
+  simVersion: 1,
+  stateDigest: 'fedcba9876543210',
+}
+
+function v3SaveWith(personnel: readonly unknown[], daily: unknown = null): unknown {
+  return {
+    version: 3,
+    pilotNumber: 12,
+    settings: DEFAULT_SETTINGS,
+    certifications: { unlocked: [], progress: {} },
+    personnel,
+    daily,
+  }
+}
 
 describe('migration', () => {
   it('upgrades a real v1 save without losing progress', () => {
@@ -263,45 +307,6 @@ describe('migration to v3', () => {
  * the code agrees with itself.
  */
 describe('the five-sector run needs no schema version of its own', () => {
-  /**
-   * A real v3 personnel record, as an M4 build wrote it.
-   *
-   * Hand-written and frozen. `sectorId` and `waveIndex` are the two fields the "how
-   * far did it get" question turns on.
-   */
-  const V3_PERSONNEL_RECORD = {
-    v: 1,
-    pilotNumber: 12,
-    hullId: 'lien',
-    outcome: 'lost',
-    causeKind: 'enemy-fire',
-    causeEnemyId: 'turret-heavy',
-    sectorId: 'debris-shelf',
-    waveIndex: 22,
-    ticks: 8_040,
-    kills: 96,
-    scrap: 310,
-    shotsFired: 2_400,
-    hits: 620,
-    seed: 'K7F29XQM3RTV',
-    items: [{ id: 'warheads', count: 1 }],
-    itemsOmitted: 0,
-    poolFingerprint: '0123456789abcdef',
-    simVersion: 1,
-    stateDigest: 'fedcba9876543210',
-  }
-
-  function v3SaveWith(personnel: readonly unknown[], daily: unknown = null): unknown {
-    return {
-      version: 3,
-      pilotNumber: 12,
-      settings: DEFAULT_SETTINGS,
-      certifications: { unlocked: [], progress: {} },
-      personnel,
-      daily,
-    }
-  }
-
   it('already stores depth as a sector plus a wave, so no field is missing', () => {
     // CLAIM 1. Wave numbering restarts per sector, which makes `waveIndex` alone
     // ambiguous — but it has never been alone. The sector order is authored and
@@ -438,6 +443,132 @@ describe('migration to v4 — Settings.autoFire', () => {
     expect(save.version).toBe(4)
     expect(save.pilotNumber).toBe(37)
     expect(save.settings).toEqual(DEFAULT_SETTINGS)
+  })
+})
+
+describe('a default save is never shared with another default save', () => {
+  /**
+   * REVIEW FINDING, and it was live: every fallback returned `{ ...DEFAULT_SAVE }`, a
+   * SHALLOW copy, so each default save's `settings`, `certifications` and `personnel`
+   * were the very same instances as the module constant's.
+   *
+   * The failure needs an empty save to reproduce and then looks exactly like the
+   * setting having been saved correctly, which is why it survived: a player turns
+   * shake off, and from then on every fresh save in that process starts with shake
+   * off — including one belonging to a different pilot.
+   */
+  it('hands out fresh nested objects every time', () => {
+    const a = loadSave(null)
+    const b = loadSave(null)
+    expect(a).not.toBe(b)
+    expect(a.settings, 'settings shared between two default saves').not.toBe(b.settings)
+    expect(a.certifications, 'certifications shared').not.toBe(b.certifications)
+    expect(a.personnel, 'personnel array shared').not.toBe(b.personnel)
+    expect(a.certifications.progress, 'progress map shared').not.toBe(b.certifications.progress)
+  })
+
+  it('does not let a caller edit the module default by editing its own save', () => {
+    // Written the way the settings screen writes, because that is the code path that
+    // made this a real bug rather than a theoretical one.
+    const mine = loadSave(null)
+    mine.settings.shake = 0
+    mine.settings.muted = true
+
+    const later = loadSave(null)
+    expect(later.settings.shake, 'the default was poisoned').toBe(1)
+    expect(later.settings.muted).toBe(false)
+    expect(DEFAULT_SETTINGS.shake).toBe(1)
+  })
+
+  it('does not let one save append to another save history', () => {
+    const mine = migrate(null)
+    // `personnel` is readonly in the type; storage round-trips make the runtime array
+    // mutable, and a shared instance is what turns that into cross-contamination.
+    ;(mine.personnel as PersonnelRecord[]).push(V3_PERSONNEL_RECORD as unknown as PersonnelRecord)
+    expect(migrate(null).personnel, 'a dead pilot leaked into a fresh save').toEqual([])
+  })
+
+  it('keeps a migrated save clear of the defaults too', () => {
+    // The v2 -> v3 step handed back `DEFAULT_CERTIFICATIONS` itself, which is the same
+    // defect one layer down: the first unlock filed would have edited the constant.
+    const migrated = migrate({ version: 2, pilotNumber: 4, settings: { ...DEFAULT_SETTINGS } })
+    expect(migrated.certifications).not.toBe(loadSave(null).certifications)
+    expect(migrated.settings).not.toBe(loadSave(null).settings)
+  })
+
+  it('exposes the default shape without exposing the default objects', () => {
+    // DEFAULT_SAVE is kept as readable documentation of what a new player starts with.
+    // What must not happen is a save being built by spreading it.
+    expect(defaultSave()).toEqual(DEFAULT_SAVE)
+    expect(defaultSave().settings).not.toBe(DEFAULT_SAVE.settings)
+  })
+})
+
+describe('a load says what it had to throw away', () => {
+  /**
+   * REVIEW FINDING. `migrate`'s own comment claimed each store "reports what it
+   * discarded rather than silently repairing — a save that quietly loses half a
+   * history is worse than one that says it did", and then called
+   * `sanitizePersonnelHistory(...).history`, discarding the counts that reporting
+   * depends on. `personnel.ts` returns them precisely so a caller can say so.
+   */
+  it('counts personnel entries it could not read at all', () => {
+    const { save, report } = migrateWithReport({
+      version: 4,
+      pilotNumber: 5,
+      settings: DEFAULT_SETTINGS,
+      certifications: { unlocked: [], progress: {} },
+      personnel: [V3_PERSONNEL_RECORD, { nonsense: true }, null, 7, V3_PERSONNEL_RECORD],
+      daily: null,
+    })
+    expect(save.personnel).toHaveLength(2)
+    expect(report.reset).toBe(false)
+    expect(report.personnelSkipped, 'three unreadable entries went unreported').toBe(3)
+    expect(report.personnelDropped).toEqual([])
+  })
+
+  it('hands back the records the retention cap forced out', () => {
+    // 55 valid records against a cap of 50: five oldest are evicted on the way in, and
+    // the player is entitled to know their first five pilots are gone.
+    const many = Array.from({ length: 55 }, (_, i) => ({ ...V3_PERSONNEL_RECORD, pilotNumber: i + 1 }))
+    const { save, report } = migrateWithReport({
+      version: 4,
+      pilotNumber: 56,
+      settings: DEFAULT_SETTINGS,
+      certifications: { unlocked: [], progress: {} },
+      personnel: many,
+      daily: null,
+    })
+    expect(save.personnel).toHaveLength(50)
+    expect(report.personnelDropped).toHaveLength(5)
+    expect(report.personnelDropped.map((r) => r.pilotNumber)).toEqual([1, 2, 3, 4, 5])
+    // Oldest-first, and the survivors start where the dropped ones stop.
+    expect(save.personnel[0]?.pilotNumber).toBe(6)
+  })
+
+  it('reports nothing lost for a clean save, and nothing lost for no save at all', () => {
+    const clean = migrateWithReport(v3SaveWith([V3_PERSONNEL_RECORD]))
+    expect(clean.report).toEqual({ reset: false, personnelSkipped: 0, personnelDropped: [] })
+
+    // An empty store is not a loss. A brand-new player has nothing to be warned about,
+    // and a reset notice in front of them would be the interface inventing a problem.
+    const empty = loadSaveWithReport(memoryStorage())
+    expect(empty.report.reset).toBe(false)
+    expect(empty.save.pilotNumber).toBe(1)
+  })
+
+  it('says a save was reset when bytes existed and could not be used', () => {
+    // Each of these silently became a fresh game. The player finding their pilot count
+    // back at 001 with no explanation is the outcome being avoided.
+    expect(loadSaveWithReport(memoryStorage({ 'next-pilot/save': '{not json' })).report.reset).toBe(true)
+    expect(migrateWithReport({ version: CURRENT_VERSION + 5, pilotNumber: 9 }).report.reset).toBe(true)
+    expect(migrateWithReport(null).report.reset).toBe(true)
+    expect(migrateWithReport({ version: 1, pilotNumber: 'many' }).report.reset).toBe(true)
+  })
+
+  it('leaves migrate() as the plain answer for callers with nowhere to show it', () => {
+    const raw = v3SaveWith([V3_PERSONNEL_RECORD])
+    expect(migrate(raw)).toEqual(migrateWithReport(raw).save)
   })
 })
 
