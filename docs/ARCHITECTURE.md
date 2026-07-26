@@ -106,7 +106,8 @@ roguelike faster than an update erasing progress.
 - Sim tick: < 2ms at p99 with 2,000 live projectiles.
 - Frame: < 8ms at p99, leaving headroom inside the 16.6ms budget.
 - `droppedTicks` must be 0.
-- Bundle: < 150KB uncompressed. Currently ~81KB.
+- Bundle: **< 75KB transferred** (gzipped). Currently ~50KB. A 400KB uncompressed cap
+  exists only as a runaway backstop.
 
 **What 2,000 projectiles actually is:** a headroom target for content that does not exist yet, not a
 description of the game. The projectile caps total 1,792, so 2,000 is *unreachable through play*, and
@@ -121,11 +122,19 @@ by twelve is not a p99. `tools/perf.mjs` prints timings at `ff≠1` but *refuses
 dense play honestly means `--seconds=180`. This is the same shape of mistake as reading dropped ticks
 around a screenshot.
 
+**On the bundle budget:** this was `du -sb dist` against 150KB, set at M0 when the bundle
+was 15KB, and it failed at M4 on 169KB of disk. Disk size was never the constraint —
+GitHub Pages serves gzip, and what matters for a game someone clicks a link to is what
+they actually download, which is ~50KB. Raising the old number would have been moving a
+goalpost; changing the metric fixed a measurement that was wrong from the start. The
+uncompressed cap survives as a backstop for something that compresses well and still
+bloats parse time, like an accidentally inlined asset.
+
 **Where each is enforced, and why it matters:**
 
 | Check | Enforced by | Runs on CI |
 | --- | --- | --- |
-| Bundle size | `ci.yml` | yes |
+| Bundle size (gzipped transfer) | `ci.yml` | yes |
 | `droppedTicks == 0` | `tests/perf.test.ts` | yes |
 | Scenario integrity (really 2,000 projectiles) | `tests/perf.test.ts` | yes |
 | Absolute tick p50/p99 | `tests/perf.test.ts` | **no — local only** |

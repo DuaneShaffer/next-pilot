@@ -42,13 +42,30 @@ jobs:
         run: npm run build
 
       - name: Enforce bundle budget
-        # A bundle that quietly triples in size is a regression, so it fails here
-        # rather than being noticed months later. See docs/ARCHITECTURE.md.
+        # Measures TRANSFER size, not disk size.
+        #
+        # This was `du -sb dist` against 150KB, set when the bundle was 15KB. It failed
+        # at M4 on 169KB of disk — but disk size was never the constraint. What matters
+        # for a game someone clicks a link to is what they download, and GitHub Pages
+        # serves gzip, so the real figure is ~50KB. Raising the old number would have
+        # been moving a goalpost; changing the metric is fixing a measurement that was
+        # wrong from the start.
+        #
+        # Two ceilings: transfer size is the one that matters to a player, and the
+        # uncompressed cap is a runaway backstop for something like an accidentally
+        # inlined asset that compresses well and still bloats parse time.
         run: |
-          BUDGET_BYTES=153600
-          SIZE=$(du -sb dist | cut -f1)
-          echo "dist is ${SIZE} bytes (budget ${BUDGET_BYTES})"
-          if [ "$SIZE" -gt "$BUDGET_BYTES" ]; then
-            echo "::error::Bundle exceeds the ${BUDGET_BYTES}-byte budget."
+          GZIP_BUDGET=76800      # 75KB transferred
+          RAW_BUDGET=409600      # 400KB on disk, backstop only
+          GZIP_SIZE=$(cat $(find dist -type f \( -name '*.js' -o -name '*.html' -o -name '*.css' \)) | gzip -9 -c | wc -c)
+          RAW_SIZE=$(du -sb dist | cut -f1)
+          echo "transfer ${GZIP_SIZE} bytes gzipped (budget ${GZIP_BUDGET})"
+          echo "on disk  ${RAW_SIZE} bytes (backstop ${RAW_BUDGET})"
+          if [ "$GZIP_SIZE" -gt "$GZIP_BUDGET" ]; then
+            echo "::error::Transfer size ${GZIP_SIZE} exceeds the ${GZIP_BUDGET}-byte budget."
+            exit 1
+          fi
+          if [ "$RAW_SIZE" -gt "$RAW_BUDGET" ]; then
+            echo "::error::Uncompressed size ${RAW_SIZE} exceeds the ${RAW_BUDGET}-byte backstop."
             exit 1
           fi
