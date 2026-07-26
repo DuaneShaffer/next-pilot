@@ -48,13 +48,22 @@
  * a dependency on sim internals.
  */
 
+import { SIM_VERSION } from './simVersion'
 import type { InputSnapshot } from '../core/input'
 import { packInput, unpackInput } from '../core/input'
 
-export const REPLAY_FORMAT_VERSION = 1
+/**
+ * Encoding version — how the bytes are laid out.
+ *
+ * Bumped to 2 when `simVersion` entered the header. Distinct from SIM_VERSION,
+ * which describes what those bytes *mean*: a format mismatch fails to decode and is
+ * safe, while a sim mismatch decodes perfectly and plays back the wrong run. See
+ * src/meta/simVersion.ts.
+ */
+export const REPLAY_FORMAT_VERSION = 2
 
 const MAGIC = [0x4e, 0x50, 0x52] as const // 'NPR'
-const HEADER_MIN_BYTES = MAGIC.length + 1 + 1 + 1 + 1 + 4
+const HEADER_MIN_BYTES = MAGIC.length + 1 + 1 + 1 + 1 + 1 + 4
 const MAX_SEED_BYTES = 64
 /**
  * ~16 hours at 60Hz. Not a design limit on run length — a sanity bound so a
@@ -90,6 +99,14 @@ export class ReplayError extends Error {
 
 export interface Replay {
   readonly version: number
+  /**
+   * Simulation version this run was recorded under.
+   *
+   * Carried so a shared replay can be refused rather than played back wrong on a
+   * build whose rules have changed. See src/meta/simVersion.ts for why decoding
+   * successfully is not the same as being playable.
+   */
+  readonly simVersion: number
   readonly seed: string
   /** One packed input byte per tick. Length is the tick count. */
   readonly inputs: Uint8Array
@@ -249,7 +266,17 @@ export function encodeReplay(replay: Replay): string {
     throw new ReplayError('tick-count-too-large', `${replay.inputs.length} ticks`)
   }
 
-  const bytes: number[] = [...MAGIC, REPLAY_FORMAT_VERSION, seedBytes.length, ...seedBytes]
+  const simVersion = replay.simVersion
+  if (!Number.isInteger(simVersion) || simVersion < 0 || simVersion > 255) {
+    throw new ReplayError('bad-seed', `simVersion ${simVersion} out of range`)
+  }
+  const bytes: number[] = [
+    ...MAGIC,
+    REPLAY_FORMAT_VERSION,
+    simVersion,
+    seedBytes.length,
+    ...seedBytes,
+  ]
   writeVarint(bytes, replay.inputs.length)
 
   // Run-length pass. One entry per *input change*, which is what makes a
@@ -318,6 +345,13 @@ export function decodeReplay(text: string): Replay {
   }
 
   let offset = MAGIC.length + 1
+  // The simulation version sits immediately after the format version. Read, not
+  // validated here: decoding is about whether the bytes are well formed, and
+  // whether the run is *playable* is a separate question the caller asks with
+  // checkReplayCompatibility. Conflating them would make an incompatible replay
+  // indistinguishable from a corrupt one.
+  const simVersion = bytes[offset] ?? 0
+  offset++
   const seedLength = bytes[offset] ?? 0
   offset++
   if (seedLength === 0 || seedLength > MAX_SEED_BYTES || offset + seedLength > bodyEnd) {
@@ -370,7 +404,7 @@ export function decodeReplay(text: string): Replay {
     )
   }
 
-  return { version, seed, inputs }
+  return { version, simVersion, seed, inputs }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +432,14 @@ export class ReplayRecorder {
   }
 
   toReplay(): Replay {
-    return { version: REPLAY_FORMAT_VERSION, seed: this.seed, inputs: Uint8Array.from(this.bytes) }
+    return {
+      version: REPLAY_FORMAT_VERSION,
+      // Stamped at recording time, from the build that produced the run. This is
+      // what lets a future build refuse it instead of replaying it wrong.
+      simVersion: SIM_VERSION,
+      seed: this.seed,
+      inputs: Uint8Array.from(this.bytes),
+    }
   }
 
   encode(): string {

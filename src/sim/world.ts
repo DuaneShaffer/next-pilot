@@ -93,6 +93,21 @@ import type {
 export type { Bullet, EnemyBullet, EnemyInstance, Explosion, Hull, Interpolated } from './entities'
 
 /** Movement speed in virtual units per second. */
+/**
+ * DEPRECATED FALLBACKS.
+ *
+ * These are shadowed by `STATS` in stats.ts, which is where the live values now
+ * live — `resolvedStats.hullSpeed ?? HULL_SPEED` only reaches the constant if the
+ * stat table is missing a key, which the closed `StatKey` union prevents.
+ *
+ * Discovered by mutating this file to prove the sim-version guard worked: changing
+ * HULL_SPEED changed nothing at all, because nothing reads it. A constant that looks
+ * authoritative and is not is worse than no constant — the next person to tune hull
+ * speed edits it and measures no effect.
+ *
+ * Kept only as `??` fallbacks so a malformed resolve cannot produce NaN, and marked
+ * so nobody tunes them by mistake.
+ */
 const HULL_SPEED = 210
 /** Multiplier applied while the focus key is held, for precise threading. */
 const FOCUS_FACTOR = 0.45
@@ -300,10 +315,12 @@ export class World implements WorldView {
       y: startY,
       prevX: startX,
       prevY: startY,
-      integrity: HULL_INTEGRITY,
-      maxIntegrity: HULL_INTEGRITY,
-      shield: HULL_SHIELD,
-      maxShield: HULL_SHIELD,
+      // From the stat table, so an item that raises a maximum and the starting
+      // value can never disagree about what the base is.
+      integrity: this.resolvedStats.maxIntegrity ?? HULL_INTEGRITY,
+      maxIntegrity: this.resolvedStats.maxIntegrity ?? HULL_INTEGRITY,
+      shield: this.resolvedStats.maxShield ?? HULL_SHIELD,
+      maxShield: this.resolvedStats.maxShield ?? HULL_SHIELD,
       invulnTicks: 0,
       radius: HULL_COLLISION_RADIUS,
     }

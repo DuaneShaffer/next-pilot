@@ -19,6 +19,7 @@ import type { BotName } from '../src/sim/bots'
 import { BOTS, BOT_NAMES } from '../src/sim/bots'
 import { World } from '../src/sim/world'
 import { diffDigests, digestWorld, Hasher, hashWorld } from '../src/meta/snapshot'
+import { SIM_VERSION } from '../src/meta/simVersion'
 import type { Replay, TickableWorld } from '../src/meta/replay'
 import {
   decodeReplay,
@@ -363,6 +364,8 @@ function localChecksum(bytes: readonly number[]): number {
 function forgeReplay(options: {
   magic?: readonly number[]
   version?: number
+  /** Simulation version byte. Defaults to this build's, like a real recording. */
+  simVersion?: number
   seed?: string
   tickCount?: number
   runs?: ReadonlyArray<[number, number]>
@@ -371,11 +374,14 @@ function forgeReplay(options: {
 }): string {
   const magic = options.magic ?? [0x4e, 0x50, 0x52]
   const version = options.version ?? REPLAY_FORMAT_VERSION
+  const simVersion = options.simVersion ?? SIM_VERSION
   const seed = options.seed ?? 'ABCD'
   const runs = options.runs ?? [[packInput(NEUTRAL_INPUT), 4]]
   const tickCount = options.tickCount ?? runs.reduce((sum, [, count]) => sum + count, 0)
 
-  const bytes: number[] = [...magic, version, seed.length]
+  // simVersion sits between the format version and the seed length — the byte that
+  // lets a future build refuse a replay rather than play it back wrong.
+  const bytes: number[] = [...magic, version, simVersion, seed.length]
   for (let i = 0; i < seed.length; i++) bytes.push(seed.charCodeAt(i))
   const varint = (value: number): void => {
     let v = value
@@ -578,7 +584,12 @@ describe('replay format versioning', () => {
   })
 
   it('refuses to encode a replay claiming another version', () => {
-    const wrong: Replay = { version: 99, seed: 'ABCD', inputs: new Uint8Array([0b0101]) }
+    const wrong: Replay = {
+      version: 99,
+      simVersion: SIM_VERSION,
+      seed: 'ABCD',
+      inputs: new Uint8Array([0b0101]),
+    }
     expect(() => encodeReplay(wrong)).toThrow(/version-mismatch/)
   })
 })
