@@ -2078,7 +2078,8 @@ function printM5ExitCriteria(
           `${row.deathShare > DEATH_SPIKE_MAX ? '   SPIKE' : ''}`,
       )
     }
-    if (competent !== undefined && pooled.totalDeaths > 0) {
+    // Only worth saying when the pool is actually wider than the competent policy.
+    if (competent !== undefined && summaries.length > 1 && pooled.totalDeaths > 0) {
       const pooledWorst = pooled.rows.reduce((acc, row) =>
         row.deathShare > acc.deathShare ? row : acc,
       )
