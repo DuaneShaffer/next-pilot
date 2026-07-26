@@ -225,6 +225,20 @@ spike above 35%).
 **Exit:** accessibility checklist complete; all budgets green; a first-run screenshot sequence
 that explains itself.
 
+## Proposed, unscheduled
+
+See **Proposals not yet decided** in `docs/DESIGN.md` for the reasoning. Summary:
+
+- **World map + between-sector shops** — not new systems, just the existing work-order
+  design getting somewhere to live. Fold into **M5**, which is when sectors exist to
+  route between.
+- **Experience / levels** — a real addition, but only if its rhythm is distinct from
+  items (high frequency, low deliberation). Otherwise it is a second power curve doing
+  the same job.
+- **Cross-run persistence of items and levels** — UNRESOLVED and load-bearing. It
+  contradicts the Progression section of `docs/DESIGN.md` and the constraint M4's
+  certifications are built under. Decide before M5, not during it.
+
 ## M7 — Mobile
 
 Deliberately after the desktop feel is settled, so touch follows the game rather than shaping it.

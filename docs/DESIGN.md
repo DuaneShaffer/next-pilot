@@ -133,6 +133,51 @@ that doubles as the game's writing surface — a browsable list of institutional
 Explicitly **not** included: currency-purchased permanent stat upgrades. They convert a skill
 problem into a grinding problem.
 
+## Proposals not yet decided
+
+Recorded so they are not lost, and explicitly NOT settled design. Nothing below is
+implemented or scheduled.
+
+### Experience and levels
+
+A second progression axis alongside items, proposed 2026-07-25.
+
+The design question is not whether it is possible but what makes it **distinct from
+items**. Items arrive twice a sector as a considered three-option choice. If levels
+also present a considered choice they are the same system at a different interval,
+and two power curves doing one job dilute both.
+
+Where it would earn its place: **high frequency, low deliberation** — a level every
+~15 kills granting one small immediate pick, so the sector has continuous growth
+between its two big decisions. What to avoid is a level opening another three-option
+card.
+
+### World map and between-sector shops
+
+Not new systems — these are the *existing* work-order design (see Work orders above)
+finally having somewhere to live. Work orders are specified as a route choice between
+sectors and are currently placed mid-sector only because sector 1 is the only sector,
+so there is nothing to route between. A world map is their intended home, and
+between-sector shops are the same story. Both arrive naturally with M5.
+
+### Cross-run persistence — UNRESOLVED, and it decides what kind of game this is
+
+A proposal that "items and levels persist" is ambiguous in a way that matters:
+
+- **Across sectors within a run** — already how items work. No conflict.
+- **Across runs** — a direct contradiction of the Progression section above, which
+  excludes permanent stat purchases because "they convert a skill problem into a
+  grinding problem", and of certifications expanding variety rather than power.
+
+The second reading is a genre change from roguelike to roguelite, and it is a
+legitimate one that many good games make. But it cannot be adopted by accident: the
+certification system is built under the no-permanent-power constraint and has a test
+that structurally forbids a certification from granting a raw stat increase. Adopting
+cross-run power means deliberately removing that constraint, not quietly working
+around it.
+
+**Do not implement either reading until this is settled.**
+
 ## Seeded runs
 
 Determinism is architectural (see `docs/ARCHITECTURE.md`), so these come nearly free:
