@@ -49,8 +49,19 @@ Existing streams, and what each one is for:
 | `route` | Which approaches the world map offers between sectors |
 | `hazard` | Where a hazard's debris falls |
 | `boss` | Which seeded variant of a boss a run faces |
+| `hull-offer` | Which hulls a sortie offers (`HULL_OFFER_STREAM`, `src/ui/hullSelect.ts`) |
 | `cosmetic:starfield` | Parallax stars |
-| `bot:random`, `test:inputs` | Verification harness only; never in a real run |
+| `noise-buffer`, `noise-offset` | Audio synthesis only (`src/audio/**`), never the sim |
+| `bot:random`, `bot:random-choice`, `bot:random-route`, `bot:route` | Bot policies. Harness only; never in a real run |
+| `test:inputs`, `test:replay-inputs` | Test fixtures only |
+
+**THIS TABLE GOES STALE SILENTLY AND HAS.** `hull-offer` was added with the hull-selection screen,
+whose own source carries the instruction "Add to the table in `docs/ARCHITECTURE.md`" — and it was
+not added, so for a whole milestone the authoritative list of what a seed determines was missing an
+entry that decides which ship you fly. The bot and audio streams had drifted out too. Nothing
+enforces this; `tools/check-contracts.mjs` verifies that `Math.random()` is absent and that streams
+are named, not that they are *documented*. If you add a stream, add the row in the same commit, and
+if you are reading this to find out what a seed controls, grep `fromSeed(` and trust that instead.
 
 A new random concern gets a new stream; reusing one for a second purpose shifts every downstream
 roll and breaks recorded replays. The rule earns its keep constantly — `route` and `hazard` are
