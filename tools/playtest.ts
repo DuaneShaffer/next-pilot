@@ -2010,8 +2010,9 @@ function printM5ExitCriteria(
    * The pooled table is still printed above, because "the control never leaves
    * sector one" is exactly the signal `random` exists to give.
    */
-  const cliffSource = competent?.sectors ?? pooled
-  const cliffLabel = competent === undefined ? 'all policies pooled' : COMPETENT_POLICY
+  const lead = competent ?? (summaries.length === 1 ? summaries[0] : undefined)
+  const cliffSource = lead?.sectors ?? pooled
+  const cliffLabel = lead === undefined ? 'all policies pooled' : lead.policy
   if (competent === undefined) {
     console.log(
       `  UNJUDGED  clear rate: ${COMPETENT_POLICY} was not in this sweep (--policy excluded it)`,
@@ -2079,7 +2080,7 @@ function printM5ExitCriteria(
       )
     }
     // Only worth saying when the pool is actually wider than the competent policy.
-    if (competent !== undefined && summaries.length > 1 && pooled.totalDeaths > 0) {
+    if (lead !== undefined && summaries.length > 1 && pooled.totalDeaths > 0) {
       const pooledWorst = pooled.rows.reduce((acc, row) =>
         row.deathShare > acc.deathShare ? row : acc,
       )
@@ -2908,18 +2909,17 @@ function main(argv: readonly string[]): void {
     // Pooling puts three probes that are designed to die in sector one into every
     // denominator, which makes the pooled death distribution a fact about the
     // instruments rather than about the difficulty curve.
+    // Whichever single policy the verdicts will be read off gets its own tables
+    // first; the pool is printed after it, and only when it is actually wider.
     const competentSummary = summaries.find((s) => s.policy === COMPETENT_POLICY)
-    if (competentSummary !== undefined) {
-      printSectors(competentSummary.sectors, `${competentSummary.runs} ${COMPETENT_POLICY} runs`)
-      printBosses(competentSummary.sectors)
-      printDpsLadder(competentSummary.sectors)
+    const lead = competentSummary ?? summaries[0]
+    if (lead !== undefined) {
+      printSectors(lead.sectors, `${lead.runs} ${lead.policy} runs`)
+      printBosses(lead.sectors)
+      printDpsLadder(lead.sectors)
     }
     if (summaries.length > 1) {
       printSectors(aggregateSectors, `${allRuns.length} runs, ALL policies pooled (diagnostic only)`)
-      if (competentSummary === undefined) {
-        printBosses(aggregateSectors)
-        printDpsLadder(aggregateSectors)
-      }
     }
   }
   printHulls(hullRows)
