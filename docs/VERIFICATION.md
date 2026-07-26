@@ -297,29 +297,57 @@ where work happens unattended.
 
 It runs first in CI, because it's the cheapest check that can invalidate everything downstream.
 
-### Known gaps in the instruments — 2026-07-26
+### What a full review found in the instruments — 2026-07-26, all closed
 
-The 2026-07-26 review in `docs/ROADMAP.md` found four places where this harness reads as coverage
-it does not have. They are listed there as R1, R10, R13 and R15; the shape of them belongs here:
+The 2026-07-26 review in `docs/ROADMAP.md` found four places where this harness read as coverage
+it did not have. All four are fixed; they are kept here because the *shape* of them is the most
+useful thing this document contains, and because a list of instruments with no history of failing
+invites more trust than it has earned.
 
-- **`check-contracts.mjs` does not forbid a sim → audio import**, though `src/audio/index.ts`
-  tells its reader that it does. It also never applies the DOM and clock patterns to
-  `src/core/**`, which the sim imports, and cannot see a dynamic `await import()`.
-- **The bots' `ChoiceResolver` silently stops running the policy after the first chained card**,
-  so between-sector pick rates in any multi-sector sweep are an artefact. Second time this class
-  of bug has made a sweep measure a different game than the one shipped.
-- **The screenshot capture-intent check has never executed**, and reads a field the bridge does
-  not expose, so switching it on would fail every capture.
-- **A guard can be vacuous rather than absent.** `tests/bots.test.ts:555` asserts
+- **`check-contracts.mjs` did not forbid a sim → audio import**, though `src/audio/index.ts` told
+  its reader that it did. Adding one printed `Contracts OK` and typechecked, while making the sim
+  unrunnable headless — breaking the contract every other instrument here depends on. It also
+  never applied the DOM and clock patterns to `src/core/**`, which the sim imports, and could not
+  see a dynamic `await import()`. It now resolves specifiers to paths and walks the sim's
+  transitive closure (29 of 77 files), **and it has 32 tests of its own**, including a clean
+  fixture that deliberately carries `window.addEventListener` so the no-false-positive property is
+  asserted rather than hoped for.
+- **The bots' `ChoiceResolver` stopped running the policy after the first chained card**, so
+  every between-sector pick rate in every multi-sector sweep was an artefact — the second time
+  this class of bug made a sweep measure a different game than the one shipped. Worse, a *second*
+  cause hid it: this file's own sweep recorded a seam's three cards as one, and dropped it for
+  having no offers, so 1,201-tick stalls were charged to a record the report threw away.
+- **The screenshot capture-intent check had never executed**, and read a field the probe does not
+  expose, so switching it on would have failed every capture. Switched on, it immediately found
+  that `combat-early` was photographing an empty playfield — a capture that had been reviewed by
+  eye more than once.
+- **A guard can be vacuous rather than absent.** `tests/bots.test.ts` asserted
   `pendingChoice === null || ticks < FIVE_SECTOR_TICKS`, whose second clause *is* the loop
-  condition — it cannot fail. `tests/choiceScreen.test.ts:261` matches `/\+\d+ more/` without
-  checking the number. `tests/certifications.test.ts:216` asserts a card's text is non-empty,
-  which is why three cards could drift away from their hulls' actual stats.
+  condition. `tests/choiceScreen.test.ts` matched `/\+\d+ more/` without checking the number, and
+  so matched the off-by-one it should have caught. `tests/certifications.test.ts` asserted a card's
+  text was non-empty, which is how three cards drifted away from their hulls' actual stats across
+  three rebalances.
 
-The general lesson, and the reason this section exists: **every one of these was written as a
-check and then stopped being one** — by a refactor, by a field rename, by content outgrowing it.
-An instrument needs a test that fails when the instrument breaks, which §"The instrument needs its
-own tests" argues for the audio harness and nothing yet does for the others.
+**The general lesson, and the reason this section is kept after being closed: every one of these
+was written as a check and then stopped being one** — by a refactor, by a field rename, by content
+outgrowing it. None was ever wrong when written. So the question to ask of any instrument here is
+not "is it correct" but "what would tell me if it stopped being correct", and the answer has to be
+something that fails.
+
+Two gaps found the same day are worth stating separately, because they were *limits* rather than
+bugs, and both are now closed:
+
+- **The corpus had never exercised a single item.** Every fixture recorded with `new World(seed)`,
+  so the item pool was empty and no `EffectKind` was ever replayed — which is the hole
+  `retaliate()` firing on shield-absorbed hits, and missing pierce state in the digest, both hid
+  in. `sector1-effects` now covers 7/7 effect kinds against a fabricated frozen table, and it also
+  closes a second gap nobody had noticed: all three baselines end `lost`, so no fixture had ever
+  replayed an extraction.
+- **A screenshot's assertion was not atomic with its shutter.** `page.screenshot()` takes tens of
+  milliseconds; a hazard warning is 60 ticks, i.e. 50ms of wall clock at `ff=20`. So a capture
+  asserted the state it wanted and then filed an image of the state after it — the "does not show
+  what it claims" failure arriving through the one gap the harness could not see. The sim is now
+  frozen inside the `waitFor` predicate, in the same evaluation that observed the state.
 
 ---
 

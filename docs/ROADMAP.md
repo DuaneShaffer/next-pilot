@@ -261,20 +261,39 @@ spike above 35%).
 
 ### Measured, n=300 × 2 seeds — two of three met
 
-> **Read this table alongside findings R1 and R11 below.** The sweep it comes from resolved
-> every between-sector card by mashing option 0 rather than by running the policy, and the
-> entry-health metric quoted in `items.ts` and `hulls.ts` is not monotonic in real health. The
-> clear-rate and hull-spread numbers are the ones least affected — pick rates and any
-> route-, shop- or recovery-dependent conclusion are the ones to distrust. Re-measure after
-> R1 and R11 are fixed before treating this milestone's balance as settled.
+> **These are the RE-MEASURED numbers**, taken after findings R1 and R11 were fixed. The first
+> set was produced by two broken instruments — the bots resolved every chained between-sector
+> card by confirming option 0 rather than by running the policy, and the entry-health metric
+> divided by the current shield rather than the maximum, so it flattered exactly the
+> integrity-recovery builds it was being used to judge. Both are fixed; every figure below is
+> from the fixed instruments, 200 runs on each of two base seeds.
 
-| Criterion | Before the rebalance | After | |
+| Criterion | Broken instrument | Re-measured | |
 | --- | --- | --- | --- |
-| Clear rate, 20–40% | 27.7% / 29.7% | **20.0% / 24.3%** | met |
-| Hull spread vs mean, ≤15pp | 29.4pp / 28.0pp | **13.6pp / 12.9pp** | met |
-| Worst sector death share, ≤35% | 47.0% / 43.1% | **39.2% / 36.1%** | **not met** |
+| Clear rate, 20–40% | 20.0% / 24.3% | **26.5% / 36.5%** | met |
+| Hull spread vs mean, ≤15pp | 13.6pp / 12.9pp | **12.5pp / 13.3pp** | met |
+| Worst sector death share, ≤35% | 39.2% / 36.1% | **35.4% / 36.2%** | **not met, marginally** |
 
 Median clearing run 16.8 minutes, inside the 15–20 target.
+
+Seed A read **20.0%** on the broken instrument — sitting exactly on the criterion's lower
+boundary — because the pilot was declining its own transit shops. That is the clearest available
+argument for fixing an instrument before reading anything off it.
+
+**And the death-share criterion is partly a fact about the criterion.** At 35.4% and 36.2% it
+misses by about a point on ~140 deaths, which is inside noise — and **the spiking sector differs
+by seed**: sector 2 on one, sector 1 on the other. A threshold that a single seed's noise can move
+across is not measuring what it was written to measure. Worth revisiting the criterion, not only
+the content.
+
+**The world map is still a trap, and the rebalance's claim that it was not is withdrawn.**
+Measured for the first time with route selection actually running: every detour style costs the
+benchmark policy **5.5–9.5pp** of clear rate. Under the `random` style — where the roll is
+independent of the pilot's state, so it is the cleanest comparison — a sector entered with a
+hazard clears **66.0% against 79.4%**. Even `item-only`, which accepts a hazard *only* for a free
+item, is net negative. Two visible causes are recorded separately: both priced routes carry the
+same hazard when a sector has only one, and the scrap reward pays 125 cr against a median shop
+holding of ~1,130.
 
 **Sector 2 stays out of band and the reason is worth understanding before anyone "fixes" it.**
 Its absolute deaths fell by 8pp, but sectors 4–5 take only 13–15% of deaths, so The Tally's
@@ -377,7 +396,10 @@ of what a cold read of the tree found.
   at tick 176 with no gap, the item card resolved in 2 ticks by the retry branch rather than the
   6-tick navigation script, then a shop card stuck **1201 ticks** because option 0 was
   unaffordable — the world refuses, the branch re-confirms, until the timeout. So `chooseOffer`
-  and `chooseRoute` are bypassed at every seam and ~1200 dead ticks are added per seam. This is
+  is bypassed at every seam and ~1200 dead ticks are added per seam. (**Correction of fact, not
+  status**: `chooseRoute` is *not* bypassed. A route card is always the FIRST card of a seam and
+  the sector was playing on the previous tick, so it always has its null gap — measured at 0 route
+  cards chained across 500 runs. The finding named one function too many.) This is
   the exact corruption `MAX_CHOICE_RESOLUTION_TICKS`'s own docstring warns about, and it is the
   second time the `ChoiceResolver` has silently made a sweep measure a different game than the
   one shipped (see "the world map never happened", M5 above). Why the guards miss it: the timeout
