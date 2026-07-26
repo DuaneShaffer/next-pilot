@@ -51,7 +51,20 @@
  *   - `stage`, `hazards`, `pendingChoice`, `inventory`, `hullName` — IN. Which
  *     sector is being flown, when a hazard fires, whether the run is paused on a
  *     card, and what the pilot is carrying all steer the next tick, and a run that
- *     diverged on any of them would otherwise compare equal.
+ *     diverged on any of them would otherwise compare equal. `hullName` earns its
+ *     place twice over now that `Replay` carries `hullId`: a playback that flew the
+ *     wrong ship fails the corpus on this field rather than on a puzzling drift in
+ *     the hull's position forty seconds later.
+ *   - `choiceResolve.action` and `.ticksRemaining` — IN, and they are the only view
+ *     the digest gets of the choice cursor. `openTicks` and `awaitingRelease` decide
+ *     whether an untouched card auto-confirms or times out, and neither is exposed
+ *     on `WorldView`. `.totalTicks` is the bar's denominator and is cosmetic.
+ *
+ *   - `choiceSelection` — IN. Previously impossible: it was a `World` getter and not
+ *     on the view, so two runs sitting on one card with different options highlighted
+ *     hashed identically while being one auto-confirm away from taking different
+ *     items. The field now exists and is -1 when no card is open, so "no card" and
+ *     "option zero highlighted" are distinguishable.
  *   - `secondary.windupTotal`, `boss.calloutTicks`, `HazardView.progress` —
  *     COSMETIC. Each is a denominator or a display countdown that nothing branches
  *     on, the same call `telegraphTotal` already gets.
@@ -70,6 +83,43 @@ import type {
   SimEvent,
   WorldView,
 } from '../sim/entities'
+
+/**
+ * Which generation of this digest is in force.
+ *
+ * ## Why this exists, and why it is not SIM_VERSION
+ *
+ * A recorded hash is a function of TWO things: what the simulation did, and what
+ * this file chose to measure. `SIM_VERSION` covers the first. Nothing covered the
+ * second, and the consequence showed up immediately — `tests/simVersion.test.ts`
+ * keeps a canonical hash per sim version and forbids editing a row, but widening the
+ * digest moves *every* historical row at once, so each widening forced a rewrite of
+ * history that the file explicitly prohibits. Twice in one session. A guard that
+ * gets overwritten whenever it is inconvenient is a guard nobody reads.
+ *
+ * With a generation, a widening APPENDS: the same sim version acquires a second row
+ * under the new generation, the old row keeps its number, and the history stays
+ * readable as a history. The two axes are independent and both are needed — a row is
+ * only comparable to another row taken under the same generation.
+ *
+ * ## When to bump it
+ *
+ * Whenever `digestWorld` would produce a different string for an identical world:
+ * a field entering or leaving any component, a component being added, reordered or
+ * renamed, or the `Hasher` arithmetic changing. NOT when the simulation changes —
+ * that is `SIM_VERSION`, and confusing the two is the whole reason this constant
+ * exists.
+ *
+ * ## History
+ *
+ *   1. M2. Play-affecting state plus `freezeTicks` and `telegraphTicks`.
+ *   2. M5. `EnemyInstance.uid`, `.secondary` and `.boss` into `enemies`; the stage,
+ *      armed hazards, the hull, the inventory and the pending card into `run`.
+ *   3. `choiceResolve` into `run` — the cursor's auto-confirm and timeout clock.
+ *   4. `choiceSelection` into `run` — the highlighted option, which decides *what*
+ *      an auto-confirm takes.
+ */
+export const DIGEST_GENERATION = 4
 
 /**
  * Tags for optional sub-objects.
@@ -365,6 +415,29 @@ function hashRun(view: WorldView): string {
       for (const id of route.hazardIds) h.str(id)
     }
   }
+
+  // How an open card resolves itself, and when.
+  //
+  // THIS IS THE DIGEST'S ONLY VIEW OF THE CHOICE CURSOR. Every card resolves without
+  // input eventually — a held trigger confirms after a dwell, an untouched card times
+  // out — and `ChoiceCursor.openTicks` and `.awaitingRelease` are what decide which
+  // and when. Neither is on `WorldView`, so before this the digest could see that a
+  // card was open but not that one run was a tick from auto-confirming and the other
+  // had just opened. Those are different futures.
+  //
+  // `totalTicks` is the bar's denominator, a constant per action, and stays cosmetic.
+  const resolve = view.choiceResolve
+  if (resolve === null) {
+    h.u32(0xffffffff)
+  } else {
+    h.u32(0x00000001).str(resolve.action).num(resolve.ticksRemaining)
+  }
+  // The highlighted option. An auto-confirm takes whatever is under the cursor, so
+  // two runs on one card with different selections take different ITEMS — the most
+  // consequential divergence a card can produce, and until `choiceSelection` reached
+  // the view this digest could not see it at all. -1 when no card is open, which is
+  // why the index is hashed unconditionally rather than inside the branch above.
+  h.num(view.choiceSelection)
   return h.digest()
 }
 
@@ -399,6 +472,7 @@ function hashCosmetic(view: WorldView): string {
   }
   h.u32(view.hazards.length)
   for (const hazard of view.hazards) h.num(hazard.progress)
+  h.num(view.choiceResolve?.totalTicks ?? -1)
   h.num(view.cosmetic.shake)
   h.u32(view.events.length)
   for (const event of view.events) hashEvent(h, event)

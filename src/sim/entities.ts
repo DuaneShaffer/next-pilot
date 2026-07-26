@@ -370,6 +370,22 @@ export interface WorldView {
    * countdown is how they end up disagreeing.
    */
   readonly choiceResolve: ChoiceResolveView | null
+
+  /**
+   * Which option an open choice has highlighted. -1 when no choice is open.
+   *
+   * PLAY-AFFECTING, and it was invisible. Every card resolves itself if the player
+   * does nothing — the dwell confirms the *highlighted* option — so two runs sitting
+   * on the same card with different options selected take different items. Until this
+   * was on the view, the state hash could not see the difference and those two runs
+   * compared equal, which is precisely the silent divergence the replay corpus exists
+   * to catch.
+   *
+   * The simulation owns the cursor so a recorded run reproduces its picks; screens
+   * render this rather than holding a selection of their own, which is what keeps the
+   * two from ever disagreeing about what is highlighted.
+   */
+  readonly choiceSelection: number
 }
 
 /** What an open choice will do on its own, and how long is left. */

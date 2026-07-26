@@ -659,7 +659,9 @@ export class World implements WorldView {
    * keeps the two from disagreeing about what is highlighted.
    */
   get choiceSelection(): number {
-    return this.cursor.index
+    // -1 rather than 0 when nothing is open. Zero is a real index, so a screen or a
+    // digest could not tell "option one is highlighted" from "there is no card".
+    return this.pendingChoice === null ? -1 : this.cursor.index
   }
 
   /**

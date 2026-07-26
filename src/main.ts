@@ -259,6 +259,30 @@ function main(): void {
   let runMode: RunMode = resolved.mode
 
   /**
+   * A replay must be flown in the hull it was recorded in.
+   *
+   * The startup world is built before `runMode` is known, with no hull — which was
+   * harmless only while every run flew a Lien. `Replay` now carries `hullId`, and a
+   * Collateral recording played back in a Lien fires 20 shots a second instead of 30
+   * and diverges within a few ticks, silently, while the share card advertises it as
+   * the same run.
+   *
+   * Rebuilt rather than made conditional at construction because the run mode is
+   * resolved after the world: the alternative is threading replay resolution earlier
+   * than the save load, and a second `new World` at startup costs nothing.
+   */
+  if (runMode.kind === 'replay') {
+    const recorded = runMode.replay.hullId
+    currentHullId = Object.hasOwn(HULLS, recorded) ? recorded : LIEN_ID
+    world = new World(seed, {
+      ...content,
+      ...(HULLS[currentHullId] ? { hull: HULLS[currentHullId] } : {}),
+    })
+    // `panelState` is declared below and reads `world.hullName` at construction, so
+    // it picks this up without an assignment here.
+  }
+
+  /**
    * A sentence to show when the URL was not honoured.
    *
    * Either a rejected parameter combination, or a replay recorded on rules this build

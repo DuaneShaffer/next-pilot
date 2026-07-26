@@ -181,6 +181,7 @@ function worldFixture(shake: number, freezeTicks: number): WorldView {
     boss: null,
     hazards: [],
     choiceResolve: null,
+    choiceSelection: -1,
     inventory: [],
     activeInteractions: [],
     resolvedStats: {},

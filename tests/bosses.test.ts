@@ -80,12 +80,22 @@ const BOSS_MOVEMENTS: readonly MovementKind[] = ['hover', 'sine', 'swoop', 'drif
  * the intended fight length fails here, which forces the author to say out loud
  * whether the fight got longer on purpose.
  */
+/**
+ * The fight length each boss is authored for, in seconds.
+ *
+ * These are now REALISED seconds, not full-uptime idealisations: `SECTOR_PLAYER_DPS`
+ * was re-derived from `boss hp / measured median time-to-kill` over 300 aggressor
+ * runs on each of two base seeds, so `hp / dps` is the fight the pilot actually has.
+ * Each figure sits just above the point where the boss's own shortest phase clears
+ * `MIN_PHASE_SECONDS`, which is what decides the floor for each boss individually:
+ * the Deep Manifest's 18% closing phase needs 33.3 s of fight before it gets its six.
+ */
 const INTENDED_TTK_SECONDS: Record<string, number> = {
-  repossessor: 21.25,
-  auditor: 26,
-  tenant: 28.33,
-  bailiff: 30,
-  'deep-manifest': 36.25,
+  repossessor: 21.5,
+  auditor: 25.49,
+  tenant: 27.5,
+  bailiff: 30.5,
+  'deep-manifest': 34.5,
 }
 
 function weaponsOf(phase: BossPhaseDef): EnemyWeaponDef[] {

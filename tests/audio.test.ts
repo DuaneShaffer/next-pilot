@@ -150,6 +150,7 @@ function fakeView(options: {
     boss: null,
     hazards: [],
     choiceResolve: null,
+    choiceSelection: -1,
   }
 }
 

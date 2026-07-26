@@ -87,6 +87,7 @@ function viewOf(overrides: Partial<WorldView> = {}): WorldView {
     boss: null,
     hazards: [],
     choiceResolve: null,
+    choiceSelection: -1,
     hull: {
       x: 224,
       y: 610,

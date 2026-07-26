@@ -185,7 +185,11 @@ function worldView(overrides: Partial<WorldView> = {}): WorldView {
     hullName: 'Lien',
     boss: null,
     hazards: [hazard()],
-    choiceResolve: null,
+    // A card is open, so it is counting down to resolving itself. Null here beside a
+    // non-null `pendingChoice` would be an incoherent baseline, and a mutation test
+    // against an impossible state proves less than it looks.
+    choiceResolve: { action: 'skip', ticksRemaining: 240, totalTicks: 600 },
+    choiceSelection: 1,
     hull: hull(),
     playerBullets: [BULLET],
     enemyBullets: [ENEMY_BULLET],
@@ -287,6 +291,18 @@ describe('the play-affecting digest covers what M5 added', () => {
     ['route.reward.kind', worldView({ pendingChoice: choice({ routes: [route({ reward: { kind: 'repair', amount: 180 } })] }) })],
     ['route.reward.amount', worldView({ pendingChoice: choice({ routes: [route({ reward: { kind: 'scrap', amount: 181 } })] }) })],
     ['route.stageIndex', worldView({ pendingChoice: choice({ routes: [route({ stageIndex: 2 })] }) })],
+
+    // --- how an open card resolves itself, and when -----------------------------
+    // The digest's only view of the choice cursor: `openTicks` and `awaitingRelease`
+    // are not on WorldView, so without these two a run one tick from auto-confirming
+    // hashes the same as one that just opened the card.
+    ['choiceResolve.action', worldView({ choiceResolve: { action: 'confirm', ticksRemaining: 240, totalTicks: 600 } })],
+    ['choiceResolve.ticksRemaining', worldView({ choiceResolve: { action: 'skip', ticksRemaining: 239, totalTicks: 600 } })],
+    // The highlighted option decides WHICH item an auto-confirm takes, so two runs
+    // on one card with different selections take different items. Before this was on
+    // the view they hashed identically — a divergence the corpus could not see.
+    ['choiceSelection', worldView({ choiceSelection: 2 })],
+    ['choiceResolve cleared', worldView({ choiceResolve: null })],
   ]
 
   it.each(mutations)('%s changes the regression hash', (_label, mutated) => {
@@ -344,6 +360,9 @@ describe('the cosmetic digest keeps presentation state out of the corpus', () =>
     ['boss.calloutTicks', withBossRuntime({ calloutTicks: 59 })],
     ['hazard.progress', worldView({ hazards: [hazard({ progress: 0.46 })] })],
     ['enemy hit flash', worldView({ enemies: [enemy({ hitFlashTicks: 4 }), bossEnemy()] })],
+    // The countdown bar's denominator, constant per action. Same call as
+    // `telegraphTotal`: a progress denominator nothing branches on.
+    ['choiceResolve.totalTicks', worldView({ choiceResolve: { action: 'skip', ticksRemaining: 240, totalTicks: 599 } })],
   ]
 
   it.each(cosmeticOnly)('%s is excluded from the regression hash but still reported', (_label, mutated) => {

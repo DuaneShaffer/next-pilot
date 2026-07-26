@@ -578,6 +578,14 @@ export function toSnapshots(replay: Replay): InputSnapshot[] {
  */
 export interface TickableWorld {
   tick(input: InputSnapshot): void
+  /**
+   * The hull this world was built with, if it knows.
+   *
+   * Optional so a fabricated test world need not have one, and READ rather than set:
+   * `playback` cannot construct a world (it knows nothing about content tables), so
+   * the only thing it can do about the hull is check that the caller honoured it.
+   */
+  readonly hullName?: string
 }
 
 export interface PlaybackOptions<T extends TickableWorld> {
@@ -596,10 +604,36 @@ export interface PlaybackResult<T extends TickableWorld> {
 
 export function playback<T extends TickableWorld>(
   replay: Replay,
-  createWorld: (seed: string) => T,
+  createWorld: (seed: string, hullId: string) => T,
   options: PlaybackOptions<T> = {},
 ): PlaybackResult<T> {
-  const world = createWorld(replay.seed)
+  const world = createWorld(replay.seed, replay.hullId)
+
+  /**
+   * VERIFY that the caller actually used the hull, rather than trusting them to.
+   *
+   * Decoding `hullId` accomplishes nothing on its own: the world is built by a
+   * factory this module cannot see inside, so a caller that ignores the argument
+   * flies the wrong ship and diverges exactly as badly as before the field existed —
+   * silently, forty seconds in, looking like a determinism bug.
+   *
+   * The check is deliberately loose about *how* a hull is named (id vs display name
+   * is the caller's business) and strict about the one thing that matters: a replay
+   * that names a hull must not be played by a world that reports a different one.
+   * Skipped when either side is unknown, because an empty `hullId` legitimately means
+   * "this run chose no hull".
+   */
+  const named = replay.hullId
+  const flown = world.hullName
+  if (named !== '' && flown !== undefined) {
+    const same = flown.toLowerCase() === named.toLowerCase()
+    if (!same) {
+      throw new ReplayError(
+        'bad-hull',
+        `replay names hull "${named}" but playback built "${flown}" — the factory ignored replay.hullId`,
+      )
+    }
+  }
   const { onTick, stopWhen } = options
   let ticks = 0
   for (let i = 0; i < replay.inputs.length; i++) {

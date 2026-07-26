@@ -450,7 +450,9 @@ export function drawBossCallout(
   // `caution`, not `danger`. A pattern change is a warning about what is coming;
   // rule 3 keeps the red for what is already in the air.
   let y = CALLOUT_TOP + CALLOUT_TITLE_SIZE + 6
+  let widest = 0
   for (const line of lines) {
+    widest = Math.max(widest, measureText(ctx, line, { size: CALLOUT_SIZE, weight: 700, tracking: 1.4 }))
     drawText(ctx, line, centre + 1, y + 1, {
       size: CALLOUT_SIZE,
       weight: 700,
@@ -472,9 +474,14 @@ export function drawBossCallout(
 
   // A hairline under the announcement, so it reads as a banner rather than as text
   // that happens to be floating in space. One unit tall: it cannot hide a projectile.
+  //
+  // Width follows the TEXT, measured. It was a fixed 220 units, which a capture showed
+  // reading as a fragment under a line of copy nearly twice that wide — an underline
+  // that does not match what it underlines looks like a rendering fault.
+  const ruleW = Math.min(widest + 12, maxWidth)
   ctx.fillStyle = Palette.caution
   ctx.globalAlpha = opacity * 0.35
-  ctx.fillRect(centre - 110, Math.min(y + 4, CALLOUT_BOTTOM - 1), 220, 1)
+  ctx.fillRect(centre - ruleW / 2, Math.min(y + 4, CALLOUT_BOTTOM - 1), ruleW, 1)
   ctx.globalAlpha = 1
 }
 

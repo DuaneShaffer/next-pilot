@@ -363,6 +363,7 @@ function worldFixture(overrides: Partial<WorldView> = {}): WorldView {
     seed: 'TEST-SEED',
     runState: 'active',
     choiceResolve: null,
+    choiceSelection: -1,
     hull,
     playerBullets: [bullet(224, 420)],
     enemyBullets: [
@@ -869,6 +870,64 @@ describe('boss health bar', () => {
       // Every word of the name reached the canvas.
       for (const word of name.split(/\s+/)) {
         expect(drawn, `"${word}" of "${name}" is missing from the panel`).toContain(word)
+      }
+    }
+  })
+
+  it('marks where "now" is and which block it is in', () => {
+    // A reviewer could not tell from a still which end depleted or which block was
+    // current, because the fill colour was carrying both facts alone. The caret sits
+    // on the fill edge and the bracket encloses the phase being fought, so both are
+    // geometry — readable in greyscale, and unaffected by the palette moving.
+    const x = 0
+    const w = 100
+    for (const [fraction, phaseIndex, expectedFrom, expectedTo] of [
+      [0.8, 0, 0.62, 1],
+      [0.5, 1, 0.28, 0.62],
+      [0.1, 2, 0, 0.28],
+    ] as const) {
+      const { ctx, calls } = makeStub()
+      drawBossHealthBar(ctx, {
+        x,
+        y: 20,
+        w,
+        h: 9,
+        thresholds: [...THRESHOLDS],
+        fraction,
+        phaseIndex,
+      })
+
+      // The caret's apex is the third point of its path, at the fill edge.
+      const apex = calls.filter((c) => c.name === 'lineTo').at(-1)
+      expect(apex, 'no caret drawn').toBeTruthy()
+      expect(Number(apex?.args[0])).toBeCloseTo(x + fraction * w, 5)
+
+      // The bracket encloses exactly the current phase's block.
+      const bracket = calls.find((c) => c.name === 'strokeRect')
+      expect(bracket, 'no bracket drawn').toBeTruthy()
+      expect(Number(bracket?.args[0])).toBeCloseTo(x + expectedFrom * w - 0.5, 5)
+      const bracketRight = Number(bracket?.args[0]) + Number(bracket?.args[2])
+      expect(bracketRight).toBeLessThanOrEqual(x + expectedTo * w + 0.01)
+      expect(bracketRight).toBeGreaterThan(x + fraction * w)
+    }
+  })
+
+  it('keeps the caret inside the bar at full and empty health', () => {
+    for (const fraction of [0, 1]) {
+      const { ctx, calls } = makeStub()
+      drawBossHealthBar(ctx, {
+        x: 10,
+        y: 20,
+        w: 100,
+        h: 9,
+        thresholds: [...THRESHOLDS],
+        fraction,
+        phaseIndex: 0,
+      })
+      for (const call of calls) {
+        if (call.name !== 'moveTo' && call.name !== 'lineTo') continue
+        expect(Number(call.args[0])).toBeGreaterThanOrEqual(10)
+        expect(Number(call.args[0])).toBeLessThanOrEqual(110)
       }
     }
   })

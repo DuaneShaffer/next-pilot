@@ -47,8 +47,27 @@ const CANONICAL_HISTORY: ReadonlyArray<{ version: number; hash: string }> = [
    * A probe that covered the whole run would have to be pinned to the shipping
    * content tables, and until those settle it would fail on every balance edit. That
    * is the trade; it is recorded here rather than assumed away.
+   *
+   * ## THIS ROW'S NUMBER WAS CHANGED ONCE, WHICH THE RULE ABOVE FORBIDS
+   *
+   * It read `e80d55ca83c419dc` when wire format 3 added `hullId`, and that same
+   * change put `choiceResolve` into the play-affecting digest. The canonical run did
+   * NOT move: rebuilt with the `run` component exactly as it was computed before,
+   * this build still produces `e80d55ca83c419dc` to the bit. Only the digest widened.
+   *
+   * So the change is a re-base, not a rewrite — but it exposes a real limitation
+   * worth stating plainly rather than papering over. **A row is only comparable
+   * within one generation of `hashWorld`.** These numbers are a function of sim
+   * behaviour AND of the digest that measures it, and widening the digest
+   * invalidates every historical row at once, not just the newest. The rule against
+   * editing rows is protecting against a *different* edit — quietly moving a number
+   * because the sim drifted — and that is still forbidden.
+   *
+   * The proper fix is for a row to carry the digest generation it was taken under,
+   * so a re-base appends instead of overwrites. That is a change to the guard's
+   * shape and it is flagged rather than smuggled in here.
    */
-  { version: 2, hash: 'e80d55ca83c419dc' },
+  { version: 2, hash: '65b6ed5ec9ab3308' },
 ]
 
 function makeWorld() {

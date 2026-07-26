@@ -652,6 +652,7 @@ function fakeView(choice: PendingChoice | null, overrides: Partial<WorldView> = 
     // was still deciding — which is the sim's rescue for a human who walked away, not
     // a path any bot should ever reach.
     choiceResolve: null,
+    choiceSelection: -1,
     ...overrides,
   }
 }
