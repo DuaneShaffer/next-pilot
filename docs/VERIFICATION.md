@@ -297,6 +297,30 @@ where work happens unattended.
 
 It runs first in CI, because it's the cheapest check that can invalidate everything downstream.
 
+### Known gaps in the instruments — 2026-07-26
+
+The 2026-07-26 review in `docs/ROADMAP.md` found four places where this harness reads as coverage
+it does not have. They are listed there as R1, R10, R13 and R15; the shape of them belongs here:
+
+- **`check-contracts.mjs` does not forbid a sim → audio import**, though `src/audio/index.ts`
+  tells its reader that it does. It also never applies the DOM and clock patterns to
+  `src/core/**`, which the sim imports, and cannot see a dynamic `await import()`.
+- **The bots' `ChoiceResolver` silently stops running the policy after the first chained card**,
+  so between-sector pick rates in any multi-sector sweep are an artefact. Second time this class
+  of bug has made a sweep measure a different game than the one shipped.
+- **The screenshot capture-intent check has never executed**, and reads a field the bridge does
+  not expose, so switching it on would fail every capture.
+- **A guard can be vacuous rather than absent.** `tests/bots.test.ts:555` asserts
+  `pendingChoice === null || ticks < FIVE_SECTOR_TICKS`, whose second clause *is* the loop
+  condition — it cannot fail. `tests/choiceScreen.test.ts:261` matches `/\+\d+ more/` without
+  checking the number. `tests/certifications.test.ts:216` asserts a card's text is non-empty,
+  which is why three cards could drift away from their hulls' actual stats.
+
+The general lesson, and the reason this section exists: **every one of these was written as a
+check and then stopped being one** — by a refactor, by a field rename, by content outgrowing it.
+An instrument needs a test that fails when the instrument breaks, which §"The instrument needs its
+own tests" argues for the audio harness and nothing yet does for the others.
+
 ---
 
 ## What "done" means

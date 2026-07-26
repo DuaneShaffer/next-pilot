@@ -261,6 +261,13 @@ spike above 35%).
 
 ### Measured, n=300 × 2 seeds — two of three met
 
+> **Read this table alongside findings R1 and R11 below.** The sweep it comes from resolved
+> every between-sector card by mashing option 0 rather than by running the policy, and the
+> entry-health metric quoted in `items.ts` and `hulls.ts` is not monotonic in real health. The
+> clear-rate and hull-spread numbers are the ones least affected — pick rates and any
+> route-, shop- or recovery-dependent conclusion are the ones to distrust. Re-measure after
+> R1 and R11 are fixed before treating this milestone's balance as settled.
+
 | Criterion | Before the rebalance | After | |
 | --- | --- | --- | --- |
 | Clear rate, 20–40% | 27.7% / 29.7% | **20.0% / 24.3%** | met |
@@ -345,8 +352,155 @@ from a diff:
   confirms whatever is highlighted), and was invisible to the state hash because it was not on
   `WorldView`.
 
+## Full-project review, 2026-07-26 — open
+
+A read of the whole tree at the M5 exit point. `npm run check` was green throughout (41 files,
+1697 tests) and **none of these is caught by the existing suite** — that is the common thread
+worth more than any single entry. Where a guard exists but does not fire, it is named, because a
+test that cannot fail is worse than a missing one: it reads as coverage.
+
+Numbered R1–R15 so commits and the M5 caveat above can cite them. Unfixed unless marked.
+
+### Blocks trusting the measurements
+
+- **R1 — the bots resolve every between-sector card by mashing option 0.** `sim/bots.ts:558`.
+  `ChoiceResolver` resets `open`/`queue` only when `pendingChoice` becomes `null`, but
+  `advanceTransition` opens the next card in the *same tick* the previous one confirms, so after
+  the first card there is never a null gap to reset on. Verified on a 2-stage run: `route → item`
+  at tick 176 with no gap, the item card resolved in 2 ticks by the retry branch rather than the
+  6-tick navigation script, then a shop card stuck **1201 ticks** because option 0 was
+  unaffordable — the world refuses, the branch re-confirms, until the timeout. So `chooseOffer`
+  and `chooseRoute` are bypassed at every seam and ~1200 dead ticks are added per seam. This is
+  the exact corruption `MAX_CHOICE_RESOLUTION_TICKS`'s own docstring warns about, and it is the
+  second time the `ChoiceResolver` has silently made a sweep measure a different game than the
+  one shipped (see "the world map never happened", M5 above). Why the guards miss it: the timeout
+  tests use single-sector `LIVE_CONTENT`, so they never chain two cards; and
+  `tests/bots.test.ts:555` asserts `pendingChoice === null || ticks < FIVE_SECTOR_TICKS`, whose
+  second clause is the loop condition — the assertion cannot fail.
+- **R11 — `medianEntryHealthPct` divides by the wrong shield.** `tools/playtest.ts:1368` never
+  captures `entryMaxShield`, so the current shield appears in both numerator and denominator and
+  cancels: 100 integrity with a spent shield (100 effective HP) reports 100%, while 90 integrity
+  with a full 40 shield (130 effective HP) reports 93%. It systematically flatters
+  integrity-recovery builds — and it is the number cited as measured evidence for Repair Nanites
+  ("62% → 89%", `items.ts`) and for Probate's per-sector entry figures (`hulls.ts`). Both of
+  those readings are the ones the metric is most wrong about.
+
+### Correctness
+
+- **R2 — a `?seed=`, `?daily=1` or `?replay=` URL is never flown.** `main.ts:629`.
+  `resolveRunMode` resolves the mode correctly and the title screen *displays* the seed, but the
+  title's confirm handler calls `beginSortie()` with no argument, `beginSortie` does
+  `seed = withSeed ?? generateSeed()`, and `launchSortie` then unconditionally sets
+  `runMode = { kind: 'free', seed, purist: false }`. Share links carry only `seed`/`r` and never
+  `screen=sortie` (`meta/seedModes.ts:704`, `:780`), so every shared seed, daily contract and
+  replay lands on the title and is discarded on the first keypress. M4's headline feature does
+  not work from a link. Related and probably the same omission: `describeRunMode` is documented
+  as "what the HUD says about this run" and `render/panel.ts` never calls it — only the share
+  card does.
+- **R3 — the regression digest is blind to pierce state.** `meta/snapshot.ts:245`.
+  `hashPlayerBullets` omits `pierceRemaining` and `hitUids`, both of which the *next* tick reads
+  (`sim/world.ts:1124`, `:1156-1160`). Two worlds whose in-flight rounds have different remaining
+  pierces, or have already hit different enemies, hash identically and diverge immediately after —
+  so a regression anywhere in the piercing path goes green across the entire replay corpus. This
+  is the `choiceSelection` failure from M5 again: play-affecting state that the hash cannot see.
+  Fixing it is a widening, so it needs `DIGEST_GENERATION` 4 → 5 and a re-base per
+  `tests/simVersion.test.ts:44`.
+- **R5 — an abandoned daily contract is re-rollable.** `main.ts:517`, `meta/seedModes.ts:210`.
+  `save.daily` is written only in `fileCompletedRun()`, which is reached only when
+  `runState !== 'active'`; `abandonSortie()` returns to the title having filed nothing. So
+  pause → abandon → restart lets a player re-roll the daily until wave 1 looks survivable, which
+  is precisely what the `outcome: 'abandoned'` variant was added to prevent. That variant is
+  never written anywhere in `src/`, which also dead-codes the "`active` is treated as `lost`"
+  branch at `meta/personnel.ts:190-193`.
+- **R6 — key autorepeat escapes `preventDefault`.** `core/input.ts:215` returns on `e.repeat`
+  *before* calling `preventDefault()`, so only the first keydown of a hold is swallowed and every
+  autorepeat event reaches the browser. Hold ArrowDown, ArrowUp or Space during a sortie and the
+  page scrolls out from under the canvas — the exact thing `swallowedCodes` exists to stop.
+
+### Interface — priority 1, so these are not cosmetic
+
+- **R4 — the integrity meter prints an unrounded float.** `render/panel.ts:106` rounds `value`
+  and passes `maxIntegrity` straight from `resolveStat`. Probate has `maxIntegrity mul 0.64`
+  (`hulls.ts:339`); add any `add` item, e.g. `+18` (`items.ts:210`), and max is
+  `(100 + 18) * 0.64 = 75.52`, so at full health the meter reads **`76 / 75.52 hp`**. The
+  most-read number on screen, and a UI rule 2 violation. `ui/hullSelect.ts` already avoids this
+  by going through `numeral()`.
+- **R7 — Volume is adjustable while Muted, with no feedback.** `ui/settings.ts:130`.
+  `adjustSettingValue` writes `masterVolume` unconditionally while `formatSettingDisplay` returns
+  `'Muted'` whenever `settings.muted`, so with mute on every left/right press changes the value,
+  sets `dirty` and writes to localStorage while the row never moves. Shared with the pause menu
+  via `ui/pauseMenu.ts:119`, so it is wrong in both places.
+- **R8 — the build strip's `+N more` undercounts.** `ui/choiceScreen.ts:571` computes
+  `remaining = chips.length - placed` *before* the `while` at `:577` trims whole chips off the
+  last line to fit the tail, and dropped chips are never added back. Produces 5 names and
+  `+1 more` against a summary line reading `7 systems fitted` — the opposite of the intent stated
+  in the comment directly above it. `tests/choiceScreen.test.ts:261` only matches
+  `/\+\d+ more/`, so the count is unasserted.
+- **R9 — only half the adjust affordance is drawn.** `ui/pauseMenu.ts:273` draws a single `'<'`
+  at `contentX + 150`; there is no `'>'` anywhere in the file (the `'>'` at `:223` is the
+  selection caret, at a different x). The row reads `Volume  <  75 %` — an arrow pointing away
+  from the value it modifies, implying LEFT is the only key that does anything.
+
+### Verification harness — the gaps that let the rest through
+
+- **R10 — the contract-2 checker does not cover `src/audio`.** `tools/check-contracts.mjs:50`'s
+  `FORBIDDEN_SIM_IMPORTS` matches only `render|ui`, yet `src/audio/index.ts:6-8` explicitly tells
+  the reader that `npm run contracts` statically forbids a sim → audio import. Adding
+  `import … from '../audio'` to `src/sim/world.ts` passes contracts *and* typecheck while making
+  the sim unrunnable headless. Two narrower holes in the same file: the DOM and clock patterns
+  are never applied to `src/core/**`, which the sim imports; and a dynamic
+  `await import('../render/x')` is not matched by the `from`-anchored pattern.
+- **R13 — the screenshot capture-intent net is dead and also wrong.** `tools/screenshot.mjs:466`.
+  No entry in `SHOTS` sets `expect`, so neither branch has ever run; and the branch that would
+  reads `state?.enemies`, while the bridge exposes `enemyCount` (`main.ts:1065`). Switching it on
+  today would report "expected enemies on screen, found none" on every capture, including ones
+  with eight enemies plainly visible. A safety net that fails closed on every input would have
+  been abandoned within a day of being trusted.
+- **R15 — the choice timeout is 20 seconds and five docs say 60.** `sim/progression.ts:382` sets
+  `CHOICE_TIMEOUT_TICKS = 20 * 60` = 1200 ticks. **The constant is right** — 20 s is the value
+  the M5 notes above describe, at "the full 20-second timeout" — and the docs are stale: its own
+  comment at `:379` says "60 seconds", `bots.ts:283` says "3,600 ticks",
+  `tests/bots.test.ts:13` says "a 60-second backstop", and `tools/playtest.ts:1876` prints "the
+  sim's fallback timeout is 3600 and no policy may reach it". The last one is not just wrong
+  prose: because the playtest guard compares against 3600, R1's 1201-tick stalls sit under the
+  threshold and are never flagged. Fix by correcting the four docs and the guard, not the value.
+
+### Content copy that disagrees with the code
+
+- **R12 — three certification cards promise numbers the hulls do not have.**
+  `content/certifications.ts:459`, `:301`, `:390`. Surety's card says `+1 damage`, but
+  `hulls.ts:228-240` records removing exactly that on measured evidence and `HULLS.surety.stats`
+  now holds only shield, speed and pickup. Arrears' says "150 scrap, 45 less effective health";
+  the hull has `startingScrap: 320` and 140 → 110, so 30 less. Probate's says "132 effective
+  health" where `hulls.ts:300` states it "lands at 124… rather than 132", and `64 + 60 = 124`.
+  Each is a balance change that updated the hull and left the card selling the old one.
+  `tests/certifications.test.ts:216` only asserts the string is non-empty.
+
+### Recorded and rejected
+
+- **R14 — `core/touch.ts` and `core/viewport.ts` are unwired.** True (grep-confirmed: only
+  comment mentions, no importer) but **not a bug** — it is the deliberate M7 groundwork recorded
+  under "Groundwork done early" below, and the review re-derived an intentional decision. The one
+  part worth keeping: `render/layout.ts:60` computes its own landscape-only fit rather than
+  calling `fitViewport`, so wiring M7 means reconciling two fit implementations, not adopting one.
+
+### Below the cut — real, small, unscheduled
+
+`main.ts:968` duplicated unreachable `if (choosing)` block · `render/feel.ts:754` draws shells
+through `clampX`'s 30-unit *label* inset, pinning brass 19 units off the ship at the playfield
+edges · `render/scene.ts:292` draws the tracer head 11–14 units ahead of the bullet,
+contradicting the invariant three lines above it · `meta/save.ts:177` `{ ...DEFAULT_SAVE }`
+shallow-aliases the module defaults, so `loadSave(null).settings === DEFAULT_SAVE.settings` ·
+`meta/save.ts:290` discards `sanitizePersonnelHistory`'s `skipped`/`dropped` ·
+`meta/seedModes.ts:441` collects rejections in parse order rather than the documented precedence
+order · `meta/keybinds.ts:107` `ownerOf` returns one owner where its own repair paths can create
+two · `content/bosses.ts:736+` five stale per-boss HP comments that would re-introduce a
+documented 25-point clear-rate regression if a future author trusted them.
+
 ## M6 — Polish and balance
 
+- Fix the 2026-07-26 review findings above, and the vacuous guards that hid them. R1 and R11
+  come first: every balance pass below is measured with the instruments they break.
 - Balance passes driven by bot sweeps
 - Accessibility: shake/flash reduction, colourblind-safe verification, remappable keys, pause
 - Settings screen
