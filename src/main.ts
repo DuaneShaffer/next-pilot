@@ -954,6 +954,8 @@ function main(): void {
 
       for (let i = 0; i < options.fastForward; i++) {
         if (screen !== 'sortie') break
+        // Frozen for a capture. See `__nextPilot.freeze`.
+        if (captureFrozen) break
         stepSim()
       }
     },
@@ -1176,6 +1178,27 @@ function main(): void {
     })
   }
 
+  /**
+   * Stop advancing the simulation, for a screenshot.
+   *
+   * WHY THIS EXISTS. `page.screenshot()` takes tens of milliseconds. A hazard warning
+   * is 60 ticks — one simulated second, which at `ff=20` is FIFTY milliseconds of wall
+   * clock. So the harness would assert the state it wanted, open the shutter, and file
+   * an image of the state after it: the `hazard-warning` capture passed its check and
+   * photographed an *idle* hazard. That is the "capture does not show what it claims"
+   * failure the harness was built to prevent, arriving through the one gap it could not
+   * see — between its own assertion and its own shutter.
+   *
+   * Freezing makes the shutter atomic. It is honest in a way a god-mode flag is not: it
+   * changes nothing about the run, it only stops time. The sim is tick-based, so a
+   * frozen run resumes bit-identically — and rendering keeps going, so what is captured
+   * is a real frame of a real state. `holdchoice` is already the same kind of
+   * affordance, and a more invasive one, since it substitutes input.
+   *
+   * Never reachable from a keypress; only from the probe below.
+   */
+  let captureFrozen = false
+
   // State for the verification harness (screenshot captures and perf checks).
   // Read-only by convention; nothing in the game reads it back.
   Object.defineProperty(window, '__nextPilot', {
@@ -1248,6 +1271,15 @@ function main(): void {
       },
       get stats() {
         return { ...world.stats, ...loop.getStats() }
+      },
+      /**
+       * Freeze or resume the simulation. Capture affordance — see `captureFrozen`.
+       *
+       * A function rather than a settable property so it cannot be tripped by the
+       * generic `{ ...api }` snapshot the harness takes of this object.
+       */
+      freeze(on = true): void {
+        captureFrozen = on === true
       },
     },
   })

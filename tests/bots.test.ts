@@ -10,9 +10,12 @@
  *
  *   1. Determinism. Without it every number in a sweep report is unreproducible,
  *      which makes it not a finding.
- *   2. Choices resolve fast. `CHOICE_TIMEOUT_TICKS` is a 60-second backstop; a
- *      policy that leans on it adds a minute of dead sim time per screen and
- *      silently corrupts every survival statistic in the report.
+ *   2. Choices resolve fast. `CHOICE_TIMEOUT_TICKS` is a 20-second backstop (1,200
+ *      ticks — this file said 60 seconds for three milestones); a policy that leans
+ *      on it adds twenty seconds of dead sim time per screen and silently corrupts
+ *      every survival statistic in the report. A card at a SEAM is the case to watch,
+ *      because the sim opens the next one in the tick the previous resolves and the
+ *      tests below fly single-sector content, which never chains two cards.
  *   3. The build-focused probe actually takes its build. If it does not, the
  *      synergy delta it exists to measure is measuring nothing.
  *   4. Degenerate screens do not crash or stall the run.
@@ -288,7 +291,7 @@ describe('every policy resolves a choice instead of stalling', () => {
     }
   })
 
-  it.each(BOT_NAMES)('%s never leans on the sim 60-second choice timeout', (name) => {
+  it.each(BOT_NAMES)('%s never leans on the sim 20-second choice timeout', (name) => {
     const seed = 'N0T1MEOUT234'
     const run = play(BOTS[name].create(seed), seed, LIVE_CONTENT)
     for (const choice of run.choices) {
@@ -300,7 +303,7 @@ describe('every policy resolves a choice instead of stalling', () => {
         MAX_CHOICE_RESOLUTION_TICKS,
       )
       // And nowhere near the backstop, which is what would corrupt survival times:
-      // six screens at 3,600 ticks each would add six minutes of sim time to a run.
+      // six screens at 1,200 ticks each would add two minutes of sim time to a run.
       expect(choice.ticksOpen).toBeLessThan(CHOICE_TIMEOUT_TICKS / 10)
     }
   })
@@ -313,7 +316,7 @@ describe('every policy resolves a choice instead of stalling', () => {
       const run = play(BOTS[name].create(seed), seed, LIVE_CONTENT)
       const menuTicks = run.choices.reduce((sum, c) => sum + c.ticksOpen, 0)
       // Six screens at the 6-tick budget is 36 ticks out of ~11,000 — 0.3%. One
-      // screen resolved by timeout alone would be 3,600 ticks and blow this.
+      // screen resolved by timeout alone would be 1,200 ticks and blow this.
       expect(menuTicks / run.ticks, name).toBeLessThan(0.01)
     }
   })
@@ -553,6 +556,27 @@ describe('policies resolve the world map', () => {
       expect(inputs.some((input) => input.moveX !== 0), `${name} left the direct approach`).toBe(
         false,
       )
+    }
+  })
+
+  it('the random route style actually rolls, on every policy the sweep can ask', () => {
+    // THE ABLATION SWITCH DID NOTHING. `--route-style=random` reached `chooseRoute`
+    // with a null Rng on four of the five policies, whose degenerate fallback is index
+    // 0 — the direct approach. So the sweep printed "route random" over runs that were
+    // byte-identical to `direct`: aggressor measured 26.5% / 36.5% at both, on the same
+    // two base seeds. A knob that reads as a measurement and moves nothing is the same
+    // failure as the mashed cards above, one layer out.
+    const card = routeCard([{ kind: 'none' }, { kind: 'none' }, { kind: 'none' }])
+    for (const name of BOT_NAMES) {
+      const steps = new Set<number>()
+      for (let i = 0; i < 12; i++) {
+        const seed = `R0LLR0UT3${String(i).padStart(3, '0')}`
+        const inputs = pressesAgainst(BOTS[name].create(seed, { routeStyle: 'random' }), fakeView(card), 8)
+        steps.add(inputs.filter((input) => input.moveX > 0).length)
+      }
+      // Every reward here is `none`, so no scoring style would ever navigate: the only
+      // thing that can move the cursor off 0 is the roll.
+      expect(steps.size, `${name} at routeStyle 'random' always picked the same option`).toBeGreaterThan(1)
     }
   })
 
@@ -964,7 +988,7 @@ describe('degenerate choice screens neither crash nor stall', () => {
       const inputs = pressesAgainst(BOTS[name].create('EMPTY2345678'), view, 12)
       // A screen with zero options cannot be CONFIRMED at all — the sim requires
       // `optionCount > 0` — so the only exit is a skip. A policy that only ever
-      // pressed fire here would sit on the screen for the full 60-second timeout.
+      // pressed fire here would sit on the screen for the full 20-second timeout.
       expect(inputs.some((input) => input.special), `${name} never pressed skip`).toBe(true)
       // And it must not thrash the ship while a screen is up.
       for (const input of inputs) {
@@ -1022,7 +1046,7 @@ describe('degenerate choice screens neither crash nor stall', () => {
   it('a policy resolves a screen that stays open longer than it expected', () => {
     // The self-healing branch. If an input the policy expected to land is lost, it
     // must keep pressing until the screen closes rather than idling into the
-    // 60-second timeout — a wrong pick is one skewed row, a timeout skews everything.
+    // 20-second timeout — a wrong pick is one skewed row, a timeout skews everything.
     const choice: PendingChoice = {
       kind: 'item',
       offers: [

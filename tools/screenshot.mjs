@@ -301,7 +301,6 @@ const SHOTS = [
     // hazard: a warning that has become active between the poll and the capture
     // files the wrong second.
     expect: 'hazardPhase === "warning"',
-    unreachedUntil: 'M6 balance — the pilot must clear sector one and accept a hazard route',
   },
   {
     name: 'hazard-active',
@@ -312,7 +311,20 @@ const SHOTS = [
     pollMs: 20,
     holdMs: 0,
     expect: 'hazardPhase === "active"',
-    unreachedUntil: 'M6 balance — the pilot must clear sector one and accept a hazard route',
+    // AN INSTANT HAZARD'S ACTIVE PHASE IS ONE TICK — and it is captured anyway, which
+    // is worth recording because I concluded the opposite first.
+    //
+    // `activeSpanFor` in sim/hazards.ts holds `active` for HAZARD_ACTIVE_TICKS only for
+    // the SUSTAINED kinds (`interdiction`, `blackout`); `corrosion` and `debris` do
+    // their work on the tick they fire and are over, so `active` lasts one tick —
+    // 0.8ms of wall clock at ff=20. This shot passed `waitFor` and then failed `expect`
+    // at the shutter, and I wrote it off as unphotographable in principle.
+    //
+    // It was not. Freezing the simulation when the state holds makes the shutter atomic,
+    // so a one-tick state is exactly as capturable as a two-second one. "Too brief to
+    // photograph" was a fact about the harness, not about the game.
+    //
+    // No marker: this shot now reaches its state on every run.
   },
   {
     // A boss on screen. Waits on the health bar being readable rather than on the
@@ -568,6 +580,27 @@ async function capture() {
             )
           }
           if (shot.holdMs) await page.waitForTimeout(shot.holdMs)
+
+          /*
+           * FREEZE, so the shutter is atomic with the assertion.
+           *
+           * `page.screenshot()` takes tens of milliseconds. A hazard warning is 60
+           * ticks — one simulated second, i.e. FIFTY milliseconds of wall clock at
+           * ff=20 — so `hazard-warning` passed its own `expect` and then filed an image
+           * of the *idle* hazard that followed it. That is precisely the "capture does
+           * not show what it claims" failure this harness exists to prevent, arriving
+           * through the one gap it could not see: between its own check and its own
+           * shutter.
+           *
+           * Freezing stops the simulation advancing and lets rendering continue, so the
+           * frame is a real frame of the state that was asserted. It changes nothing
+           * about the run — the sim is tick-based, so time simply stops — which is why
+           * this is honest where a god-mode flag would not be.
+           *
+           * Applied to every `waitFor` shot: a capture defined by a state always wants
+           * that state held still, and one that does not need it loses nothing.
+           */
+          await page.evaluate(() => window.__nextPilot?.freeze?.(true))
         } else {
           await page.waitForTimeout(shot.settleMs ?? 300)
         }
@@ -596,6 +629,8 @@ async function capture() {
 
         const file = `${OUT_DIR}/${shot.name}--${viewport.name}.png`
         await page.screenshot({ path: file })
+        // Resumed so a later `pressAfter` still drives a live game.
+        await page.evaluate(() => window.__nextPilot?.freeze?.(false))
         for (const key of shot.keys ?? []) await page.keyboard.up(key)
         step(
           `${file}  screen=${state?.screen ?? '?'} run=${state?.runState ?? '-'} ` +

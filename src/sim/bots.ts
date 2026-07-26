@@ -657,6 +657,25 @@ class ChoiceResolver {
 // ---------------------------------------------------------------------------
 
 /**
+ * The route stream a policy rolls on, but ONLY when it has been asked to roll.
+ *
+ * `--route-style=random` silently did nothing. Every policy except `random` passed
+ * `null` as its route Rng, and `chooseRoute`'s degenerate fallback for a missing Rng
+ * is index 0 — which is the direct approach — so an ablation sweep at
+ * `--route-style=random` produced a run byte-identical to `direct` while the report
+ * printed "route random" beside it. Measured: aggressor at `random` and at `direct`
+ * both clear 26.5% / 36.5% on the same two base seeds, to the run.
+ *
+ * Its own named stream per CLAUDE.md contract 1, and constructed only for the style
+ * that consumes it, so the four shipped defaults draw exactly what they drew before
+ * and every recorded number stays comparable. `random`'s own `bot:random-route`
+ * stream is deliberately left alone for the same reason.
+ */
+function routeStreamFor(seed: string, style: RouteStyle): Rng | null {
+  return style === 'random' ? Rng.fromSeed(seed, 'bot:route') : null
+}
+
+/**
  * Per-run knobs a sweep may override.
  *
  * `routeStyle` exists so the world map can be ABLATED: running one policy at
@@ -704,12 +723,13 @@ function selectorFor(
  * use, because a survival-flavoured one is not expressible: `ItemOffer` carries no
  * tags, so nothing in the view distinguishes Plating Shim from Machined Slugs.
  */
-function dodgerPolicy(routeStyle: RouteStyle): BotPolicy {
+function dodgerPolicy(seed: string, routeStyle: RouteStyle): BotPolicy {
   const resolver = new ChoiceResolver()
+  const routeRng = routeStreamFor(seed, routeStyle)
   return (view) => {
     const choosing = resolver.next(
       view,
-      selectorFor(view, 'synergy', routeStyle, null, null, BUILD_FOCUSED_TARGET),
+      selectorFor(view, 'synergy', routeStyle, null, routeRng, BUILD_FOCUSED_TARGET),
     )
     if (choosing) return choosing
 
@@ -741,12 +761,13 @@ function dodgerPolicy(routeStyle: RouteStyle): BotPolicy {
  * never evades. Its death rate is the price of ignoring incoming fire, and the
  * gap between its clear speed and dodger's is the difficulty budget.
  */
-function aggressorPolicy(routeStyle: RouteStyle): BotPolicy {
+function aggressorPolicy(seed: string, routeStyle: RouteStyle): BotPolicy {
   const resolver = new ChoiceResolver()
+  const routeRng = routeStreamFor(seed, routeStyle)
   return (view) => {
     const choosing = resolver.next(
       view,
-      selectorFor(view, 'synergy', routeStyle, null, null, BUILD_FOCUSED_TARGET),
+      selectorFor(view, 'synergy', routeStyle, null, routeRng, BUILD_FOCUSED_TARGET),
     )
     if (choosing) return choosing
 
@@ -775,12 +796,13 @@ function aggressorPolicy(routeStyle: RouteStyle): BotPolicy {
  * it can afford rather than the best one: the question it answers is whether the
  * shop's prices are reachable at all from the scrap the sector pays.
  */
-function greedyPolicy(routeStyle: RouteStyle): BotPolicy {
+function greedyPolicy(seed: string, routeStyle: RouteStyle): BotPolicy {
   const resolver = new ChoiceResolver()
+  const routeRng = routeStreamFor(seed, routeStyle)
   return (view) => {
     const choosing = resolver.next(
       view,
-      selectorFor(view, 'expensive', routeStyle, null, null, BUILD_FOCUSED_TARGET),
+      selectorFor(view, 'expensive', routeStyle, null, routeRng, BUILD_FOCUSED_TARGET),
     )
     if (choosing) return choosing
 
@@ -860,14 +882,16 @@ function randomPolicy(seed: string, routeStyle: RouteStyle): BotPolicy {
  * into its death rate.
  */
 function buildFocusedPolicy(
+  seed: string,
   targets: readonly string[] = BUILD_FOCUSED_TARGET,
   routeStyle: RouteStyle = 'item-only',
 ): BotPolicy {
   const resolver = new ChoiceResolver()
+  const routeRng = routeStreamFor(seed, routeStyle)
   return (view) => {
     const choosing = resolver.next(
       view,
-      selectorFor(view, 'build', routeStyle, null, null, targets),
+      selectorFor(view, 'build', routeStyle, null, routeRng, targets),
     )
     if (choosing) return choosing
 
@@ -901,7 +925,7 @@ export const BOTS: Readonly<Record<BotName, BotDef>> = {
     name: 'dodger',
     measures: 'survivability floor — evades, fires only when unthreatened, takes stated synergies',
     routeStyle: 'direct',
-    create: (_seed, options) => dodgerPolicy(options?.routeStyle ?? 'direct'),
+    create: (seed, options) => dodgerPolicy(seed, options?.routeStyle ?? 'direct'),
   },
   aggressor: {
     name: 'aggressor',
@@ -909,7 +933,7 @@ export const BOTS: Readonly<Record<BotName, BotDef>> = {
     // The clear-rate benchmark. Held at `direct` so the number the M5 exit criterion
     // is read off is not also a measurement of optional risk-taking.
     routeStyle: 'direct',
-    create: (_seed, options) => aggressorPolicy(options?.routeStyle ?? 'direct'),
+    create: (seed, options) => aggressorPolicy(seed, options?.routeStyle ?? 'direct'),
   },
   greedy: {
     name: 'greedy',
@@ -918,7 +942,7 @@ export const BOTS: Readonly<Record<BotName, BotDef>> = {
     // "Always takes the scrap and the risky route" — docs/VERIFICATION.md §2. The
     // route half of that sentence was unimplementable until the world map existed.
     routeStyle: 'rewarding',
-    create: (_seed, options) => greedyPolicy(options?.routeStyle ?? 'rewarding'),
+    create: (seed, options) => greedyPolicy(seed, options?.routeStyle ?? 'rewarding'),
   },
   random: {
     name: 'random',
@@ -933,7 +957,8 @@ export const BOTS: Readonly<Record<BotName, BotDef>> = {
     // only route reward that helps it assemble the pair it exists to measure, and
     // taking a hazard for scrap would add deaths that the build gets blamed for.
     routeStyle: 'item-only',
-    create: (_seed, options) => buildFocusedPolicy(BUILD_FOCUSED_TARGET, options?.routeStyle ?? 'item-only'),
+    create: (seed, options) =>
+      buildFocusedPolicy(seed, BUILD_FOCUSED_TARGET, options?.routeStyle ?? 'item-only'),
   },
 }
 
@@ -954,8 +979,9 @@ export function isBotName(value: string): value is BotName {
 export function createBuildFocused(
   targets: readonly string[],
   routeStyle: RouteStyle = 'item-only',
+  seed = 'BU1LDF0CUSED',
 ): BotPolicy {
-  return buildFocusedPolicy(targets, routeStyle)
+  return buildFocusedPolicy(seed, targets, routeStyle)
 }
 
 /** Every route style, so a sweep can enumerate them without hardcoding the list. */
