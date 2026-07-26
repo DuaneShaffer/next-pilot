@@ -603,7 +603,12 @@ describe('text meets WCAG AA on the surfaces it is actually drawn on', () => {
     ['textFaint', 'void', 'reserved for genuinely non-essential text (rule 7)'],
     ['textFaint', 'panel', 'pause menu controls footer, choice screen hints'],
     ['self', 'panel', 'selected values, seed readout'],
-    ['caution', 'panel', 'scrap readout, CURSED tag, daily contract'],
+    // The hazard row is the fourth site and was missing: a warning for a hazard that
+    // takes no integrity is `caution`, not `danger`. Only the `where` string was
+    // incomplete — the contrast assertion already covered this token/surface pair — but
+    // an incomplete inventory of where a colour is used is how the panel and the
+    // playfield came to disagree about hazard severity in the first place.
+    ['caution', 'panel', 'scrap readout, CURSED tag, daily contract, harmless hazard warning'],
     ['dangerText', 'panel', 'personnel LOST, incident report cause'],
     ['dangerText', 'void', 'hazard INBOUND callout over the playfield'],
     ['good', 'panel', 'synergy count, EXTRACTED, hangar unlocked status'],
