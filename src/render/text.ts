@@ -113,6 +113,21 @@ export function drawValue(
 
 
 /**
+ * Ticks as a number of seconds, for a readout that must carry a unit.
+ *
+ * Ticks are a simulation implementation detail and mean nothing to a player; UI.md
+ * rule 2 wants a real unit on every number, and "1.4" next to a hazard has to be
+ * seconds or it is noise. One decimal under ten seconds because that is the range in
+ * which a countdown is a *reaction* rather than a plan, and whole seconds above it so
+ * a long idle timer does not jitter its last digit sixty times a second.
+ */
+export function formatSeconds(ticks: number, tickHz = 60): string {
+  const safe = Number.isFinite(ticks) ? Math.max(0, ticks) : 0
+  const seconds = safe / (tickHz > 0 ? tickHz : 60)
+  return seconds < 10 ? seconds.toFixed(1) : String(Math.round(seconds))
+}
+
+/**
  * Width measurement, injected so wrapping can be unit-tested without a canvas.
  */
 export type Measure = (

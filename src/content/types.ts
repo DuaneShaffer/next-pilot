@@ -93,6 +93,14 @@ export interface EnemyDef {
   movement: MovementKind
   movementParams: MovementParams
   weapon: EnemyWeaponDef
+  /**
+   * A second barrel with its own independent cadence and telegraph.
+   *
+   * Exists for layered patterns — a boss laying down a slow ring while tracking the
+   * hull with aimed fire. Rarely right for a rank-and-file enemy: two overlapping
+   * patterns from a small ship is hard to read, and legibility outranks variety.
+   */
+  secondaryWeapon?: EnemyWeaponDef
   shape: EnemyShape
   elite?: boolean
   /**
@@ -334,4 +342,114 @@ export interface WorkOrderDef {
   name: string
   /** The trade-off in plain language. No icon-guessing — see UI.md rule 4. */
   description: string
+}
+
+// ---------------------------------------------------------------------------
+// hulls, bosses, hazards, and the multi-sector run
+// ---------------------------------------------------------------------------
+
+/**
+ * A hull the pilot can be issued.
+ *
+ * Per docs/DESIGN.md every hull is defined by **a drawback that shapes play**, not by
+ * a stat spread. A hull that is strictly worse is a hull nobody picks, and one that is
+ * strictly better makes the others decoration — so `stats` must contain at least one
+ * modifier in each direction, and a test enforces it.
+ *
+ * Hulls modify the same `StatKey` space items do, which is what lets an item and a
+ * hull compose without either knowing about the other.
+ */
+export interface HullDef {
+  id: string
+  name: string
+  /** One sentence on how it changes play. Mechanism first, per UI rule 4. */
+  mechanism: string
+  flavour?: string
+  stats: readonly StatModifier[]
+  /** Behaviours the hull grants from the start, same vocabulary as items. */
+  effects?: readonly EffectDef[]
+  /** Items the pilot begins the run holding. */
+  startingItems?: readonly string[]
+  /** Scrap the pilot begins with. */
+  startingScrap?: number
+}
+
+/**
+ * How a boss behaves in one phase of its fight.
+ *
+ * A boss is deliberately NOT a new entity kind — it is an enemy with phases, so every
+ * movement and weapon behaviour the sim already interprets applies unchanged. Adding
+ * a boss must not mean adding simulation code, for the same reason adding an enemy
+ * must not.
+ */
+export interface BossPhaseDef {
+  /** Fraction of max HP at or below which this phase begins. 1 is the opening. */
+  fromHealthFraction: number
+  movement: MovementKind
+  movementParams: MovementParams
+  weapon: EnemyWeaponDef
+  /** Extra weapon fired alongside the primary, for layered patterns. */
+  secondary?: EnemyWeaponDef
+  /** Shown when the phase begins. Announced, because an unannounced shift is unfair. */
+  callout: string
+}
+
+export interface BossDef {
+  id: string
+  name: string
+  hp: number
+  radius: number
+  contactDamage: number
+  scrap: number
+  shape: EnemyShape
+  /** Ordered from opening to final. Descending `fromHealthFraction`. */
+  phases: readonly BossPhaseDef[]
+  /**
+   * Seeded variants: which phase set a given run gets.
+   *
+   * Same boss, different second phase, so a player who has learned the fight still
+   * has to read it. Empty means the boss has one form.
+   */
+  variants?: readonly { id: string; name: string; phases: readonly BossPhaseDef[] }[]
+}
+
+/**
+ * A persistent field effect for a sector.
+ *
+ * Hazards are the sector's own character, distinct from its enemies — the thing that
+ * makes Bloomfield feel different from the Kill Grid even when both are shooting at
+ * you.
+ */
+export type HazardKind = 'debris' | 'corrosion' | 'interdiction' | 'blackout'
+
+export interface HazardDef {
+  id: string
+  name: string
+  kind: HazardKind
+  /** Plain language, shown on the world map so a route choice is informed. */
+  description: string
+  /** Ticks between hazard events. */
+  intervalTicks: number
+  damage: number
+}
+
+/**
+ * One stop on a run: a sector, plus what guards and complicates it.
+ *
+ * Introduced at M5 because a run is no longer one sector. The work orders that
+ * `WorkOrderKind` describes finally have somewhere to live — they are the choice made
+ * *between* these.
+ */
+export interface RunStageDef {
+  sectorId: string
+  /** Boss fought at the end of the stage. Null for a stage that simply ends. */
+  bossId: string | null
+  /** Hazards active for the whole stage. */
+  hazardIds: readonly string[]
+}
+
+export interface RunDef {
+  id: string
+  name: string
+  stages: readonly RunStageDef[]
 }

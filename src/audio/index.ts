@@ -231,6 +231,7 @@ export {
   layer,
   layerDuration,
   layersDuration,
+  peakLayerGain,
   type AudioBackend,
   type BackendState,
   type Layer,

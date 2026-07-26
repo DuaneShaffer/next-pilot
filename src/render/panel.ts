@@ -14,13 +14,40 @@
 import type { ItemDef } from '../content/types'
 import { PANEL_W, PLAYFIELD_W, VIRTUAL_H } from '../core/space'
 import { formatSeed } from '../core/seed'
-import type { WorldView } from '../sim/entities'
+import type { EnemyInstance, HazardView, StageView, WorldView } from '../sim/entities'
+import { drawBossHealthBar } from './boss'
+import { drawHazardBlock } from './hazards'
 import { Font, Palette } from './palette'
 import { drawLabel, drawText, drawValue, measureText } from './text'
 
 const PAD = 14
 const CONTENT_X = PLAYFIELD_W + PAD
 const CONTENT_W = PANEL_W - PAD * 2
+
+/**
+ * Defensive reads of the M5 view fields.
+ *
+ * The panel is drawn every frame from whatever it is handed, including by tests and
+ * tools that build a `WorldView` by hand and by a save-scummed replay from an older
+ * build. A missing field must degrade to "nothing to show" — a HUD that throws takes
+ * the whole frame with it, and in a permadeath game that costs a run.
+ */
+function stageOf(view: WorldView): StageView {
+  const stage = view.stage as StageView | undefined
+  if (!stage || !Number.isFinite(stage.index) || !Number.isFinite(stage.count)) {
+    return { index: 0, count: 1, sectorId: '', sectorName: '', bossName: null }
+  }
+  return stage
+}
+
+function hazardsOf(view: WorldView): readonly HazardView[] {
+  return Array.isArray(view.hazards) ? view.hazards : []
+}
+
+function bossOf(view: WorldView): EnemyInstance | null {
+  const boss = view.boss ?? null
+  return boss && boss.alive && boss.boss ? boss : null
+}
 
 export function drawPanelFrame(ctx: CanvasRenderingContext2D): void {
   ctx.fillStyle = Palette.panel
@@ -82,7 +109,7 @@ function drawMeter(ctx: CanvasRenderingContext2D, top: number, options: MeterOpt
     weight: 600,
     align: 'right',
     baseline: 'top',
-    color: critical ? Palette.danger : Palette.text,
+    color: critical ? Palette.dangerText : Palette.text,
   })
 
   const barTop = top + 18
@@ -97,31 +124,31 @@ function drawMeter(ctx: CanvasRenderingContext2D, top: number, options: MeterOpt
     ctx.fillRect(x, barTop, segW, barH)
   }
 
-  return barTop + barH
-}
+  /**
+   * A SECOND CHANNEL for critical, because colour alone cannot carry it.
+   *
+   * Going critical used to be a hue swap in place — same bar, same segments, same
+   * position, `caution` becomes `danger`. Those two differ only along the L–M axis,
+   * which is exactly the axis protanopes and deuteranopes lack (measured ΔE00 13.1
+   * deuteranopic, 6.3 tritanopic against a bar of 15), and a constrained search over
+   * the whole palette could not clear it without destroying `caution`'s separation
+   * from `good`. So for a meaningful share of players, the most important state
+   * change in the game was invisible.
+   *
+   * It is not a colour problem and cannot be solved with a better red. Notches cut
+   * into the filled segments give it a second channel that survives greyscale, every
+   * simulated deficiency, and a photograph of a screen. See tests/palette.test.ts.
+   */
+  if (critical) {
+    ctx.fillStyle = Palette.panel
+    const notch = Math.max(1, Math.floor(segW / 3))
+    for (let i = 0; i < filledSegments; i++) {
+      const x = CONTENT_X + i * (segW + gap)
+      ctx.fillRect(x + (segW - notch) / 2, barTop, notch, barH)
+    }
+  }
 
-/**
- * A label/value readout.
- *
- * The gap *within* a group (label to its value) is smaller than the gap
- * *between* groups, so proximity alone tells you which label owns which value.
- * Without that, `FIRE RATE` reads as a caption for the line above it.
- */
-function drawRow(
-  ctx: CanvasRenderingContext2D,
-  top: number,
-  label: string,
-  value: string,
-  unit = '',
-  valueColor: string = Palette.text,
-): number {
-  drawLabel(ctx, label, CONTENT_X, top, { baseline: 'top' })
-  drawValue(ctx, value, unit, CONTENT_X, top + 14, {
-    size: 15,
-    baseline: 'top',
-    color: valueColor,
-  })
-  return top + 33
+  return barTop + barH
 }
 
 /**
@@ -258,6 +285,9 @@ function formatStat(value: number): string {
  * Draw the build between `top` and `bottom`, and return nothing — the block is
  * anchored, not flowed, so nothing below it depends on how tall it turned out.
  */
+/** Below this much space the build collapses to one line; below one line it is dropped. */
+const BUILD_MIN_H = 32
+
 function drawHeldBuild(
   ctx: CanvasRenderingContext2D,
   view: WorldView,
@@ -265,29 +295,48 @@ function drawHeldBuild(
   bottom: number,
   items?: Readonly<Record<string, ItemDef>>,
 ): void {
+  // The boss and hazard blocks above can legitimately take the whole void during a
+  // late-sector fight. Drawing anyway would run this readout straight through the
+  // sortie log, and overlapping text is a P0 — so it collapses, then disappears.
+  const space = bottom - top
+  if (space < BUILD_MIN_H) {
+    if (space >= 18 && view.inventory.length > 0) {
+      drawStatLine(ctx, top, 'Build', String(view.inventory.length), 'fitted', Palette.textDim)
+    }
+    return
+  }
+
   let y = drawSectionHeading(ctx, top, 'Build')
 
   // Damage per shot lives here rather than with the weapon group above because it
   // is the number items move most, and reading it next to the list that changed it
   // is what makes an item's effect legible.
+  //
+  // EVERY row from here down is gated on fitting. The block used to assume it owned
+  // ~110 units, which stopped being true the moment a boss and a hazard block moved
+  // into the same region: with one hazard live the damage line, the overflow count and
+  // the synergy row together ran straight through the sortie log heading. Nothing here
+  // may draw at a y the caller did not grant.
   const damage = view.resolvedStats.projectileDamage
-  if (damage !== undefined) {
+  if (damage !== undefined && y + 20 <= bottom) {
     y = drawStatLine(ctx, y, 'Damage', formatStat(damage), 'per shot')
   }
 
   if (view.inventory.length === 0) {
-    drawText(ctx, 'Nothing fitted', CONTENT_X, y, {
-      size: 12,
-      baseline: 'top',
-      color: Palette.textFaint,
-    })
+    if (y + 14 <= bottom) {
+      drawText(ctx, 'Nothing fitted', CONTENT_X, y, {
+        size: 12,
+        baseline: 'top',
+        color: Palette.textFaint,
+      })
+    }
     return
   }
 
   const live = view.activeInteractions.length
   // Reserve the synergy row up front, so the item list cannot eat the space and
-  // push a live combination off the panel.
-  const reserved = live > 0 ? 20 : 0
+  // push a live combination off the panel — but only if there is a row to reserve.
+  const reserved = live > 0 && y + 20 <= bottom ? 20 : 0
   const rows = Math.max(0, Math.floor((bottom - y - reserved) / BUILD_ROW_H))
 
   // One row is given up to the overflow count when the list is longer than the
@@ -316,8 +365,18 @@ function drawHeldBuild(
     }
     y += BUILD_ROW_H
   }
+  // Not one name fits, but there is still a line's worth of room: say how many are
+  // fitted rather than nothing at all. "I have eight items" is a smaller answer than
+  // the list, and a much larger one than silence.
+  if (rows === 0) {
+    if (y + 18 <= bottom) {
+      drawStatLine(ctx, y, 'Fitted', String(view.inventory.length), 'items', Palette.textDim)
+    }
+    return
+  }
+
   const hidden = view.inventory.length - listed
-  if (hidden > 0) {
+  if (hidden > 0 && y + BUILD_ROW_H <= bottom) {
     drawText(ctx, `+${hidden} more fitted`, CONTENT_X, y, {
       size: 12,
       baseline: 'top',
@@ -326,7 +385,7 @@ function drawHeldBuild(
     y += BUILD_ROW_H
   }
 
-  if (live > 0) {
+  if (live > 0 && reserved > 0 && y + 18 <= bottom) {
     // `good` because a live combination is a gain. The count carries the
     // information; the colour only reinforces it. The interaction text itself is
     // too long for this column and is stated on the choice screen instead.
@@ -334,16 +393,120 @@ function drawHeldBuild(
   }
 }
 
+/**
+ * The boss readout.
+ *
+ * Deliberately in the panel rather than across the top of the playfield, which is
+ * where the genre puts it. UI.md rule 1 names its permitted playfield overlays and a
+ * boss *health bar* is not among them — it is persistent state, the exact thing the
+ * 192-unit column exists to hold. What goes over the playfield is the phase callout,
+ * which is an announcement and is named in the rule; and the ring on the boss itself,
+ * which is attached to a moving entity like the damage strip every other enemy gets.
+ *
+ * Layout is two text rows and a bar:
+ *
+ *   BOSS                 PHASE 2 / 3
+ *   SLEDGE AUDITOR           1240 hp
+ *   [====|=====|=========]
+ */
+const BOSS_BLOCK_H = 44
+
+function drawBossBlock(
+  ctx: CanvasRenderingContext2D,
+  top: number,
+  enemy: EnemyInstance,
+): number {
+  const boss = enemy.boss
+  if (!boss) return top
+
+  const right = CONTENT_X + CONTENT_W
+  const phases = Math.max(1, boss.thresholds.length)
+  const phaseIndex = Math.max(0, Math.min(phases - 1, boss.phaseIndex))
+
+  drawText(ctx, 'BOSS', CONTENT_X, top, {
+    size: 11,
+    tracking: 2.2,
+    baseline: 'top',
+    color: Palette.textFaint,
+  })
+  drawText(ctx, `PHASE ${phaseIndex + 1} / ${phases}`, right, top, {
+    size: 11,
+    weight: 600,
+    align: 'right',
+    baseline: 'top',
+    color: Palette.textDim,
+  })
+
+  // Remaining hull, with its unit. A bar answers "how far through"; the number
+  // answers "is my damage doing anything", and during a four-minute fight both are
+  // questions the player is actually asking.
+  const hp = `${Math.max(0, Math.round(enemy.hp))} hp`
+  const hpWidth = measureText(ctx, hp, { size: 11 })
+  // Right-ALIGNED, not merely positioned at the right edge. Drawn left-aligned from
+  // `right` it ran off the panel — caught by looking at a capture, and now caught by
+  // tests/render.test.ts, which measures a string's width instead of its anchor.
+  drawText(ctx, hp, right, top + 16, {
+    size: 11,
+    align: 'right',
+    baseline: 'top',
+    color: Palette.textDim,
+  })
+  // Size 12 rather than 13: at 13 the authored name "Sledge Auditor" clipped to
+  // "SLEDGE AUDIT…" once the hp readout took its share of the row, and a boss whose
+  // name you cannot read is a boss you cannot talk about. Weight and colour carry the
+  // prominence instead of size.
+  drawText(
+    ctx,
+    truncateToWidth(ctx, boss.name.toUpperCase(), CONTENT_W - hpWidth - 12, 12),
+    CONTENT_X,
+    top + 16,
+    { size: 12, weight: 700, tracking: 0.6, baseline: 'top', color: Palette.hostileElite },
+  )
+
+  drawBossHealthBar(ctx, {
+    x: CONTENT_X,
+    y: top + 32,
+    w: CONTENT_W,
+    h: 9,
+    thresholds: boss.thresholds,
+    fraction: enemy.maxHp > 0 ? enemy.hp / enemy.maxHp : 0,
+    phaseIndex,
+  })
+
+  return top + BOSS_BLOCK_H
+}
+
 export interface PanelState {
   pilotNumber: number
+  /**
+   * Fallback hull name.
+   *
+   * The run itself is the source of truth (`WorldView.hullName`) now that a run can be
+   * issued different hulls; this is used only when the view has not supplied one.
+   */
   hullName: string
   weaponName: string
   /** Shots per second, shown with a unit so it can't be mistaken for a multiplier. */
   fireRate: number
   // No `scrap` field: scrap is read from the run's own stats, so a caller cannot
   // hand the HUD a number that disagrees with the simulation.
-  sector: number
-  sectorCount: number
+  /**
+   * IGNORED. The sector readout is sourced from `WorldView.stage`.
+   *
+   * These two fields are what produced the defect this milestone fixed: the panel read
+   * "SECTOR 1 / 5" for the entire game because the app handed it the number of sectors
+   * that were *planned* rather than the leg the simulation was actually running. They
+   * survive only so the app layer, which also feeds the incident report from them,
+   * keeps compiling; nothing in this file reads them and they should be deleted once
+   * that caller moves over.
+   *
+   * @deprecated read `view.stage` instead.
+   */
+  sector?: number
+  /** @deprecated see `sector`. */
+  sectorCount?: number
+  /** `Settings.reduceFlashes`. Attenuates the hazard warning band's pulse. */
+  reduceFlashes?: boolean
   /**
    * Waves in the current sector, for the progress readout. Omitted while the
    * sector script is not known to the caller, in which case the readout reports
@@ -387,7 +550,11 @@ export function drawPanel(
     color: Palette.textDim,
   })
   y += 18
-  drawText(ctx, state.hullName.toUpperCase(), CONTENT_X, y, {
+  // The run names its own hull. `state.hullName` is only a fallback now: with eight
+  // hulls the app cannot hold a copy of this without it eventually disagreeing with
+  // the ship being flown, which is the same class of bug as the fire-rate readout.
+  const hullName = view.hullName || state.hullName
+  drawText(ctx, hullName.toUpperCase(), CONTENT_X, y, {
     size: 18,
     weight: 700,
     tracking: 1,
@@ -423,13 +590,20 @@ export function drawPanel(
   drawDivider(ctx, y)
   y += AFTER_DIVIDER
 
-  y = drawRow(ctx, y, 'Weapon', state.weaponName)
+  // Weapon, rate and scrap share a line with their labels rather than sitting under
+  // them. Each was a two-line group until M5 put a boss and a hazard block in the
+  // flexible region below, and 39 units of airiness up here was costing the hazard
+  // readout its descriptions during a boss fight — which is a worse trade than a
+  // slightly denser stat group. `drawStatLine` measures both halves and falls back to
+  // two lines if a long weapon name would ever collide with its label, so the density
+  // cannot turn into an overlap.
+  y = drawStatLine(ctx, y, 'Weapon', state.weaponName)
   y += BETWEEN_GROUPS
-  y = drawRow(ctx, y, 'Fire rate', state.fireRate.toFixed(1), 'shots/s')
+  y = drawStatLine(ctx, y, 'Fire rate', state.fireRate.toFixed(1), 'shots/s')
   y += BETWEEN_GROUPS
   // Scrap comes from the run, not the caller: a currency the HUD could get wrong
   // is a currency the player cannot trust.
-  y = drawRow(ctx, y, 'Scrap', String(view.stats.scrap), 'cr', Palette.caution)
+  y = drawStatLine(ctx, y, 'Scrap', String(view.stats.scrap), 'cr', Palette.caution)
   y += BEFORE_DIVIDER
   drawDivider(ctx, y)
   y += AFTER_DIVIDER
@@ -437,7 +611,18 @@ export function drawPanel(
   // Progress group. Sector and wave sit tight together with no BETWEEN_GROUPS
   // between them, because they answer one question — how far in am I — and
   // proximity is what says so.
-  y = drawRow(ctx, y, 'Sector', `${state.sector} / ${state.sectorCount}`)
+  //
+  // Sourced from the run, never from a planned count. See PanelState.sector.
+  const stage = stageOf(view)
+  y = drawStatLine(ctx, y, 'Sector', `${stage.index + 1} / ${stage.count}`)
+  // The name is what makes the number mean something: "2 / 3" says how far, "THE
+  // TALLY" says where, and a player reading a screenshot needs both.
+  drawText(ctx, truncateToWidth(ctx, stage.sectorName, CONTENT_W, 12), CONTENT_X, y, {
+    size: 12,
+    baseline: 'top',
+    color: Palette.textDim,
+  })
+  y += 15
   const waves = state.waveCount ?? 0
   y = drawStatLine(
     ctx,
@@ -463,16 +648,42 @@ export function drawPanel(
   const logDivider = logTop - AFTER_DIVIDER
   drawDivider(ctx, logDivider)
 
-  // The void the comment above reserved, now spent on the build.
+  // The void the comment above reserved, now shared three ways.
   //
-  // Drawn after the log's divider is known because the readout is bounded by it:
-  // the space it gets is whatever is left between the progress group and the fixed
-  // block below, and it must never grow past that. The gap above the heading is
-  // tighter than AFTER_DIVIDER on purpose — every unit there is a unit the item
-  // list does not get, and the void is only ~110 tall to begin with.
+  // Drawn after the log's divider is known because the region is bounded by it: the
+  // space is whatever is left between the progress group and the fixed block below,
+  // and nothing here may grow past it.
+  //
+  // Priority, when it does not all fit, is threat first: the boss keeps its full
+  // block, the hazards drop their descriptions and then their rows, and the build —
+  // the only readout here that is about a decision already made — yields last and
+  // degrades to a count. A player can check what they are carrying between waves;
+  // they cannot check a hazard countdown after it has fired.
   y += BEFORE_DIVIDER
   drawDivider(ctx, y)
-  drawHeldBuild(ctx, view, y + 12, logDivider - 8, state.items)
+  let blockY = y + 12
+  const blocksBottom = logDivider - 8
+
+  const boss = bossOf(view)
+  const bossReserve = boss ? BOSS_BLOCK_H + 10 : 0
+
+  const hazards = hazardsOf(view)
+  if (hazards.length > 0) {
+    blockY =
+      drawHazardBlock(ctx, {
+        x: CONTENT_X,
+        y: blockY,
+        w: CONTENT_W,
+        hazards,
+        tick: view.stats.tick,
+        available: blocksBottom - blockY - bossReserve,
+        ...(state.reduceFlashes === undefined ? {} : { reduceFlashes: state.reduceFlashes }),
+      }) + 8
+  }
+
+  if (boss) blockY = drawBossBlock(ctx, blockY, boss) + 10
+
+  drawHeldBuild(ctx, view, blockY, blocksBottom, state.items)
 
   let logY = drawSectionHeading(ctx, logTop, 'Sortie log')
   const accuracy = formatAccuracy(view.stats.hits, view.stats.shotsFired)

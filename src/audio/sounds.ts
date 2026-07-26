@@ -15,14 +15,28 @@
  * top of the mix, and the thing that happens twenty times a second sits at the
  * bottom. The categories *are* that hierarchy:
  *
- *   alarm   1.00   something just went wrong to you. Never masked.
- *   threat  0.95   something is about to. Enemy fire and telegraphs.
+ *   alarm   1.00   you must act on this now. Never masked.
+ *   threat  0.95   something is about to hurt you. Enemy fire and telegraphs.
  *   impact  0.62   your damage landing. Confirmation, not warning.
- *   ui      0.60   your own menu input, only outside a sortie.
+ *   ui      0.60   your own menu input, and run structure.
  *   pickup  0.50   reward. Pleasant, ignorable.
  *   weapon  0.26   your gun. Deliberately the quietest thing in the game.
  *
  * The weapon number is the load-bearing one. See `weapon.shot` below.
+ *
+ * THESE NUMBERS ARE NOW MEASURED, not asserted. `npm run audio` renders every cue
+ * through the real backend and reports its loudness in LUFS, and the ordering
+ * above is checked against what comes out rather than against itself. Two things
+ * that broke silently before that instrument existed, and that anyone editing this
+ * file needs to know:
+ *
+ *  1. A recipe's *layer* gains are a second gain stage. `category × gain` sets the
+ *     intent; the layers decide what actually leaves the voice. A recipe whose
+ *     layers sum to 0.5 will be 10dB below one whose layers sum to 1.6 at the same
+ *     nominal gain. Retune `gain` against a measured render, never by eye.
+ *  2. `VOICE_PEAK_CEILING` used to be applied as a clamp, which pinned six of the
+ *     loudest sounds to the identical value and flattened the top half of this
+ *     hierarchy into a straight line. It is now a scale factor. See `Mixer.play`.
  */
 
 import { layer, type Layer } from './backend'
@@ -34,8 +48,13 @@ export type SoundId =
   | 'impact.hit'
   | 'impact.kill'
   | 'impact.killElite'
+  | 'impact.bossKilled'
   | 'threat.enemyShot'
   | 'threat.telegraph'
+  | 'threat.bossSpawn'
+  | 'threat.bossPhase'
+  | 'threat.hazardFired'
+  | 'alarm.hazardWarning'
   | 'alarm.shieldAbsorb'
   | 'alarm.shieldBroken'
   | 'alarm.hullHit'
@@ -44,6 +63,7 @@ export type SoundId =
   | 'ui.confirm'
   | 'ui.cancel'
   | 'ui.waveRelease'
+  | 'ui.stageCleared'
 
 export interface SoundDef {
   readonly category: SoundCategory
@@ -172,7 +192,16 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
     ],
   },
 
-  /** Decompression: a vent closing over 240ms, with a low thud under it. */
+  /**
+   * Decompression: a vent closing, with a low thud under it.
+   *
+   * Retuned against the render. It had 90% of its energy below 150 Hz — a laptop
+   * heard almost none of it — and its brightness sat 0.70 octaves from
+   * `alarm.hullHit`, which is the one pair in the game a player must never
+   * confuse: "I killed something" against "something hit me". The vent is now
+   * brighter and longer and the hull hit is darker and shorter, so the two
+   * separate on both axes at once.
+   */
   'impact.kill': {
     category: 'impact',
     priority: 50,
@@ -186,24 +215,24 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
         source: 'noise',
         gain: 0.8,
         attack: 0.002,
-        hold: 0.03,
-        release: 0.21,
+        hold: 0.035,
+        release: 0.26,
         filter: 'lowpass',
-        filterFreq: 1900,
-        filterFreqEnd: 220,
+        filterFreq: 2600,
+        filterFreqEnd: 520,
         filterQ: 0.9,
       }),
-      layer({ source: 'sine', freq: 95, freqEnd: 38, gain: 0.7, attack: 0.003, hold: 0.02, release: 0.18 }),
+      layer({ source: 'sine', freq: 150, freqEnd: 60, gain: 0.5, attack: 0.003, hold: 0.02, release: 0.18 }),
       layer({
         source: 'square',
         freq: 300,
         freqEnd: 120,
-        gain: 0.16,
-        hold: 0.008,
-        release: 0.05,
+        gain: 0.3,
+        hold: 0.012,
+        release: 0.09,
         filter: 'bandpass',
         filterFreq: 900,
-        filterQ: 2.5,
+        filterQ: 1.8,
       }),
     ],
   },
@@ -262,10 +291,90 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
   },
 
   /**
+   * A boss dying. The largest single event in the game and the only one allowed
+   * to be: structure coming apart over 830ms, a secondary detonation at 220ms,
+   * and one last relay letting go at 550ms. `impact.killElite` with the brakes
+   * off — same vocabulary, twice the scale, so it reads as "that, but the big one"
+   * rather than as an unrelated sound.
+   */
+  'impact.bossKilled': {
+    category: 'impact',
+    priority: 66,
+    gain: 1,
+    minGapSec: 0.5,
+    maxVoices: 1,
+    pitchRotation: NO_ROTATION,
+    gainRotation: NO_ROTATION,
+    layers: [
+      layer({
+        source: 'noise',
+        gain: 0.85,
+        attack: 0.004,
+        hold: 0.09,
+        release: 0.6,
+        filter: 'lowpass',
+        filterFreq: 3200,
+        filterFreqEnd: 110,
+        filterQ: 0.8,
+      }),
+      layer({ source: 'sine', freq: 70, freqEnd: 22, gain: 0.75, attack: 0.005, hold: 0.08, release: 0.62 }),
+      layer({
+        source: 'sawtooth',
+        freq: 130,
+        freqEnd: 34,
+        gain: 0.32,
+        attack: 0.012,
+        hold: 0.09,
+        release: 0.55,
+        filter: 'lowpass',
+        filterFreq: 800,
+        filterFreqEnd: 120,
+        filterQ: 1.2,
+      }),
+      layer({
+        source: 'noise',
+        gain: 0.36,
+        delay: 0.22,
+        attack: 0.003,
+        hold: 0.03,
+        release: 0.22,
+        filter: 'lowpass',
+        filterFreq: 2400,
+        filterFreqEnd: 300,
+        filterQ: 0.8,
+      }),
+      layer({
+        source: 'square',
+        freq: 220,
+        freqEnd: 70,
+        gain: 0.22,
+        delay: 0.55,
+        attack: 0.003,
+        hold: 0.04,
+        release: 0.24,
+        filter: 'bandpass',
+        filterFreq: 600,
+        filterQ: 3,
+      }),
+    ],
+  },
+
+  /**
    * Incoming fire. Lower and hollower than the player's shot, with a resonant
-   * bandpass ring so it is unmistakably *not* yours even at four times the
-   * player weapon's level. This is one of the four sounds that must always cut
-   * through, so it lives in `threat`.
+   * bandpass ring so it is unmistakably *not* yours. This is one of the four
+   * sounds that must always cut through, so it lives in `threat`.
+   *
+   * THIS RECIPE WAS THE WORST BUG THE AUDIO HARNESS FOUND. It measured -46.6
+   * LUFS against the player's weapon at -43.3 — enemy fire was three decibels
+   * *quieter* than the player's own gun, which fires twenty times a second. The
+   * category number said 0.95 against the weapon's 0.26 and every test agreed,
+   * because every test read the category number. What the tests could not see is
+   * that a Q of 6 on a 1150 Hz bandpass throws away most of a 300 Hz square's
+   * energy: the recipe was giving back four times what the mix had granted it.
+   *
+   * Q is now 3.2 and the layers are hotter. The ring is still there — that is
+   * what makes it *theirs* — it just no longer costs 12 dB to have. The gap is
+   * asserted in `tools/audio.ts` against the render, not against these numbers.
    */
   'threat.enemyShot': {
     category: 'threat',
@@ -280,24 +389,24 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
         source: 'square',
         freq: 300,
         freqEnd: 130,
-        gain: 0.5,
+        gain: 0.98,
         attack: 0.001,
-        hold: 0.008,
-        release: 0.05,
+        hold: 0.016,
+        release: 0.085,
         filter: 'bandpass',
         filterFreq: 1150,
         filterFreqEnd: 700,
-        filterQ: 6,
+        filterQ: 3.2,
       }),
       layer({
         source: 'noise',
-        gain: 0.3,
+        gain: 0.66,
         attack: 0.001,
-        hold: 0.003,
-        release: 0.02,
+        hold: 0.007,
+        release: 0.035,
         filter: 'bandpass',
         filterFreq: 900,
-        filterQ: 1.2,
+        filterQ: 1,
       }),
     ],
   },
@@ -334,7 +443,292 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
     ],
   },
 
-  /** Held by the shield: bright, glassy, and rising — nothing got through. */
+  /**
+   * A boss arriving. Something very large spinning up: a slow sawtooth swell
+   * under moving air, then one clank at 900ms as it locks into place.
+   *
+   * Deliberately *not* a sting. docs/DESIGN.md's tone rule is deadpan
+   * institutional — this is heavy plant coming online, and the drama is that it
+   * takes over a second to do it while the player can already see what it is.
+   */
+  'threat.bossSpawn': {
+    category: 'threat',
+    priority: 82,
+    gain: 1,
+    minGapSec: 1,
+    maxVoices: 1,
+    pitchRotation: NO_ROTATION,
+    gainRotation: NO_ROTATION,
+    layers: [
+      layer({
+        source: 'sawtooth',
+        freq: 55,
+        freqEnd: 38,
+        gain: 0.5,
+        attack: 0.4,
+        hold: 0.4,
+        release: 0.45,
+        filter: 'lowpass',
+        filterFreq: 400,
+        filterFreqEnd: 180,
+        filterQ: 1,
+      }),
+      layer({
+        source: 'noise',
+        gain: 0.5,
+        attack: 0.5,
+        hold: 0.3,
+        release: 0.4,
+        filter: 'bandpass',
+        filterFreq: 400,
+        filterFreqEnd: 1600,
+        filterQ: 1.1,
+      }),
+      layer({
+        source: 'square',
+        freq: 240,
+        freqEnd: 165,
+        gain: 0.44,
+        delay: 0.9,
+        attack: 0.005,
+        hold: 0.06,
+        release: 0.3,
+        filter: 'bandpass',
+        filterFreq: 500,
+        filterQ: 3,
+      }),
+    ],
+  },
+
+  /**
+   * A boss changing phase. Two relays stepping *up* — the opposite motion to
+   * `alarm.shieldBroken`, which steps down — over a short low swell. Rising means
+   * "it just got worse" without needing a word for it.
+   */
+  'threat.bossPhase': {
+    category: 'threat',
+    priority: 84,
+    gain: 1,
+    minGapSec: 0.35,
+    maxVoices: 1,
+    pitchRotation: NO_ROTATION,
+    gainRotation: NO_ROTATION,
+    layers: [
+      layer({
+        source: 'square',
+        freq: 300,
+        freqEnd: 460,
+        gain: 0.46,
+        attack: 0.004,
+        hold: 0.05,
+        release: 0.1,
+        filter: 'bandpass',
+        filterFreq: 900,
+        filterFreqEnd: 1400,
+        filterQ: 4,
+      }),
+      layer({
+        source: 'square',
+        freq: 420,
+        freqEnd: 640,
+        gain: 0.5,
+        delay: 0.14,
+        attack: 0.004,
+        hold: 0.05,
+        release: 0.12,
+        filter: 'bandpass',
+        filterFreq: 1200,
+        filterFreqEnd: 1900,
+        filterQ: 4,
+      }),
+      layer({ source: 'sine', freq: 90, freqEnd: 70, gain: 0.44, attack: 0.006, hold: 0.08, release: 0.3 }),
+      // Banded rather than high-passed. As a highpass this layer carried the cue's
+      // brightness up to 4.6 kHz and parked it on top of `alarm.shieldAbsorb`,
+      // which means the opposite thing.
+      layer({
+        source: 'noise',
+        gain: 0.26,
+        attack: 0.002,
+        hold: 0.01,
+        release: 0.12,
+        filter: 'bandpass',
+        filterFreq: 2600,
+        filterQ: 1,
+      }),
+    ],
+  },
+
+  /**
+   * The hazard discharging — the thing the warning was warning about. A hard
+   * downward sweep: broadband at the top, collapsing to a thud. It is loud
+   * because it is the confirmation that the reaction window closed, and a player
+   * who dodged needs to hear that they dodged something real.
+   */
+  'threat.hazardFired': {
+    category: 'threat',
+    priority: 78,
+    gain: 1,
+    minGapSec: 0.25,
+    maxVoices: 2,
+    pitchRotation: [1, 0.97],
+    gainRotation: NO_ROTATION,
+    layers: [
+      layer({
+        source: 'noise',
+        gain: 0.72,
+        attack: 0.006,
+        hold: 0.05,
+        release: 0.4,
+        filter: 'bandpass',
+        filterFreq: 4000,
+        filterFreqEnd: 400,
+        filterQ: 1.2,
+      }),
+      layer({
+        source: 'sawtooth',
+        freq: 900,
+        freqEnd: 110,
+        gain: 0.42,
+        attack: 0.004,
+        hold: 0.04,
+        release: 0.36,
+        filter: 'lowpass',
+        filterFreq: 2600,
+        filterFreqEnd: 300,
+        filterQ: 1.4,
+      }),
+      layer({ source: 'sine', freq: 140, freqEnd: 45, gain: 0.46, attack: 0.004, hold: 0.05, release: 0.34 }),
+    ],
+  },
+
+  /**
+   * THE MOST IMPORTANT SOUND IN THE GAME.
+   *
+   * A hazard telegraph is a one-second reaction window. If a player misses it
+   * they take damage they had every chance to avoid, which is the single worst
+   * thing an action game can do to someone. So this cue is designed against
+   * *masking* rather than for character, and every choice below is a masking
+   * choice, verified by `npm run audio` rather than asserted:
+   *
+   *  1. THREE PULSES, not one tone. A rhythm is the only structure in this
+   *     library — nothing else in the game repeats — so it is identifiable from
+   *     its pattern before its timbre is even resolved. It also defeats masking
+   *     outright: masking is near-instantaneous, and combat transients are
+   *     sparse, so three separated pulses cannot all land under one.
+   *  2. 3.1–3.8 kHz, narrow and resonant. That is both the ear's most sensitive
+   *     region and the one place ordinary combat is quiet: the weapon sits under
+   *     3 kHz, enemy fire around 700–1200 Hz, impacts below 2 kHz. The harness
+   *     measures the margin in exactly these bands against a real combat bed.
+   *  3. RISING in pitch and level across the three pulses, so it reads as a
+   *     countdown running out rather than as a state that is merely true.
+   *  4. Ends at 974ms — the pulse train finishes as the hazard fires, so the
+   *     silence after the third pulse is itself information.
+   *  5. `maxVoices: 1` and the highest priority below the run ending. Two
+   *     overlapping warnings would destroy the rhythm that carries the meaning.
+   */
+  'alarm.hazardWarning': {
+    category: 'alarm',
+    priority: 96,
+    gain: 1,
+    minGapSec: 0.8,
+    maxVoices: 1,
+    pitchRotation: NO_ROTATION,
+    gainRotation: NO_ROTATION,
+    layers: [
+      layer({
+        source: 'square',
+        freq: 3150,
+        gain: 0.5,
+        attack: 0.004,
+        hold: 0.12,
+        release: 0.07,
+        filter: 'bandpass',
+        filterFreq: 3150,
+        filterQ: 7,
+      }),
+      layer({
+        source: 'noise',
+        gain: 0.18,
+        attack: 0.001,
+        hold: 0.004,
+        release: 0.02,
+        filter: 'highpass',
+        filterFreq: 3000,
+        filterQ: 0.7,
+      }),
+      layer({
+        source: 'square',
+        freq: 3150,
+        gain: 0.55,
+        delay: 0.33,
+        attack: 0.004,
+        hold: 0.12,
+        release: 0.07,
+        filter: 'bandpass',
+        filterFreq: 3150,
+        filterQ: 7,
+      }),
+      layer({
+        source: 'noise',
+        gain: 0.18,
+        delay: 0.33,
+        attack: 0.001,
+        hold: 0.004,
+        release: 0.02,
+        filter: 'highpass',
+        filterFreq: 3000,
+        filterQ: 0.7,
+      }),
+      layer({
+        source: 'square',
+        freq: 3750,
+        gain: 0.62,
+        delay: 0.66,
+        attack: 0.004,
+        hold: 0.17,
+        release: 0.14,
+        filter: 'bandpass',
+        filterFreq: 3750,
+        filterQ: 7,
+      }),
+      layer({
+        source: 'noise',
+        gain: 0.2,
+        delay: 0.66,
+        attack: 0.001,
+        hold: 0.005,
+        release: 0.025,
+        filter: 'highpass',
+        filterFreq: 3400,
+        filterQ: 0.7,
+      }),
+    ],
+  },
+
+  /**
+   * Held by the shield: bright, glassy, and rising — nothing got through.
+   *
+   * THE MOST-MOVED RECIPE IN THE LIBRARY, and worth explaining because the moves
+   * were not taste. It measured -35.7 LUFS and 39ms originally, which made the
+   * quietest, shortest cue in the game out of the one that means "you are fine".
+   * Level and length were fixed first. Then `src/audio/meaning.ts` classified it
+   * as the game's ONLY `stand-down` cue — the only sound whose message is the
+   * opposite of a warning — and the harness measured it against all seven `evade`
+   * cues *through a bed of real combat*. Five of the seven failed. The
+   * information distinguishing "shield held" from "shield gone" was standing
+   * 0.6 dB above ordinary combat: separable in a quiet room, inaudible in a fight.
+   *
+   * The cause was that it lived at 3–4 kHz, which is (a) crowded and (b) the band
+   * deliberately reserved for `alarm.hazardWarning`. Putting the "you are fine"
+   * cue inside the "you have one second" band is exactly backwards.
+   *
+   * So it moved up to a narrow glass ring at 5.8–7.6 kHz: clear of the warning's
+   * reserve, clear of every impact, and — the part that matters — in a region
+   * ordinary combat barely occupies, so the ring pokes through broadband gunfire
+   * instead of hiding in it. It stays SHORT (~115ms) on purpose: brevity is what
+   * separates it from the warning, the telegraph and a boss arriving, all of which
+   * are long. A quiet 1.5 kHz partial keeps it from being a whistle on a phone.
+   */
   'alarm.shieldAbsorb': {
     category: 'alarm',
     priority: 70,
@@ -346,16 +740,30 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
     layers: [
       layer({
         source: 'noise',
-        gain: 0.6,
+        gain: 0.5,
         attack: 0.001,
         hold: 0.006,
         release: 0.05,
         filter: 'bandpass',
-        filterFreq: 3000,
-        filterFreqEnd: 2200,
-        filterQ: 2.5,
+        filterFreq: 6200,
+        filterQ: 1.5,
       }),
-      layer({ source: 'triangle', freq: 760, freqEnd: 900, gain: 0.28, hold: 0.006, release: 0.04 }),
+      // The ring, rising: nothing got through.
+      layer({ source: 'triangle', freq: 5800, freqEnd: 6600, gain: 0.52, hold: 0.014, release: 0.1 }),
+      // An inharmonic partial. Glass, not a tuned note.
+      layer({ source: 'triangle', freq: 7600, freqEnd: 8400, gain: 0.3, hold: 0.01, release: 0.07 }),
+      layer({
+        source: 'square',
+        freq: 1500,
+        freqEnd: 1750,
+        gain: 0.22,
+        attack: 0.001,
+        hold: 0.01,
+        release: 0.05,
+        filter: 'bandpass',
+        filterFreq: 2400,
+        filterQ: 2,
+      }),
     ],
   },
 
@@ -363,6 +771,14 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
    * Two descending relays 90ms apart plus a crack — a system dropping offline.
    * The only two-stroke sound in the mix, so it cannot be confused with a hit.
    * `maxVoices: 1`: a doubled shield-break is a lie about what happened.
+   *
+   * DARKENED AND LENGTHENED, from a 6.5 kHz centroid down to the low mids. It was
+   * *brighter than `alarm.shieldAbsorb`*, which inverted the library's grammar:
+   * everywhere else, damage taken is dark and heavy (`alarm.hullHit`,
+   * `alarm.hullLost`) while deflections and rewards are bright. A failure that
+   * sounds lighter than the save is a legibility bug of the same kind as using the
+   * danger colour for something harmless — see docs/UI.md rule 3. Moving it down
+   * also opened 1.5 octaves between it and the cue it means the opposite of.
    */
   'alarm.shieldBroken': {
     category: 'alarm',
@@ -375,38 +791,39 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
     layers: [
       layer({
         source: 'noise',
-        gain: 0.55,
+        gain: 0.6,
         attack: 0.001,
-        hold: 0.008,
-        release: 0.06,
-        filter: 'highpass',
-        filterFreq: 2400,
-        filterQ: 0.8,
+        hold: 0.01,
+        release: 0.08,
+        filter: 'bandpass',
+        filterFreq: 1300,
+        filterFreqEnd: 800,
+        filterQ: 1,
       }),
       layer({
         source: 'square',
-        freq: 880,
-        gain: 0.42,
+        freq: 700,
+        gain: 0.46,
         attack: 0.002,
-        hold: 0.04,
-        release: 0.04,
+        hold: 0.045,
+        release: 0.06,
         filter: 'bandpass',
-        filterFreq: 1800,
+        filterFreq: 1100,
         filterQ: 2,
       }),
       layer({
         source: 'square',
-        freq: 620,
-        gain: 0.42,
+        freq: 480,
+        gain: 0.46,
         delay: 0.09,
         attack: 0.002,
-        hold: 0.04,
-        release: 0.05,
+        hold: 0.05,
+        release: 0.12,
         filter: 'bandpass',
-        filterFreq: 1500,
+        filterFreq: 850,
         filterQ: 2,
       }),
-      layer({ source: 'sine', freq: 120, freqEnd: 70, gain: 0.32, attack: 0.004, hold: 0.03, release: 0.18 }),
+      layer({ source: 'sine', freq: 150, freqEnd: 85, gain: 0.44, attack: 0.004, hold: 0.04, release: 0.26 }),
     ],
   },
 
@@ -426,15 +843,15 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
     layers: [
       layer({
         source: 'square',
-        freq: 150,
-        freqEnd: 60,
+        freq: 190,
+        freqEnd: 78,
         gain: 0.7,
         attack: 0.001,
         hold: 0.02,
-        release: 0.13,
+        release: 0.12,
         filter: 'lowpass',
-        filterFreq: 1200,
-        filterFreqEnd: 300,
+        filterFreq: 1100,
+        filterFreqEnd: 320,
         filterQ: 1,
       }),
       layer({
@@ -442,12 +859,13 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
         gain: 0.55,
         attack: 0.001,
         hold: 0.01,
-        release: 0.09,
+        release: 0.08,
         filter: 'lowpass',
-        filterFreq: 900,
+        filterFreq: 1200,
+        filterFreqEnd: 440,
         filterQ: 0.8,
       }),
-      layer({ source: 'triangle', freq: 420, freqEnd: 300, gain: 0.22, hold: 0.004, release: 0.06 }),
+      layer({ source: 'triangle', freq: 380, freqEnd: 270, gain: 0.3, hold: 0.006, release: 0.06 }),
     ],
   },
 
@@ -476,7 +894,7 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
         release: 0.6,
         filter: 'lowpass',
         filterFreq: 1700,
-        filterFreqEnd: 90,
+        filterFreqEnd: 170,
         filterQ: 0.9,
       }),
       layer({
@@ -494,15 +912,16 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
       layer({
         source: 'square',
         freq: 300,
-        freqEnd: 90,
-        gain: 0.28,
+        freqEnd: 130,
+        gain: 0.46,
         delay: 0.46,
         attack: 0.002,
-        hold: 0.03,
-        release: 0.12,
+        hold: 0.04,
+        release: 0.16,
         filter: 'bandpass',
         filterFreq: 700,
-        filterQ: 3,
+        filterFreqEnd: 420,
+        filterQ: 2,
       }),
     ],
   },
@@ -512,6 +931,12 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
    * counter incrementing, which is exactly what collecting scrap is to the
    * Salvage Division. The rotation climbs five semitones and resets, so a stream
    * of pickups reads as a total going up rather than as one sound repeating.
+   *
+   * "Pleasant, ignorable" turned out to mean "inaudible": it measured -46.2
+   * LUFS, the quietest thing in the library, three decibels below the weapon it
+   * is supposed to sit above. Same narrow-bandpass insertion loss as
+   * `threat.enemyShot`. Hotter layers and a gentler Q; still the second-quietest
+   * category, which is where it belongs.
    */
   'pickup.scrap': {
     category: 'pickup',
@@ -525,30 +950,37 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
       layer({
         source: 'square',
         freq: 1560,
-        gain: 0.32,
+        gain: 0.62,
         attack: 0.001,
-        hold: 0.008,
-        release: 0.03,
+        hold: 0.012,
+        release: 0.045,
         filter: 'bandpass',
         filterFreq: 2200,
-        filterQ: 4,
+        filterQ: 2.2,
       }),
       layer({
         source: 'square',
         freq: 2080,
-        gain: 0.24,
+        gain: 0.5,
         delay: 0.028,
         attack: 0.001,
-        hold: 0.006,
-        release: 0.025,
+        hold: 0.01,
+        release: 0.04,
         filter: 'bandpass',
         filterFreq: 2600,
-        filterQ: 4,
+        filterQ: 2.2,
       }),
     ],
   },
 
-  /** A form being stamped: click, contact, and a low thunk landing under it. */
+  /**
+   * A form being stamped: click, contact, and a low thunk landing under it.
+   *
+   * The thunk was doing 87% of the work and lives at 130 Hz, which a laptop
+   * speaker does not have. Rebalanced towards the contact so the cue still
+   * exists on the device most people will play on; the thunk is still there for
+   * anyone with headphones.
+   */
   'ui.confirm': {
     category: 'ui',
     priority: 85,
@@ -571,19 +1003,24 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
       layer({
         source: 'square',
         freq: 900,
-        gain: 0.32,
+        gain: 0.52,
         attack: 0.001,
-        hold: 0.012,
-        release: 0.03,
+        hold: 0.018,
+        release: 0.05,
         filter: 'bandpass',
         filterFreq: 1600,
-        filterQ: 3,
+        filterQ: 2,
       }),
-      layer({ source: 'sine', freq: 130, freqEnd: 110, gain: 0.42, delay: 0.02, hold: 0.02, release: 0.09 }),
+      layer({ source: 'sine', freq: 210, freqEnd: 165, gain: 0.38, delay: 0.02, hold: 0.02, release: 0.09 }),
     ],
   },
 
-  /** The same mechanism run backwards: down instead of up, no stamp. */
+  /**
+   * The same mechanism run backwards: down instead of up, no stamp.
+   *
+   * 94% of its energy was below 150 Hz, so on a laptop it was close to nothing.
+   * The relay carries it now and the settle sits an octave up.
+   */
   'ui.cancel': {
     category: 'ui',
     priority: 84,
@@ -597,15 +1034,15 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
         source: 'square',
         freq: 420,
         freqEnd: 300,
-        gain: 0.32,
+        gain: 0.6,
         attack: 0.002,
-        hold: 0.02,
-        release: 0.05,
+        hold: 0.028,
+        release: 0.07,
         filter: 'bandpass',
-        filterFreq: 900,
-        filterQ: 3,
+        filterFreq: 800,
+        filterQ: 1.8,
       }),
-      layer({ source: 'sine', freq: 110, freqEnd: 80, gain: 0.38, delay: 0.01, hold: 0.02, release: 0.08 }),
+      layer({ source: 'sine', freq: 210, freqEnd: 150, gain: 0.34, delay: 0.01, hold: 0.02, release: 0.08 }),
     ],
   },
 
@@ -613,6 +1050,11 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
    * A wave releasing: a distant door opening somewhere in the wreck. Low,
    * unhurried, and quiet enough to sit underneath combat — it is context, not a
    * cue to react to, so it must never compete with `threat`.
+   *
+   * It was 99% sub-150 Hz, which is another way of saying it did not exist on a
+   * laptop. "Distant" is a spectral shape, not an absence of midrange: the door
+   * now has a body you can hear on a small speaker while staying the darkest
+   * thing in the mix.
    */
   'ui.waveRelease': {
     category: 'ui',
@@ -623,30 +1065,88 @@ export const SOUNDS: Record<SoundId, SoundDef> = {
     pitchRotation: [1, 0.98, 1.02],
     gainRotation: NO_ROTATION,
     layers: [
-      layer({ source: 'sine', freq: 78, freqEnd: 52, gain: 0.6, attack: 0.004, hold: 0.06, release: 0.22 }),
+      layer({ source: 'sine', freq: 156, freqEnd: 104, gain: 0.5, attack: 0.004, hold: 0.06, release: 0.22 }),
       layer({
         source: 'noise',
-        gain: 0.28,
+        gain: 0.42,
         attack: 0.02,
         hold: 0.05,
         release: 0.2,
         filter: 'lowpass',
-        filterFreq: 700,
-        filterFreqEnd: 260,
+        filterFreq: 1500,
+        filterFreqEnd: 500,
         filterQ: 0.8,
       }),
       layer({
         source: 'square',
-        freq: 210,
-        freqEnd: 150,
-        gain: 0.16,
+        freq: 320,
+        freqEnd: 230,
+        gain: 0.4,
         delay: 0.05,
         attack: 0.002,
-        hold: 0.02,
-        release: 0.1,
+        hold: 0.03,
+        release: 0.14,
         filter: 'bandpass',
-        filterFreq: 600,
-        filterQ: 4,
+        filterFreq: 780,
+        filterQ: 2,
+      }),
+    ],
+  },
+
+  /**
+   * A stage cleared. Two relays stepping *down* onto a low settle — a docket
+   * closing, not a fanfare.
+   *
+   * The temptation here is a triumphant chord, and it is the wrong instinct twice
+   * over: the tone is institutional (docs/DESIGN.md — the company does not
+   * celebrate), and a bright rising cue would compete with `alarm.hazardWarning`
+   * for the one spectral region that has been reserved for it. Descending, dark
+   * and unhurried keeps that region clear.
+   */
+  'ui.stageCleared': {
+    category: 'ui',
+    priority: 46,
+    gain: 1,
+    minGapSec: 0.5,
+    maxVoices: 1,
+    pitchRotation: NO_ROTATION,
+    gainRotation: NO_ROTATION,
+    layers: [
+      layer({
+        source: 'square',
+        freq: 620,
+        freqEnd: 560,
+        gain: 0.34,
+        attack: 0.004,
+        hold: 0.07,
+        release: 0.12,
+        filter: 'bandpass',
+        filterFreq: 1200,
+        filterQ: 3,
+      }),
+      layer({
+        source: 'square',
+        freq: 460,
+        freqEnd: 420,
+        gain: 0.34,
+        delay: 0.18,
+        attack: 0.004,
+        hold: 0.08,
+        release: 0.16,
+        filter: 'bandpass',
+        filterFreq: 950,
+        filterQ: 3,
+      }),
+      layer({ source: 'sine', freq: 196, freqEnd: 168, gain: 0.42, delay: 0.32, attack: 0.008, hold: 0.12, release: 0.34 }),
+      layer({
+        source: 'noise',
+        gain: 0.24,
+        attack: 0.002,
+        hold: 0.006,
+        release: 0.05,
+        filter: 'highpass',
+        filterFreq: 2200,
+        filterQ: 0.7,
       }),
     ],
   },
@@ -704,5 +1204,16 @@ export const MAX_VOICES = 16
  */
 export const VOICE_PEAK_CEILING = 0.7
 
-/** Default master level. Low on purpose: 16 voices can sum. */
-export const DEFAULT_MASTER_VOLUME = 0.55
+/**
+ * Default master level.
+ *
+ * Raised from 0.55 on measured evidence, not on taste. At 0.55 the worst mix the
+ * simulation can legitimately produce — a 256-event tick landing inside ordinary
+ * combat — rendered at -6.3 dBTP, so a third of the output range was permanently
+ * unused and the game was quiet enough that a player would raise their system
+ * volume, which is precisely how a hazard warning becomes painful. At 0.7 that
+ * same worst case measures around -4 dBTP and every solo cue still clears the
+ * -1 dBTP delivery ceiling. `npm run audio` asserts both, so this number cannot
+ * drift upward unnoticed.
+ */
+export const DEFAULT_MASTER_VOLUME = 0.7

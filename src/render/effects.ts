@@ -20,6 +20,7 @@
  */
 
 import type { Explosion, ExplosionKind } from '../sim/entities'
+import { flashScale, pulse } from './intensity'
 import { Palette } from './palette'
 
 export type GlowTint = 'warm' | 'hot' | 'danger' | 'self' | 'elite' | 'smoke'
@@ -203,9 +204,15 @@ export function drawExplosions(
   ctx: CanvasRenderingContext2D,
   explosions: readonly Explosion[],
   alpha: number,
+  reduceFlashes = false,
 ): void {
   const count = Math.min(explosions.length, MAX_EXPLOSIONS_DRAWN)
   if (count === 0) return
+
+  // `reduceFlashes` scales the LIGHT and leaves the geometry alone: the shockwave
+  // ring and the debris still say where the blast was and how big it was, so the
+  // information survives at a third of the glare.
+  const glare = flashScale(reduceFlashes)
 
   ctx.globalCompositeOperation = 'lighter'
 
@@ -224,12 +231,19 @@ export function drawExplosions(
     // haze rather than a core that simply switches off. This is most of what
     // separates a kill from a hit: the hit is over in seven ticks, the kill leaves
     // something behind.
-    blitGlow(ctx, 'smoke', e.x, e.y, e.radius * (0.9 + 1.5 * easeOut(t)), (1 - t) * 0.17)
+    blitGlow(ctx, 'smoke', e.x, e.y, e.radius * (0.9 + 1.5 * easeOut(t)), (1 - t) * 0.17 * glare)
 
-    blitGlow(ctx, style.body, e.x, e.y, e.radius * style.glowReach * (0.5 + 0.7 * t), fade * 0.95)
+    blitGlow(
+      ctx,
+      style.body,
+      e.x,
+      e.y,
+      e.radius * style.glowReach * (0.5 + 0.7 * t),
+      fade * 0.95 * glare,
+    )
     // The core is the part that reads as "something was destroyed here", so it
     // is the brightest and the shortest-lived thing in the effect.
-    blitGlow(ctx, style.core, e.x, e.y, e.radius * (0.72 - 0.34 * t), fade * 1.1)
+    blitGlow(ctx, style.core, e.x, e.y, e.radius * (0.72 - 0.34 * t), fade * 1.1 * glare)
 
     // The stab of light at t=0. Bigger than the core and gone within three ticks,
     // so the blast has an *onset* — without it the first frame of an explosion
@@ -240,7 +254,10 @@ export function drawExplosions(
       // Tapers to exactly zero at the cutoff. A flash that ends while still at a
       // third of its brightness is a step change in luminance — small, but the
       // kind of thing rule 10 is about, and it also just looks like a bug.
-      blitGlow(ctx, 'hot', e.x, e.y, e.radius * (1.7 - 0.8 * f), 0.9 * f)
+      //
+      // This stab is the single brightest thing the renderer emits, so it is the
+      // effect `reduceFlashes` exists for.
+      blitGlow(ctx, 'hot', e.x, e.y, e.radius * (1.7 - 0.8 * f), 0.9 * f * glare)
     }
 
     // Shockwave: a thinning ring is what gives an explosion a readable size and
@@ -289,10 +306,18 @@ export function drawExplosions(
   ctx.globalCompositeOperation = 'source-over'
 }
 
-/** 0..1 flash intensity for an enemy's `hitFlashTicks`. Zero means no flash. */
-export function hitFlashStrength(ticks: number): number {
+/**
+ * 0..1 flash intensity for an enemy's `hitFlashTicks`. Zero means no flash.
+ *
+ * `reduceFlashes` is honoured HERE rather than at each drawing site, because this one
+ * number drives both halves of the effect — the additive bloom in this file and the
+ * whitened outline in shapes.ts. Attenuating only the bloom would leave an enemy
+ * flashing white at full strength with the setting on, which is the half-fix that
+ * makes a preference feel broken.
+ */
+export function hitFlashStrength(ticks: number, reduceFlashes = false): number {
   if (ticks <= 0) return 0
-  return Math.min(1, ticks / HIT_FLASH_TICKS)
+  return Math.min(1, ticks / HIT_FLASH_TICKS) * flashScale(reduceFlashes)
 }
 
 /** Shards thrown by one hit spark. Small on purpose — see `drawHitSpark`. */
@@ -321,16 +346,18 @@ export function drawHitSpark(
   t: number,
   power: number,
   seed: number,
+  reduceFlashes = false,
 ): void {
   if (!Number.isFinite(x) || !Number.isFinite(y)) return
   const clampedT = t < 0 ? 0 : t > 1 ? 1 : t
   const fade = (1 - clampedT) * (1 - clampedT)
   if (fade <= 0.02) return
 
+  const glare = flashScale(reduceFlashes)
   const scale = 4.5 + 6 * (power < 0 ? 0 : power > 1 ? 1 : power)
-  blitGlow(ctx, 'self', x, y, scale * (0.9 + 0.6 * clampedT), fade * 0.45)
+  blitGlow(ctx, 'self', x, y, scale * (0.9 + 0.6 * clampedT), fade * 0.45 * glare)
 
-  ctx.fillStyle = `rgba(223, 246, 251, ${(fade * 0.85).toFixed(3)})`
+  ctx.fillStyle = `rgba(223, 246, 251, ${(fade * 0.85 * glare).toFixed(3)})`
   for (let i = 0; i < SPARK_SHARDS; i++) {
     // Biased upward (the direction the player's fire travels) so the spatter reads
     // as material coming off the target rather than a symmetrical puff.
@@ -370,6 +397,7 @@ export function drawTelegraph(
   radius: number,
   ticksRemaining: number,
   total: number,
+  reduceFlashes = false,
 ): void {
   if (ticksRemaining <= 0 || total <= 0) return
   const raw = 1 - ticksRemaining / total
@@ -399,8 +427,19 @@ export function drawTelegraph(
 
   // Charge building at the muzzle end. Quadratic in p, so almost all of it arrives
   // in the last third of the windup — the "now" cue.
+  //
+  // Only the GLOW is attenuated by `reduceFlashes`. The arc above it is the timing
+  // information the whole mechanic exists to give, and dimming that would make an
+  // accessibility setting cost the player reaction time.
   ctx.globalCompositeOperation = 'lighter'
-  blitGlow(ctx, 'elite', x, y + radius * 0.85, radius * (0.3 + 0.55 * p), 0.08 + 0.42 * p * p)
+  blitGlow(
+    ctx,
+    'elite',
+    x,
+    y + radius * 0.85,
+    radius * (0.3 + 0.55 * p),
+    (0.08 + 0.42 * p * p) * flashScale(reduceFlashes),
+  )
   ctx.globalCompositeOperation = 'source-over'
 }
 
@@ -440,17 +479,20 @@ export function drawInvulnRing(
   radius: number,
   tick: number,
   ticksRemaining: number,
+  reduceFlashes = false,
 ): void {
   if (ticksRemaining <= 0) return
 
   const segments = 6
   const gap = 0.34
   const step = (Math.PI * 2) / segments
-  // ~0.9Hz breathing that never reaches zero opacity, per rule 10.
-  const pulse = 0.66 + 0.34 * Math.sin(tick * 0.095)
+  // Breathing below 1Hz that never reaches zero opacity, per rule 10. The rate is
+  // shared with every other pulse in the game and is measured in tests/render.test.ts
+  // rather than asserted by this comment.
+  const breath = pulse(tick, 0.5, reduceFlashes)
 
   ctx.strokeStyle = Palette.danger
-  ctx.globalAlpha = 0.55 * pulse
+  ctx.globalAlpha = 0.55 * breath
   ctx.lineWidth = 2
   for (let i = 0; i < segments; i++) {
     const start = i * step + gap / 2
@@ -461,6 +503,6 @@ export function drawInvulnRing(
   ctx.globalAlpha = 1
 
   ctx.globalCompositeOperation = 'lighter'
-  blitGlow(ctx, 'danger', x, y, radius * 1.7, 0.16 * pulse)
+  blitGlow(ctx, 'danger', x, y, radius * 1.7, 0.16 * breath * flashScale(reduceFlashes))
   ctx.globalCompositeOperation = 'source-over'
 }

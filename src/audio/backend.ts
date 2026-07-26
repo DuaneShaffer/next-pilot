@@ -108,6 +108,33 @@ export function layersDuration(layers: readonly Layer[]): number {
   return longest
 }
 
+/**
+ * The largest total layer gain that is ever live at one instant.
+ *
+ * An upper bound on what a voice can produce, and a deliberately loose one: it
+ * assumes every overlapping layer is simultaneously at its envelope peak with no
+ * filter loss, which never happens. `impact.bossKilled` bounds at 2.28 and
+ * measures -6 dBTP.
+ *
+ * Its job is to catch a recipe with a typo'd gain before anyone renders anything,
+ * not to guarantee headroom. The guarantee comes from the measured true peak in
+ * `npm run audio`. Summing every layer regardless of when it plays — which is what
+ * this replaced — treated a three-pulse warning as if all three pulses arrived at
+ * once, and would have rejected it.
+ */
+export function peakLayerGain(layers: readonly Layer[]): number {
+  let peak = 0
+  // Overlap is maximised at some layer's start, so only those instants matter.
+  for (const at of layers) {
+    let total = 0
+    for (const l of layers) {
+      if (l.delay <= at.delay && at.delay < layerDuration(l)) total += l.gain
+    }
+    peak = Math.max(peak, total)
+  }
+  return peak
+}
+
 /** A single sound instance, fully mixed and ready to be made audible. */
 export interface VoiceRequest {
   readonly id: SoundId

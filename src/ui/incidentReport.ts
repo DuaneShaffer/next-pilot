@@ -182,14 +182,14 @@ function drawStamp(ctx: CanvasRenderingContext2D, cx: number, cy: number): void 
     weight: 700,
     align: 'center',
     tracking: 2,
-    color: Palette.danger,
+    color: Palette.dangerText,
   })
   drawText(ctx, 'LOSS', 0, 15, {
     size: 15,
     weight: 700,
     align: 'center',
     tracking: 2,
-    color: Palette.danger,
+    color: Palette.dangerText,
   })
   ctx.globalAlpha = 1
   ctx.restore()
@@ -337,7 +337,7 @@ export function drawIncidentReport(
       size: 17,
       weight: 600,
       baseline: 'top',
-      color: extracted ? Palette.good : Palette.danger,
+      color: extracted ? Palette.good : Palette.dangerText,
     },
   )
   const tickOfLoss = incident?.tick ?? stats.tick

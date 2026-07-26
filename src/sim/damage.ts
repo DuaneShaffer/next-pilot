@@ -187,11 +187,24 @@ export function tickHullInvulnerability(hull: Hull): void {
  * lets callers skip the impact effects, so the player never sees a flash for a
  * hit that did nothing.
  */
+export interface DamageOptions {
+  /**
+   * Ignore the shield and go straight to integrity.
+   *
+   * Corrosion uses this, and it is the hazard's entire identity: a shield stops
+   * things that arrive, and rot does not arrive. Use it sparingly — a second source
+   * that bypasses shields makes the shield stat unpredictable, and an item that
+   * raises it stops being worth taking.
+   */
+  bypassShield?: boolean
+}
+
 export function applyHullDamage(
   ctx: DamageContext,
   amount: number,
   causeKind: DeathCauseKind,
   causeEnemyId: string | null,
+  options?: DamageOptions,
 ): boolean {
   if (ctx.runState !== 'active') return false
   if (ctx.hull.invulnTicks > 0) return false
@@ -202,7 +215,7 @@ export function applyHullDamage(
   // Shield absorbs first and does not regenerate in M1, so it reads as a one-off
   // buffer rather than as a slowly refilling second health bar.
   let remaining = amount
-  if (hull.shield > 0) {
+  if (hull.shield > 0 && options?.bypassShield !== true) {
     const absorbed = remaining < hull.shield ? remaining : hull.shield
     hull.shield -= absorbed
     remaining -= absorbed

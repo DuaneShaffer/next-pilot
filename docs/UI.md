@@ -76,6 +76,34 @@ player's hull is drawn last so it is never hidden.
 vision deficiency. Danger reads as red *and* has a distinct silhouette; a depleted meter reads
 as red *and* short.
 
+### That claim was aspirational until it was measured
+
+`tests/palette.test.ts` simulates protanopia, deuteranopia and tritanopia and requires ΔE00 ≥ 15
+between every pair of roles that must be told apart. **Nine of eighteen pairs failed.** The worst
+was not subtle:
+
+- **`caution` and `hostileElite` were byte-identical** — `#F5B942` both. Two roles this very table
+  distinguishes, written as the same six characters. No simulation was needed to see it; nobody
+  had looked.
+- **`self` / `hostile` at ΔE 12.8 for a deuteranope** — your own hull against enemy hulls, for ~5%
+  of men, in every frame of every run.
+- **`self` / `good` at 1.5 for a tritanope** — below the just-noticeable difference, on adjacent
+  rows of the hangar.
+
+Eight are fixed by recolouring. One is not fixable at all: **`danger` / `caution` differ almost
+entirely along the L–M axis, which is precisely the axis protanopes and deuteranopes lack**, and
+both read as yellow to a tritanope. A constrained search over the whole palette reached ΔE 12.8 at
+best, and only by costing `caution` its separation from `good`.
+
+That pair mattered in exactly one place — the integrity meter going critical, which used to be a
+hue swap *in place*: same bar, same segments, same position. For a deuteranope, the most important
+state change in the game was invisible. It now also cuts notches into its filled segments, which
+survives greyscale, all three simulations, and a photograph of a screen.
+
+So the rule stands, but the enforcement is the point: `REDUNDANT_CHANNEL` in that test file is a
+named tier, not an exemption, and landing a pair in it is a claim that something other than hue
+distinguishes them — with the place named, so it can be checked against a screenshot.
+
 **Check:** `danger` appears in the codebase only for enemy fire, incoming damage, lethal
 hazards, critical resource states, and death.
 
@@ -126,6 +154,20 @@ presses.
 `Font.minSizePx` is enforced in `font()`. Body text is ≥13px at virtual scale; labels ≥11px with
 wide tracking to stay legible small. All text meets WCAG AA contrast against the surface it sits
 on — `textFaint` is the floor and is reserved for genuinely non-essential text.
+
+**This rule was false for two milestones, and nobody could tell because nothing measured it.**
+`textFaint` was 2.51:1 on the panel — failing AA *and* the 3:1 large-text floor — while being
+drawn at 10px in the pause footer, and `danger` was 3.78:1 wherever it was used as text. Both
+are fixed: `textFaint` moved to `#707F94`, and `danger` split into a separate `dangerText` token
+because the mark and the glyph want opposite things (brightening the mark costs it the little
+separation it has from `caution`; darkening the text is what broke AA). `tests/palette.test.ts`
+now asserts every ratio against the surface each token is actually drawn on, so the claim above
+cannot quietly become fiction again.
+
+The honest consequence, worth knowing before designing another screen: **a three-step text ramp
+cannot survive AA on a dark panel.** `#707F94` is the lowest value that clears it, and that lands
+ΔE 4.7 from `textDim` — close enough that they stop reading as separate steps. Hierarchy below
+`textDim` has to come from size and weight, not a third grey.
 
 **Why:** the game is played in a browser window on unknown hardware, frequently a laptop at
 100% zoom. Text tuned on a 27″ monitor is unreadable there.

@@ -23,7 +23,15 @@ import { Rng } from '../core/rng'
 import { clamp, Playfield } from '../core/space'
 import { ENEMIES } from '../content/enemies'
 import { SECTOR_ONE } from '../content/sectors'
-import type { EnemyDef } from '../content/types'
+import type {
+  BossDef,
+  EnemyDef,
+  HazardDef,
+  HullDef,
+  RunDef,
+  RunStageDef,
+  SectorDef,
+} from '../content/types'
 import { circlesOverlap, segmentHitsCircle } from './collision'
 import {
   addShake,
@@ -56,22 +64,39 @@ import { addItem, resolveInventory, type InventoryResolution } from './inventory
 import { NO_EFFECTS, summariseEffects, volleyAngles, type EffectTotals } from './itemEffects'
 import { resolveAllStats, shotsPerSecond } from './stats'
 import {
+  CHOICE_TIMEOUT_TICKS,
+  HELD_CONFIRM_DWELL_TICKS,
   ITEM_CHOICE_WAVES,
   SHOP_WAVES,
   WORK_ORDER_WAVES,
   buildOffers,
+  buildRoutes,
   makeChoice,
   newCursor,
   shopCosts,
+  transitShopCosts,
   updateCursor,
   type ChoiceCursor,
 } from './progression'
-import type { InteractionDef, ItemDef } from '../content/types'
+import {
+  advanceBossPhase,
+  createBoss,
+  deriveBossDefs,
+  keepBossInPlay,
+  pickVariant,
+  type BossForm,
+} from './bosses'
+import { HazardField, spawnDebris } from './hazards'
+import type { EffectDef, InteractionDef, ItemDef, StatModifier } from '../content/types'
 import type {
   ActiveInteraction,
+  ChoiceResolveView,
+  HazardView,
   HeldItem,
   PendingChoice,
   ResolvedStats,
+  RouteReward,
+  StageView,
   Bullet,
   CosmeticState,
   EnemyInstance,
@@ -200,17 +225,48 @@ export interface RunContent {
    * certifications at all.
    */
   workOrders?: readonly string[]
+
+  /**
+   * The hull this run was issued.
+   *
+   * Optional, and omitting it means the stat table's bases — which is exactly what
+   * the Lien is, so a sim test that does not care about hulls gets the baseline ship
+   * without having to import one.
+   */
+  hull?: HullDef
+
+  /**
+   * The stage sequence. Defaults to a single sector-one stage with no boss.
+   *
+   * Injected for the same reason items are: a five-sector run is a *balance*
+   * decision, and no sim test should break because a sector was retuned.
+   */
+  run?: RunDef
+  sectors?: Readonly<Record<string, SectorDef>>
+  bosses?: Readonly<Record<string, BossDef>>
+  hazards?: Readonly<Record<string, HazardDef>>
 }
 
 export const EMPTY_CONTENT: RunContent = { items: {}, interactions: [] }
+
+/**
+ * The run a World flies when content supplies none: sector one, alone.
+ *
+ * This is what every pre-M5 test expects, and keeping it as the default is what let
+ * multi-sector runs land without re-recording the entire replay corpus for reasons
+ * unrelated to the change being tested.
+ */
+export const SINGLE_SECTOR_RUN: RunDef = {
+  id: 'single',
+  name: 'Shakedown',
+  stages: [{ sectorId: SECTOR_ONE.id, bossId: null, hazardIds: [] }],
+}
 
 /** The work orders every run has, certified or not. Mirrors BASE_POOL.workOrders. */
 export const BASE_WORK_ORDERS: readonly string[] = ['supply', 'hazard', 'repair']
 
 export class World implements WorldView {
   readonly seed: string
-  /** Which sector script this run is flying. One sector in M1. */
-  readonly sectorId: string
 
   runState: RunState = 'active'
   readonly hull: Hull
@@ -255,10 +311,20 @@ export class World implements WorldView {
   private readonly rngSpawn: Rng
   private readonly rngLoot: Rng
 
-  private readonly enemyDefs: Record<string, EnemyDef> = ENEMIES
-  private readonly spawner: Spawner
-  /** Earliest tick the sector may be declared complete. */
-  private readonly extractionTick: number
+  /**
+   * Enemy defs for this run — a COPY of the content table, not the table itself.
+   *
+   * Boss phases are compiled into derived defs and registered here at spawn time
+   * (see sim/bosses.ts). Registering them into the shared `ENEMIES` object would
+   * leak one run's boss into every other World in the process, which in a test file
+   * means the third test in a suite sees enemies the first one invented.
+   */
+  private readonly enemyDefs: Record<string, EnemyDef> = { ...ENEMIES }
+  private spawner: Spawner
+  /** Earliest tick the current stage may be declared complete. Absolute, not relative. */
+  private extractionTick: number
+  /** Tick the current stage began, so the wave script keeps sector-relative timing. */
+  private stageStartTick = 0
 
   /**
    * Fractional shot accumulator, in ticks.
@@ -311,6 +377,40 @@ export class World implements WorldView {
   private readonly rngOffers: Rng
   /** Item effect rolls. Separate so a repair roll cannot shift spawns or offers. */
   private readonly rngItems: Rng
+  /** Which approach options a transition offers. Its own stream — see the field docs above. */
+  private readonly rngRoute: Rng
+  /** Hazard positioning. Never `spawn`, or arming a hazard would shift every wave. */
+  private readonly rngHazard: Rng
+  /** Boss variant selection, so learning one form is not learning the fight. */
+  private readonly rngBoss: Rng
+
+  // --- the run -------------------------------------------------------------
+
+  private readonly runDef: RunDef
+  private readonly sectorDefs: Readonly<Record<string, SectorDef>>
+  private readonly bossDefs: Readonly<Record<string, BossDef>>
+  private readonly hazardDefs: Readonly<Record<string, HazardDef>>
+  private readonly hullDef: HullDef | null
+
+  private stageIndex = 0
+  private hazardField = new HazardField([])
+  private hazardViews: readonly HazardView[] = []
+  /** The live boss, if one has been spawned and is still alive. */
+  private bossRef: EnemyInstance | null = null
+  private bossSpawned = false
+
+  /**
+   * Where the run is in a between-sector transition.
+   *
+   * Modelled as a sequence of ordinary pending choices rather than as a `runState`,
+   * which was the first design and the wrong one: `pendingChoice` already pauses the
+   * simulation, the choice machinery already handles input edges and the held-trigger
+   * rescue, and a fourth run state would have meant every consumer of `runState`
+   * learning about a case that is really just "a card is open".
+   */
+  private transition: 'none' | 'route' | 'reward' | 'shop' = 'none'
+  /** Hazards the chosen route arms on arrival. */
+  private nextHazardIds: readonly string[] = []
 
   constructor(seed: string, content: RunContent = EMPTY_CONTENT) {
     this.seed = seed
@@ -319,10 +419,22 @@ export class World implements WorldView {
     this.rngLoot = Rng.fromSeed(seed, 'loot')
     this.rngOffers = Rng.fromSeed(seed, 'offers')
     this.rngItems = Rng.fromSeed(seed, 'items')
+    this.rngRoute = Rng.fromSeed(seed, 'route')
+    this.rngHazard = Rng.fromSeed(seed, 'hazard')
+    this.rngBoss = Rng.fromSeed(seed, 'boss')
 
-    this.sectorId = SECTOR_ONE.id
-    this.spawner = new Spawner(SECTOR_ONE, this.enemyDefs, this.rngSpawn)
-    this.extractionTick = Math.round(SECTOR_ONE.durationSeconds * TICK_HZ)
+    this.runDef = content.run ?? SINGLE_SECTOR_RUN
+    this.sectorDefs = content.sectors ?? { [SECTOR_ONE.id]: SECTOR_ONE }
+    this.bossDefs = content.bosses ?? {}
+    this.hazardDefs = content.hazards ?? {}
+    this.hullDef = content.hull ?? null
+
+    // The hull's modifiers must be folded BEFORE the hull entity is built, or a hull
+    // that raises maximum integrity would start the run at the base value and be
+    // topped up by the refresh — which reads as flying a damaged ship off the pad.
+    this.applyResolution(
+      resolveInventory([], content.items, content.interactions, this.hullSource()),
+    )
 
     const startX = Playfield.centerX
     const startY = Playfield.h - 110
@@ -340,11 +452,102 @@ export class World implements WorldView {
       invulnTicks: 0,
       radius: HULL_COLLISION_RADIUS,
     }
+
+    for (const defId of this.hullDef?.startingItems ?? []) this.acquire(defId)
+    // Credited directly rather than through `awardScrap`. A hull that states a
+    // starting balance must hand over exactly that number, not that number times
+    // whatever multiplier the hull itself grants.
+    this.stats.scrap += Math.max(0, Math.round(this.hullDef?.startingScrap ?? 0))
+
+    // Assigned in beginStage; declared definite here because TypeScript cannot see
+    // through the call, and a stage always exists — a run with no stages is rejected.
+    this.spawner = undefined as unknown as Spawner
+    this.extractionTick = 0
+    this.beginStage(0, [])
   }
 
-  /** Waves released so far. 0 before the first one. */
+  /** Waves released so far in the CURRENT sector. 0 before the first one. */
   get currentWaveIndex(): number {
     return this.spawner.waveIndex
+  }
+
+  /** Which sector script is being flown right now. */
+  get sectorId(): string {
+    return this.currentStage.sectorId
+  }
+
+  private get currentStage(): RunStageDef {
+    const stage = this.runDef.stages[this.stageIndex]
+    if (stage === undefined) {
+      throw new Error(`Run "${this.runDef.id}" has no stage ${this.stageIndex}`)
+    }
+    return stage
+  }
+
+  private get currentSector(): SectorDef {
+    const sector = this.sectorDefs[this.currentStage.sectorId]
+    if (sector === undefined) {
+      throw new Error(`Run "${this.runDef.id}" references unknown sector "${this.currentStage.sectorId}"`)
+    }
+    return sector
+  }
+
+  get stage(): StageView {
+    const stage = this.currentStage
+    const boss = stage.bossId === null ? null : this.bossDefs[stage.bossId]
+    return {
+      index: this.stageIndex,
+      count: this.runDef.stages.length,
+      sectorId: stage.sectorId,
+      sectorName: this.currentSector.name,
+      bossName: boss?.name ?? null,
+    }
+  }
+
+  get hullName(): string {
+    return this.hullDef?.name ?? 'Lien'
+  }
+
+  get boss(): EnemyInstance | null {
+    return this.bossRef
+  }
+
+  get hazards(): readonly HazardView[] {
+    return this.hazardViews
+  }
+
+  private hullSource(): { id: string; stats?: readonly StatModifier[]; effects?: readonly EffectDef[] } | undefined {
+    const hull = this.hullDef
+    if (hull === null) return undefined
+    return { id: hull.id, stats: hull.stats, ...(hull.effects ? { effects: hull.effects } : {}) }
+  }
+
+  /**
+   * Start a stage: its wave script, its clock, and whatever hazards the route armed.
+   *
+   * Wave numbering restarts per sector, which is what keeps the reward schedule in
+   * progression.ts (`ITEM_CHOICE_WAVES = [7, 20]`) meaning "twice per sector" rather
+   * than "twice per run" — two items a sector across five sectors is the ten-item
+   * run its docstring is written against.
+   */
+  private beginStage(index: number, hazardIds: readonly string[]): void {
+    this.stageIndex = index
+    const sector = this.currentSector
+    this.spawner = new Spawner(sector, this.enemyDefs, this.rngSpawn)
+    this.stageStartTick = this.stats.tick
+    this.extractionTick = this.stats.tick + Math.round(sector.durationSeconds * TICK_HZ)
+    this.rewardedWaves.clear()
+    this.stats.waveIndex = 0
+    this.bossSpawned = false
+    this.bossRef = null
+
+    const defs: HazardDef[] = []
+    for (const id of hazardIds) {
+      const def = this.hazardDefs[id]
+      if (def !== undefined) defs.push(def)
+    }
+    this.hazardField = new HazardField(defs)
+    this.hazardViews = this.hazardField.empty ? [] : this.hazardField.views()
   }
 
   /**
@@ -400,8 +603,13 @@ export class World implements WorldView {
     this.moveHull(input)
     this.updateWeapon(input)
 
+    this.updateHazards()
+
+    // Sector-relative. A wave written for t+45s must release 45 seconds into ITS
+    // sector, not 45 seconds into the run — the absolute tick would have made every
+    // sector after the first release its entire script on the first tick.
     const wavesBefore = this.spawner.waveIndex
-    this.spawner.update(this.stats.tick, this.enemies)
+    this.spawner.update(this.stats.tick - this.stageStartTick, this.enemies)
     this.stats.waveIndex = this.spawner.waveIndex
     this.maybeOpenChoice()
     // One event per wave, even if the script releases two on the same tick.
@@ -417,7 +625,7 @@ export class World implements WorldView {
     this.resolveContact()
 
     this.reapEnemies()
-    this.checkExtraction()
+    this.checkStageComplete()
 
     const live = this.playerBullets.length + this.enemyBullets.length
     if (live > this.stats.peakProjectiles) this.stats.peakProjectiles = live
@@ -464,6 +672,31 @@ export class World implements WorldView {
     return this.pendingChoice !== null && this.cursor.awaitingRelease
   }
 
+  /**
+   * What an open card will do on its own if the player does nothing.
+   *
+   * Derived here rather than in each screen so all four card kinds count the same
+   * thing down. See ChoiceResolveView for why this needs to be visible at all.
+   */
+  get choiceResolve(): ChoiceResolveView | null {
+    if (this.pendingChoice === null) return null
+    // The dwell only applies while the trigger has been held since the card opened.
+    // Once it has been released the card is in ordinary edge-triggered mode and the
+    // only automatic outcome left is the timeout.
+    if (this.cursor.awaitingRelease) {
+      return {
+        action: 'confirm',
+        ticksRemaining: Math.max(0, HELD_CONFIRM_DWELL_TICKS - this.cursor.openTicks),
+        totalTicks: HELD_CONFIRM_DWELL_TICKS,
+      }
+    }
+    return {
+      action: 'skip',
+      ticksRemaining: Math.max(0, CHOICE_TIMEOUT_TICKS - this.cursor.openTicks),
+      totalTicks: CHOICE_TIMEOUT_TICKS,
+    }
+  }
+
   /** Shots per second the HUD should display. Derived, never hand-written. */
   get shotsPerSecond(): number {
     return shotsPerSecond(this.currentFireInterval())
@@ -498,13 +731,24 @@ export class World implements WorldView {
   }
 
   /**
-   * Release retaliation fire when the hull is hurt.
+   * Release retaliation fire when the hull loses INTEGRITY.
    *
-   * Fires an even ring. NOTE the honest limitation the content author found: the
-   * only damage hook is after shields absorb, so a *larger* shield means strictly
-   * FEWER retaliation triggers. Pairing retaliation with a shield item would put an
-   * anti-synergy behind a synergy marker; expressing that combination needs an
-   * onShieldAbsorbed hook, which M3 does not have.
+   * Fires an even ring. Not on every hit — on every hit that got through the shield,
+   * which is what `retaliation-coil`'s card says ("Shields absorb first, so it fires
+   * only on integrity loss") and what the Cursed Hull / Heavy Shield anti-synergy in
+   * docs/DESIGN.md is reasoned from.
+   *
+   * THIS WAS A LIE FOR A WHILE. The caller fired it on any hit `applyHullDamage`
+   * accepted, including one a full shield absorbed entirely, so the item's own text
+   * and the simulation disagreed — and DESIGN.md's argument for why you should NOT
+   * pair this with a shield item was built on behaviour the game did not have. Found
+   * by a content author trying to write a second retaliation item and discovering
+   * that either one of them would have to be wrong on screen.
+   *
+   * The honest limitation that remains: a larger shield means strictly FEWER
+   * triggers, which is a real anti-synergy. Expressing the opposite — something that
+   * pays out *when the shield absorbs* — still needs an `onShieldAbsorbed` hook that
+   * does not exist.
    */
   private retaliate(): void {
     const count = this.effects.retaliateCount
@@ -525,16 +769,23 @@ export class World implements WorldView {
     }
   }
 
-  /** Recompute everything the inventory determines. Called only when it changes. */
-  private refreshInventory(): void {
-    const resolution: InventoryResolution = resolveInventory(
-      this.inventory,
-      this.content.items,
-      this.content.interactions,
-    )
+  /** Store a resolution. Split out so the constructor can fold the hull before a Hull exists. */
+  private applyResolution(resolution: InventoryResolution): void {
     this.resolvedStats = resolution.stats
     this.activeInteractions = resolution.active
     this.effects = summariseEffects(resolution.effects)
+  }
+
+  /** Recompute everything the inventory determines. Called only when it changes. */
+  private refreshInventory(): void {
+    this.applyResolution(
+      resolveInventory(
+        this.inventory,
+        this.content.items,
+        this.content.interactions,
+        this.hullSource(),
+      ),
+    )
 
     // Raising a maximum grants the difference rather than refilling the pool:
     // +20 max integrity on a hull at 30/100 should leave it at 50/120, not 120/120,
@@ -634,19 +885,39 @@ export class World implements WorldView {
     const choice = this.pendingChoice
     if (choice === null) return false
 
-    const optionCount = choice.kind === 'work-order' ? choice.workOrders.length : choice.offers.length
+    const optionCount =
+      choice.kind === 'work-order'
+        ? choice.workOrders.length
+        : choice.kind === 'route'
+          ? choice.routes.length
+          : choice.offers.length
     const action = updateCursor(this.cursor, input, optionCount)
 
     if (action.kind === 'skip') {
+      // Declining a ROUTE cannot mean "no route" — the run has to go somewhere. It
+      // takes the direct approach, which is always option 0 and always the free one,
+      // so skipping is the same as choosing the safe option rather than a way to get
+      // a reward without its hazard.
+      if (choice.kind === 'route') {
+        this.takeRoute(choice, 0)
+        return true
+      }
       this.pendingChoice = null
+      this.advanceTransition()
       return true
     }
     if (action.kind !== 'confirm') return true
 
+    if (choice.kind === 'route') {
+      this.takeRoute(choice, action.index)
+      return true
+    }
+
     if (choice.kind === 'work-order') {
-      // Work orders currently record the assignment without altering the sector;
-      // the routing they gate arrives with the second sector in M5. See
-      // WorkOrderKind in content/types.ts for why they live inside a sector now.
+      // Work orders currently record the assignment without altering the sector.
+      // The between-sector routing they were designed for now exists as the world
+      // map (see beginTransition); these in-sector ones are the M3 placement and
+      // still change nothing. See WorkOrderKind in content/types.ts.
       this.pendingChoice = null
       return true
     }
@@ -654,14 +925,40 @@ export class World implements WorldView {
     const offer = choice.offers[action.index]
     const cost = choice.costs[action.index] ?? 0
     if (!offer) return true
-    // Silently ignoring an unaffordable pick would read as the button not working.
-    // The UI greys it out; this is the backstop.
-    if (cost > this.stats.scrap) return true
+    if (cost > this.stats.scrap) {
+      // Silently ignoring an unaffordable pick would read as the button not working.
+      // The UI greys it out; this is the backstop, and a deliberate press stays a
+      // no-op so the player can navigate to something they can afford.
+      //
+      // But a confirm from the held-trigger DWELL cannot be left as a no-op. Nobody
+      // pressed anything, so nothing will change on the next tick either, and the card
+      // re-confirms and is re-refused every tick until the 20-second timeout — an
+      // unresponsive card, which is exactly the soft freeze the dwell was added to
+      // fix. A rescue that cannot complete has to decline instead of looping.
+      if (!action.fromDwell) return true
+      this.pendingChoice = null
+      this.advanceTransition()
+      return true
+    }
 
     this.stats.scrap -= cost
     this.acquire(offer.defId)
     this.pendingChoice = null
+    this.advanceTransition()
     return true
+  }
+
+  /** Commit to an approach: arm its hazards, pay its reward, move the sequence on. */
+  private takeRoute(choice: PendingChoice, index: number): void {
+    const route = choice.routes[index] ?? choice.routes[0]
+    this.pendingChoice = null
+    if (route === undefined) {
+      this.advanceTransition()
+      return
+    }
+    this.nextHazardIds = route.hazardIds
+    this.payRouteReward(route.reward)
+    this.advanceTransition()
   }
 
   // --- phases ---------------------------------------------------------------
@@ -675,7 +972,12 @@ export class World implements WorldView {
     // same number the sim uses.
     const base = this.resolvedStats.hullSpeed ?? HULL_SPEED
     const focus = this.resolvedStats.focusFactor ?? FOCUS_FACTOR
-    const speed = base * (input.focus ? focus : 1) * TICK_SECONDS
+    // An interdiction field slows the hull for the length of its active window. It
+    // multiplies the *resolved* speed rather than clamping it, so a mobility build
+    // still moves faster under interdiction than a stock hull does — a hazard that
+    // flattened every build to the same speed would make the stat worthless in any
+    // sector that has one.
+    const speed = base * this.hazardField.speedFactor() * (input.focus ? focus : 1) * TICK_SECONDS
     let dx = input.moveX
     let dy = input.moveY
     // Normalise diagonals so corner-running isn't 41% faster than straight lines.
@@ -767,6 +1069,24 @@ export class World implements WorldView {
     const hull = this.hull
     for (let i = 0; i < this.enemies.length; i++) {
       const e = this.enemies[i] as EnemyInstance
+
+      // Phase changes resolve BEFORE the def is read, so the whole tick — movement
+      // and weapon both — runs the pattern the health bar says it is running.
+      // Resolving it afterwards left the boss executing one last volley from the
+      // phase it had already announced leaving.
+      if (e.boss !== undefined) {
+        keepBossInPlay(e)
+        const phase = advanceBossPhase(e, this.enemyDefs)
+        if (phase !== null) {
+          this.emit({
+            kind: 'boss-phase',
+            bossId: e.boss.bossId,
+            phaseIndex: phase,
+            callout: e.boss.callouts[phase] ?? '',
+          })
+        }
+      }
+
       const def = this.enemyDefs[e.defId]
       // Unknown def ids are rejected when the Spawner is built, so this can only
       // be a programming error; drop the enemy rather than crash a live run.
@@ -897,7 +1217,7 @@ export class World implements WorldView {
       // A bullet that arrives during invulnerability passes straight through
       // instead of being consumed — otherwise getting hit would clear the screen
       // and the safest play would be to take a hit on purpose.
-      if (applyHullDamage(this, b.damage, 'enemy-fire', b.sourceDefId)) {
+      if (applyHullDamage(this, b.damage, b.causeKind, b.sourceDefId)) {
         b.alive = false
         this.onHullHit(b.damage, shieldBefore, integrityBefore)
         break
@@ -934,9 +1254,16 @@ export class World implements WorldView {
     for (let i = enemies.length - 1; i >= 0; i--) {
       const e = enemies[i] as EnemyInstance
       const destroyed = !e.alive
-      if (!destroyed && !isEnemyOutOfPlay(e)) continue
+      // A boss is never culled for leaving play — it comes back around instead (see
+      // keepBossInPlay). Without this exception a `swoop` phase would end the fight
+      // by diving off the bottom of the screen, a win condition nobody chose.
+      if (!destroyed && (e.boss !== undefined || !isEnemyOutOfPlay(e))) continue
 
       if (destroyed) {
+        if (e.boss !== undefined) {
+          this.emit({ kind: 'boss-killed', x: e.x, y: e.y, bossId: e.boss.bossId })
+          this.bossRef = null
+        }
         const def = this.enemyDefs[e.defId]
         if (def !== undefined) fireDeathBurst(e, def, this.enemyBullets)
         this.stats.kills++
@@ -992,7 +1319,7 @@ export class World implements WorldView {
     this.cosmetic.shake = shake < SHAKE_EPSILON ? 0 : shake
   }
 
-  private checkExtraction(): void {
+  private checkStageComplete(): void {
     // "The sector ends when the script is done and play is clear" — see
     // SectorDef.durationSeconds. All three conditions matter: ending on the timer
     // alone would strand a live wave, and ending on an empty field alone would
@@ -1001,10 +1328,229 @@ export class World implements WorldView {
     // A pilot who dies on the same tick the sector would have completed is dead,
     // not extracted. Losing outranks winning.
     if (this.runState !== 'active') return
+    if (this.pendingChoice !== null) return
     if (!this.spawner.finished) return
+    // The boss counts as a live enemy once it exists, so this also holds the stage
+    // open for the whole fight.
     if (this.enemies.length > 0) return
+
+    // Spawned only into an already-clear field. A boss arriving on top of the last
+    // wave of a sector is two fights at once, and neither is readable.
+    const bossId = this.currentStage.bossId
+    if (bossId !== null && !this.bossSpawned) {
+      this.spawnBoss(bossId)
+      return
+    }
     if (this.stats.tick < this.extractionTick) return
-    this.runState = 'extracted'
+
+    this.emit({ kind: 'stage-cleared', stageIndex: this.stageIndex })
+
+    if (this.stageIndex + 1 >= this.runDef.stages.length) {
+      this.runState = 'extracted'
+      return
+    }
+    this.beginTransition()
+  }
+
+  private spawnBoss(bossId: string): void {
+    const def = this.bossDefs[bossId]
+    // A stage naming a boss that does not exist must not silently become a stage
+    // with no boss — but it must not hang the run either. Log-free sims cannot warn,
+    // so the honest compromise is to proceed and let the content test catch it.
+    if (def === undefined) {
+      this.bossSpawned = true
+      return
+    }
+
+    const form: BossForm = pickVariant(def, this.rngBoss)
+    for (const phaseDef of deriveBossDefs(def, form)) {
+      this.enemyDefs[phaseDef.id] = phaseDef
+    }
+    // Uid from the spawner's sequence, so a boss and an enemy can never collide and
+    // make a piercing round skip one of them.
+    const instance = createBoss(def, form, this.enemyDefs, this.spawner.takeUid(), Playfield.centerX)
+    this.enemies.push(instance)
+    this.bossRef = instance
+    this.bossSpawned = true
+    this.emit({ kind: 'boss-spawned', bossId: def.id, name: form.name })
+  }
+
+  // --- between sectors -------------------------------------------------------
+
+  /**
+   * Open the world map, or skip straight past it when there is nothing to choose.
+   *
+   * A stage with no hazards has nothing to price a reward against, so `buildRoutes`
+   * returns nothing and the run goes directly to the shop. Showing a card whose only
+   * action is "continue" teaches the player that stopping is pointless — the same
+   * mistake the wave-8 shop made, where every visit was a forced decline.
+   */
+  private beginTransition(): void {
+    const nextIndex = this.stageIndex + 1
+    const nextStage = this.runDef.stages[nextIndex]
+    if (nextStage === undefined) {
+      this.runState = 'extracted'
+      return
+    }
+
+    const sector = this.sectorDefs[nextStage.sectorId]
+    const boss = nextStage.bossId === null ? null : this.bossDefs[nextStage.bossId]
+    const hazards: HazardDef[] = []
+    for (const id of nextStage.hazardIds) {
+      const def = this.hazardDefs[id]
+      if (def !== undefined) hazards.push(def)
+    }
+
+    const routes = buildRoutes(
+      this.rngRoute,
+      nextIndex,
+      sector?.name ?? nextStage.sectorId,
+      boss?.name ?? null,
+      hazards,
+      this.hull.maxIntegrity,
+    )
+
+    this.nextHazardIds = []
+    if (routes.length === 0) {
+      this.transition = 'route'
+      this.advanceTransition()
+      return
+    }
+    this.transition = 'route'
+    this.cursor = newCursor()
+    this.pendingChoice = makeChoice('route', [], [], [], routes)
+  }
+
+  /**
+   * Move to the next step of the between-sector sequence.
+   *
+   * route -> (item, if the route paid one) -> shop -> next sector. Each step is an
+   * ordinary pending choice, and a step with nothing to offer falls straight through
+   * rather than opening an empty card.
+   */
+  private advanceTransition(): void {
+    switch (this.transition) {
+      case 'route':
+        this.transition = 'reward'
+        if (this.openItemChoice('item', 0)) return
+        this.advanceTransition()
+        return
+
+      case 'reward':
+        this.transition = 'shop'
+        if (this.openItemChoice('shop', this.stageIndex + 1)) return
+        this.advanceTransition()
+        return
+
+      case 'shop':
+        this.transition = 'none'
+        this.beginStage(this.stageIndex + 1, this.nextHazardIds)
+        return
+
+      case 'none':
+        return
+    }
+  }
+
+  /**
+   * Whether the transition currently owes the pilot a free item.
+   *
+   * Cleared as it is read, so a route reward cannot be collected twice if the
+   * sequence is ever re-entered.
+   */
+  private routeItemOwed = false
+
+  /** Open an offer card. Returns false when there is nothing to show. */
+  private openItemChoice(kind: 'item' | 'shop', stageForPricing: number): boolean {
+    if (kind === 'item' && !this.routeItemOwed) return false
+    this.routeItemOwed = false
+
+    const offers = buildOffers(
+      this.rngOffers,
+      this.content.items,
+      this.content.interactions,
+      this.inventory,
+    )
+    if (offers.length === 0) return false
+
+    this.cursor = newCursor()
+    this.pendingChoice = makeChoice(
+      kind,
+      offers,
+      kind === 'shop' ? transitShopCosts(offers, this.content.items, stageForPricing) : offers.map(() => 0),
+    )
+    return true
+  }
+
+  /** Pay out a route's reward on arrival. Exactly what its `rewardText` promised. */
+  private payRouteReward(reward: RouteReward): void {
+    switch (reward.kind) {
+      case 'none':
+        return
+      case 'item':
+        this.routeItemOwed = true
+        return
+      case 'scrap':
+        // Credited flat, NOT through awardScrap: a card reading "+180 scrap" must pay
+        // 180, or a scrap-multiplier item silently makes the screen a liar.
+        this.stats.scrap += Math.max(0, Math.round(reward.amount))
+        return
+      case 'repair':
+        this.hull.integrity = clamp(
+          this.hull.integrity + Math.max(0, Math.round(reward.amount)),
+          1,
+          this.hull.maxIntegrity,
+        )
+        return
+    }
+  }
+
+  /**
+   * Run the hazard cycles and apply anything that fired this tick.
+   *
+   * Instant kinds act here; sustained kinds (`interdiction`, `blackout`) are read
+   * live from the field by whoever cares, so there is no window state to keep in
+   * sync with the field's own.
+   */
+  private updateHazards(): void {
+    if (this.hazardField.empty) return
+    for (const pulse of this.hazardField.update()) {
+      if (pulse.warning) {
+        this.emit({ kind: 'hazard-warning', hazardId: pulse.def.id })
+        continue
+      }
+      if (!pulse.fired) continue
+      this.emit({ kind: 'hazard-fired', hazardId: pulse.def.id })
+
+      switch (pulse.def.kind) {
+        case 'debris':
+          spawnDebris(this.enemyBullets, pulse.def, this.rngHazard)
+          break
+
+        case 'corrosion': {
+          const shieldBefore = this.hull.shield
+          const integrityBefore = this.hull.integrity
+          if (
+            applyHullDamage(this, pulse.def.damage, 'hazard', pulse.def.id, { bypassShield: true })
+          ) {
+            this.onHullHit(pulse.def.damage, shieldBefore, integrityBefore)
+          }
+          break
+        }
+
+        case 'interdiction':
+        case 'blackout':
+          // Conditions, not events. Their effect is the active window, read from
+          // `speedFactor()` and `blackout` while it lasts.
+          break
+      }
+    }
+    this.hazardViews = this.hazardField.views()
+  }
+
+  /** True while a blackout is dimming the playfield. Presentation only. */
+  get blackout(): boolean {
+    return this.hazardField.blackout
   }
 
   // --- helpers --------------------------------------------------------------
@@ -1024,9 +1570,10 @@ export class World implements WorldView {
     const hull = this.hull
     const fatal = this.runState === 'lost'
 
-    // Retaliation fires on any hull hit, fatal or not: dying to a ram and taking the
-    // rammer with you is the fantasy the item is selling.
-    this.retaliate()
+    // Only when integrity actually dropped — see `retaliate`. A fatal hit still
+    // qualifies (integrity fell to zero), so dying to a ram and taking the rammer
+    // with you, which is the fantasy the item sells, is preserved.
+    if (hull.integrity < integrityBefore) this.retaliate()
 
     // Reported at the hull rather than at the projectile: the damage number belongs
     // on the ship (UI rule 9), and both damage paths — fire and ramming — then

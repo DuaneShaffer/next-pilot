@@ -26,12 +26,17 @@ import { describe, expect, it } from 'vitest'
 import type { InputSnapshot } from '../src/core/input'
 import { packInput } from '../src/core/input'
 import type { ItemDef } from '../src/content/types'
+import { BOSSES } from '../src/content/bosses'
+import { HAZARDS } from '../src/content/hazards'
 import { INTERACTIONS } from '../src/content/interactions'
 import { ITEMS } from '../src/content/items'
+import { STANDARD_RUN } from '../src/content/runs'
+import { SECTORS } from '../src/content/sectors'
 import type {
   Hull,
   PendingChoice,
   PendingChoiceKind,
+  RouteOption,
   RunStats,
   WorldView,
 } from '../src/sim/entities'
@@ -51,6 +56,23 @@ import { hashWorld } from '../src/meta/snapshot'
 const LIVE_CONTENT: RunContent = { items: ITEMS, interactions: INTERACTIONS }
 
 /**
+ * The shipped five-sector run, wired exactly as `src/main.ts` wires it.
+ *
+ * Needed by any test whose subject is a *run* rather than a sector: route cards
+ * only exist at a seam, and the reward schedule that a build-focused probe depends
+ * on restarts per sector, so a single-sector World offers a third of the screens
+ * the real game does.
+ */
+const FIVE_SECTOR_CONTENT: RunContent = {
+  items: ITEMS,
+  interactions: INTERACTIONS,
+  run: STANDARD_RUN,
+  sectors: Object.fromEntries(SECTORS.map((sector) => [sector.id, sector])),
+  bosses: BOSSES,
+  hazards: HAZARDS,
+}
+
+/**
  * A full sector at 60Hz plus slack.
  *
  * Long enough that every scheduled reward wave is reached (item choices after
@@ -58,6 +80,15 @@ const LIVE_CONTENT: RunContent = { items: ITEMS, interactions: INTERACTIONS }
  * get exercised at all.
  */
 const FULL_RUN_TICKS = 240 * 60
+
+/**
+ * A whole five-sector run at 60Hz plus slack.
+ *
+ * 930 seconds of authored sector time plus five boss fights, each of which holds
+ * its stage open until the boss is dead. 1,500s clears the longest clear observed
+ * in a sweep with room to spare.
+ */
+const FIVE_SECTOR_TICKS = 1500 * 60
 
 // ---------------------------------------------------------------------------
 // harness
@@ -343,20 +374,217 @@ describe('the build-focused policy acquires its target build', () => {
     expect(runsHoldingBoth).toBeGreaterThan(20)
   })
 
+  /**
+   * Offer slots a probe needs before "did it assemble the pair" is a measurement.
+   *
+   * Not a round number picked to pass. With a 40-item pool the two targets carry 8
+   * and 5 of 239 total weight, so an offer slot shows a specific target about 3% of
+   * the time and the pair needs both to appear at least once. Below ~20 slots the
+   * pair is a coin flip on the offer RNG and the probe is measuring the pool rather
+   * than the build; a five-sector run supplies ~36. Asserted separately from the
+   * outcome so that if the reward schedule is ever cut, THIS fails with a legible
+   * reason instead of the pair count mysteriously sagging.
+   */
+  const MIN_OFFER_SLOTS_PER_RUN = 20
+
   it('assembles its real declared build often enough to measure a delta', () => {
-    // Against the live content table, so a weight change that makes the shipped
-    // target build unreachable shows up here rather than as a quiet zero in a report.
+    /**
+     * THE INSTRUMENT WAS MEASURING THE WRONG THING, and the zero it produced was a
+     * true finding about the probe rather than about the items.
+     *
+     * This test used to drive `LIVE_CONTENT`, which has no `run` and therefore flies
+     * `SINGLE_SECTOR_RUN` — one sector, four reward screens, twelve offer slots. That
+     * was the whole game when it was written. It is now one fifth of it. Meanwhile the
+     * pool grew from 14 items to 40, so a specific target's share of an offer slot
+     * fell by roughly two thirds at the same moment the number of slots stopped
+     * growing with the run.
+     *
+     * Measured, on 40 seeds each:
+     *
+     *   single sector   12.0 offer slots/run, 0.68 target offers/run, pair in  0.0%
+     *   five sectors    36.1 offer slots/run, 1.98 target offers/run, pair in 42.5%
+     *
+     * So the floor was above the ceiling: the old assertion demanded >10% from a
+     * configuration whose best case was around 7%. Lowering the threshold would have
+     * kept a probe that assembles its build in one run in fourteen, which cannot
+     * support a synergy delta at any sample size a sweep can afford. Driving the real
+     * run fixes the probe instead, and it is also what the probe is now FOR — the
+     * sweeps this test guards are five-sector sweeps.
+     *
+     * Still against the live tables, deliberately: a weight change that makes the
+     * shipped target build unreachable must show up here rather than as a quiet zero
+     * in a report.
+     */
     let runsHoldingBoth = 0
+    let offerSlots = 0
     const runs = 40
     for (let i = 0; i < runs; i++) {
       const seed = `L1VEBU1LD${String(i).padStart(3, '0')}`
-      const run = play(BOTS['build-focused'].create(seed), seed, LIVE_CONTENT)
+      const run = play(
+        BOTS['build-focused'].create(seed),
+        seed,
+        FIVE_SECTOR_CONTENT,
+        FIVE_SECTOR_TICKS,
+      )
+      for (const choice of run.choices) offerSlots += choice.offeredIds.length
       if (BUILD_FOCUSED_TARGET.every((id) => run.finalInventory.includes(id))) runsHoldingBoth++
     }
-    // Deliberately a floor, not a target. `warhead-fragments` needs two specific
-    // draws out of a 14-item weighted pool across six screens; if this ever falls to
-    // zero the probe has stopped measuring anything and the report must say so.
-    expect(runsHoldingBoth).toBeGreaterThan(runs * 0.1)
+
+    // The precondition, asserted before the outcome so a failure says which broke.
+    expect(
+      offerSlots / runs,
+      'too few offer slots per run for the pair to be reachable — the probe cannot measure a synergy from this',
+    ).toBeGreaterThan(MIN_OFFER_SLOTS_PER_RUN)
+
+    // A floor, not a target: 42.5% measured, and a binomial 95% interval at n=40 is
+    // roughly +/-15pp, so 20% is comfortably below the noise band and still far above
+    // the "one run in fourteen" the old configuration could manage.
+    expect(runsHoldingBoth).toBeGreaterThan(runs * 0.2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 3b. the world map
+// ---------------------------------------------------------------------------
+
+/** A route card as the sim builds one: index 0 free, the rest priced in hazards. */
+function routeCard(rewards: readonly RouteOption['reward'][]): PendingChoice {
+  return {
+    kind: 'route',
+    offers: [],
+    costs: [],
+    workOrders: [],
+    routes: rewards.map((reward, index) => ({
+      stageIndex: 1,
+      // Matches the titles progression.ts authors, so a reader of this fixture is
+      // looking at the same card the sim builds. No policy reads it — `chooseRoute`
+      // scores the reward and the hull's damage, never the title.
+      name: index === 0 ? 'DIRECT APPROACH' : index === 1 ? 'CACHE RECOVERY' : 'SALVAGE DETOUR',
+      sectorName: 'The Tally',
+      bossName: 'The Auditor',
+      hazards: index === 0 ? [] : [{ name: 'Convoy Wake', description: 'Debris.' }],
+      hazardIds: index === 0 ? [] : ['convoy-wake'],
+      reward,
+      rewardText: `option ${index}`,
+    })),
+  }
+}
+
+describe('policies resolve the world map', () => {
+  it('every policy resolves a route card inside the navigation budget', () => {
+    // THE BUG THIS PINS. `ChoiceResolver` counted a card's options as `offers.length`
+    // for every kind except work-order, and a route card carries its options in
+    // `routes` with `offers` empty — so every policy saw a zero-option screen and
+    // took the skip branch. Nothing stalled and nothing crashed, because the sim
+    // resolves a skipped route as "take the direct approach". The world map simply
+    // never happened, in every run, for every policy, silently.
+    const card = routeCard([{ kind: 'none' }, { kind: 'item' }, { kind: 'scrap', amount: 180 }])
+    for (const name of BOT_NAMES) {
+      const view = fakeView(card)
+      const inputs = pressesAgainst(BOTS[name].create('R0UTECARD123'), view, 12)
+      const acted = inputs.findIndex((input) => input.fire || input.special)
+      expect(acted, `${name} never acted on a route card`).toBeGreaterThanOrEqual(0)
+      expect(acted + 1, `${name} took too long on a route card`).toBeLessThanOrEqual(
+        MAX_CHOICE_RESOLUTION_TICKS,
+      )
+      // Confirm, not skip: skipping a route is the sim's fallback to the direct
+      // approach, and a policy that reaches option 0 by skipping is indistinguishable
+      // from one that cannot read the card at all.
+      expect(inputs.some((input) => input.fire), `${name} skipped rather than chose`).toBe(true)
+    }
+  })
+
+  it('a rewarding policy navigates to the paying option rather than confirming index 0', () => {
+    // The cursor is mirrored, not read — `ChoiceCursor` is not on WorldView — so an
+    // off-by-one here would take the wrong route while every other test stayed green.
+    const card = routeCard([{ kind: 'none' }, { kind: 'none' }, { kind: 'item' }])
+    const inputs = pressesAgainst(BOTS.greedy.create('R3WARD123456'), fakeView(card), 8)
+    const steps = inputs.filter((input) => input.moveX > 0).length
+    expect(steps, 'greedy did not walk the cursor to option 2').toBe(2)
+  })
+
+  it('a direct policy stays on the free approach however well the others pay', () => {
+    const card = routeCard([
+      { kind: 'none' },
+      { kind: 'item' },
+      { kind: 'scrap', amount: 9999 },
+    ])
+    for (const name of ['dodger', 'aggressor'] as BotName[]) {
+      const inputs = pressesAgainst(BOTS[name].create('D1RECT123456'), fakeView(card), 8)
+      expect(inputs.some((input) => input.moveX !== 0), `${name} left the direct approach`).toBe(
+        false,
+      )
+    }
+  })
+
+  it('values a repair route by the damage actually taken, not by its face value', () => {
+    // A full repair on a full hull is worth nothing, and a probe that took a
+    // sector-long hazard for it would make the world map look better than it is.
+    const card = routeCard([{ kind: 'none' }, { kind: 'repair', amount: 200 }])
+    const healthy = pressesAgainst(BOTS.greedy.create('HEALTHY23456'), fakeView(card), 8)
+    expect(healthy.some((input) => input.moveX !== 0)).toBe(false)
+
+    const hurt = pressesAgainst(
+      BOTS.greedy.create('HURT12345678'),
+      fakeView(card, { hull: { ...fakeHull(), integrity: 12 } }),
+      8,
+    )
+    expect(hurt.filter((input) => input.moveX > 0).length).toBe(1)
+  })
+
+  it('a five-sector run crosses every seam without a policy stalling on it', () => {
+    // The integration check behind the unit tests above: a policy that cannot resolve
+    // a route card does not crash, it silently caps the run at the first seam, and
+    // every per-sector number a sweep produces afterwards is garbage.
+    for (const name of BOT_NAMES) {
+      const seed = 'SEAMS1234567'
+      const world = new World(seed, FIVE_SECTOR_CONTENT)
+      const view: WorldView = world
+      const policy = BOTS[name].create(seed)
+      let ticks = 0
+      let routeCards = 0
+      let sawRoute = false
+      while (view.runState === 'active' && ticks < FIVE_SECTOR_TICKS) {
+        world.tick(policy(view))
+        ticks++
+        const open = view.pendingChoice?.kind === 'route'
+        if (open && !sawRoute) routeCards++
+        sawRoute = open
+        // A route card resolved by the sim's 60-second backstop rather than by the
+        // policy is the failure this catches, and it looks like a long run, not a
+        // stuck one.
+        expect(view.pendingChoice === null || ticks < FIVE_SECTOR_TICKS).toBe(true)
+      }
+      expect(view.runState, `${name} was still active at the cap`).not.toBe('active')
+    }
+  })
+
+  it('accepting a hazard is a real behavioural difference, not a label', () => {
+    // If `rewarding` and `direct` produced the same runs the route styles would be
+    // decoration, and the sweep's risk-appetite column would be measuring nothing.
+    const seed = 'HAZARDD1FF12'
+    const armed = (routeStyle: 'direct' | 'rewarding'): number => {
+      let sectorsWithHazards = 0
+      for (let i = 0; i < 8; i++) {
+        const runSeed = `${seed}${i}`
+        const world = new World(runSeed, FIVE_SECTOR_CONTENT)
+        const view: WorldView = world
+        const policy = BOTS.aggressor.create(runSeed, { routeStyle })
+        let ticks = 0
+        let stage = 0
+        while (view.runState === 'active' && ticks < FIVE_SECTOR_TICKS) {
+          world.tick(policy(view))
+          ticks++
+          if (view.stage.index !== stage) {
+            stage = view.stage.index
+            if (view.hazards.length > 0) sectorsWithHazards++
+          }
+        }
+      }
+      return sectorsWithHazards
+    }
+    expect(armed('direct')).toBe(0)
+    expect(armed('rewarding')).toBeGreaterThan(0)
   })
 })
 
@@ -398,6 +626,13 @@ function fakeView(choice: PendingChoice | null, overrides: Partial<WorldView> = 
   return {
     seed: 'FAKEV13W2345',
     runState: 'active',
+    // M5 view fields. Fixtures state them explicitly rather than spreading a shared
+    // default, so adding a WorldView field fails here and someone decides what the
+    // fixture should say instead of inheriting a silent placeholder.
+    stage: { index: 0, count: 1, sectorId: 'debris-shelf', sectorName: 'Debris Shelf', bossName: null },
+    hullName: 'Lien',
+    boss: null,
+    hazards: [],
     hull: fakeHull(),
     playerBullets: [],
     enemyBullets: [],
@@ -412,6 +647,11 @@ function fakeView(choice: PendingChoice | null, overrides: Partial<WorldView> = 
     activeInteractions: [],
     resolvedStats: {},
     pendingChoice: choice,
+    // Null, not a countdown: these fixtures test what a POLICY does with a card, and
+    // a live auto-resolve timer would mean the card resolved itself while the policy
+    // was still deciding — which is the sim's rescue for a human who walked away, not
+    // a path any bot should ever reach.
+    choiceResolve: null,
     ...overrides,
   }
 }
@@ -425,9 +665,13 @@ function pressesAgainst(policy: BotPolicy, view: WorldView, ticks: number): Inpu
 
 describe('degenerate choice screens neither crash nor stall', () => {
   const empties: Array<[string, PendingChoice]> = [
-    ['an item screen with no offers', { kind: 'item', offers: [], costs: [], workOrders: [] }],
-    ['a shop with no offers', { kind: 'shop', offers: [], costs: [], workOrders: [] }],
-    ['a work order with no options', { kind: 'work-order', offers: [], costs: [], workOrders: [] }],
+    ['an item screen with no offers', { kind: 'item', offers: [], costs: [], workOrders: [], routes: [] }],
+    ['a shop with no offers', { kind: 'shop', offers: [], costs: [], workOrders: [], routes: [] }],
+    ['a work order with no options', { kind: 'work-order', offers: [], costs: [], workOrders: [], routes: [] }],
+    // The sim never builds one — `beginTransition` skips the card when there are no
+    // hazards to trade against — but a policy must not be the thing that discovers
+    // it did. A zero-option route is the one card whose skip is genuinely correct.
+    ['a route card with no approaches', { kind: 'route', offers: [], costs: [], workOrders: [], routes: [] }],
   ]
 
   it.each(empties)('every policy skips %s', (_label, choice) => {
@@ -454,6 +698,7 @@ describe('degenerate choice screens neither crash nor stall', () => {
       ],
       costs: [999, 999],
       workOrders: [],
+      routes: [],
     }
     for (const name of BOT_NAMES) {
       const view = fakeView(choice, { stats: fakeStats({ scrap: 3 }) })
@@ -477,6 +722,7 @@ describe('degenerate choice screens neither crash nor stall', () => {
       ],
       costs: [0, 0, 0],
       workOrders: [],
+      routes: [],
     }
     for (const name of BOT_NAMES) {
       const frozen = fakeView(choice, { freezeTicks: 4 })
@@ -502,6 +748,7 @@ describe('degenerate choice screens neither crash nor stall', () => {
       ],
       costs: [0, 0, 0],
       workOrders: [],
+      routes: [],
     }
     for (const name of BOT_NAMES) {
       const view = fakeView(choice)

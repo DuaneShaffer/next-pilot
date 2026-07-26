@@ -38,8 +38,24 @@ normalises with `sqrt` rather than `atan2` partly to reduce the exposure. If lit
 determinism is ever needed (verified leaderboards across browsers, say), the fix is a fixed-point
 trig lookup table, not more testing.
 
-Existing streams: `spawn`, `loot`, `cosmetic:starfield`. A new random concern gets a new stream;
-reusing one for a second purpose shifts every downstream roll and breaks recorded replays.
+Existing streams, and what each one is for:
+
+| Stream | Draws |
+| --- | --- |
+| `spawn` | Formation positions and jitter |
+| `loot` | Item drops |
+| `offers` | Which items a choice screen shows, and shop stock |
+| `items` | Item effect rolls (a chance-based repair, say) |
+| `route` | Which approaches the world map offers between sectors |
+| `hazard` | Where a hazard's debris falls |
+| `boss` | Which seeded variant of a boss a run faces |
+| `cosmetic:starfield` | Parallax stars |
+| `bot:random`, `test:inputs` | Verification harness only; never in a real run |
+
+A new random concern gets a new stream; reusing one for a second purpose shifts every downstream
+roll and breaks recorded replays. The rule earns its keep constantly — `route` and `hazard` are
+separate for exactly this reason, and sharing them would have made a hazard's debris pattern
+depend on how many route cards had been shown.
 
 **3. The sim never touches the outside world.** `src/sim/**` imports nothing from `src/render/**`,
 `src/ui/**`, the DOM, or any timing API. It receives an `InputSnapshot` per tick and nothing else.
@@ -106,7 +122,7 @@ roguelike faster than an update erasing progress.
 - Sim tick: < 2ms at p99 with 2,000 live projectiles.
 - Frame: < 8ms at p99, leaving headroom inside the 16.6ms budget.
 - `droppedTicks` must be 0.
-- Bundle: **< 75KB transferred** (gzipped). Currently ~50KB. A 400KB uncompressed cap
+- Bundle: **< 110KB transferred** (gzipped). Currently ~78KB. A 400KB uncompressed cap
   exists only as a runaway backstop.
 
 **What 2,000 projectiles actually is:** a headroom target for content that does not exist yet, not a
@@ -122,13 +138,35 @@ by twelve is not a p99. `tools/perf.mjs` prints timings at `ff≠1` but *refuses
 dense play honestly means `--seconds=180`. This is the same shape of mistake as reading dropped ticks
 around a screenshot.
 
-**On the bundle budget:** this was `du -sb dist` against 150KB, set at M0 when the bundle
-was 15KB, and it failed at M4 on 169KB of disk. Disk size was never the constraint —
+**On the bundle budget**, which has now been changed twice for two entirely different
+reasons — worth separating, because one of them is the kind of move that is usually an
+excuse:
+
+*At M4, the metric was wrong.* It was `du -sb dist` against 150KB, set at M0 when the
+bundle was 15KB, and it failed on 169KB of disk. Disk size was never the constraint —
 GitHub Pages serves gzip, and what matters for a game someone clicks a link to is what
-they actually download, which is ~50KB. Raising the old number would have been moving a
-goalpost; changing the metric fixed a measurement that was wrong from the start. The
-uncompressed cap survives as a backstop for something that compresses well and still
-bloats parse time, like an accidentally inlined asset.
+they actually download, which was ~50KB. Raising the old number would have been moving
+a goalpost; changing the metric fixed a measurement that was wrong from the start.
+
+*At M5, the number was wrong.* 75KB was sized against one sector and 14 items. The
+milestone shipped five sectors, 40 items, 28 interactions, five bosses with seeded
+variants, five hulls, hazards, a world map, and the rendering for all of it — and came
+out at 78KB. Roughly 11KB of transfer for roughly 4x the game, which is what "no binary
+assets, all geometry code-defined, all audio synthesised" buys. The budget did not fail;
+what it was sized against stopped existing. 110KB is ~40% headroom, enough to carry M6
+and M7 without moving again.
+
+The honest risk in writing that paragraph is that it is also exactly what someone dodging
+their own budget would write. The guard against it: a budget only ever raised is a
+comment, not a budget, so the CI note commits the next move to being a code-split rather
+than a bigger number. The uncompressed cap survives unchanged as a backstop for something
+that compresses well and still bloats parse time, like an accidentally inlined asset.
+
+One thing genuinely does ship that arguably should not: `src/sim/bots.ts`, the autopilot,
+reachable in production via `?autopilot=`. It stays because the screenshot oracle drives
+the *built* app through it, and weakening the only instrument that reads the UI to save a
+few KB is a bad trade at this size. If the budget ever binds, this is the first thing to
+split out — along with a dev-only build for the harness.
 
 **Where each is enforced, and why it matters:**
 

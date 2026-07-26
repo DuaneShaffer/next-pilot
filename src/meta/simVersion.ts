@@ -41,8 +41,50 @@ import { hashWorld } from './snapshot'
  *
  * Bump when sim behaviour changes, and add the new canonical hash to the history in
  * `tests/simVersion.test.ts` in the same commit.
+ *
+ * ## History
+ *
+ * **2 — M5, the multi-sector run.** The textbook dangerous case: every M4 replay
+ * still decodes perfectly and plays back a run nobody flew.
+ *
+ *   - A run is five sectors, not one. The same seed and the same inputs that ended
+ *     in an extraction after sector one now cross a seam into The Tally and keep
+ *     going. Nothing about that fails — the input log is still valid, the ticks
+ *     still line up, and the viewer watches a plausible run that is not the one
+ *     that was shared.
+ *   - Wave numbering restarts per sector, so the reward and shop schedule fires
+ *     five times instead of once. An M4 replay's inputs land on cards that were
+ *     never open when it was recorded, which redirects the run from the first seam
+ *     onward.
+ *   - `route`, `hazard` and `boss` are new named streams. They do not shift the
+ *     existing streams (that is what named streams are for), but the decisions they
+ *     make — which approach is offered, where debris falls, which boss form is
+ *     fought — are new inputs to the same seed.
+ *   - Enemies gained a second weapon slot and bosses a phase script, so an enemy
+ *     the old build fired once per interval can now fire twice.
+ *   - `retaliate` fires only when integrity actually dropped, where it used to fire
+ *     on shield-absorbed hits too. That is a straight damage-output change on any
+ *     build holding the coil, and it is the kind of change that diverges a replay
+ *     quietly and late — the run looks right for two minutes and then does not.
+ *   - `HazardField` staggers by map index rather than by `indexOf`, so a sector
+ *     arming the same hazard def twice no longer fires both copies in lockstep.
+ *
+ * And the surface a replay can diverge *on* has grown, which matters even where the
+ * additions are cosmetic. Routes now carry authored names and the direct approach's
+ * `rewardText` is reworded; neither steers a tick, but each is one more thing that
+ * has to agree between the build that recorded a run and the build replaying it.
+ * The more state a run has, the less a clean decode is evidence of anything.
+ *
+ * Note what the canonical probe below could NOT see: it runs 1,800 ticks of the
+ * single-sector default content, so it never reaches a seam, a boss, or a hazard.
+ * Its hash moved this version only because `hashWorld` widened to cover the new
+ * state (see `src/meta/snapshot.ts`). Had the digest not widened, the probe would
+ * have gone green through every change listed above — which is the argument for
+ * hashing the new fields, not an argument that the sim is unchanged.
+ *
+ * **1 — M0 through M4.** Single sector, no bosses, no hazards.
  */
-export const SIM_VERSION = 1
+export const SIM_VERSION = 2
 
 /** Seed for the canonical run. Arbitrary but fixed forever. */
 export const CANONICAL_SEED = 'K7F29XQM3RTV'

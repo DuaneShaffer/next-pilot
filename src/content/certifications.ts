@@ -45,16 +45,36 @@
  * ## Most of these grant content that has not shipped yet, and say so
  *
  * `docs/DESIGN.md` lists what certifications add — hulls, item families, enemy
- * types, boss variants, work-order types — and every one of those is M5 content.
- * M4 builds the mechanism. So eight of the ten below carry a non-null `awaiting`
- * naming exactly what they are waiting on, the hangar prints it, and a test
- * enforces that a grant is either live *or* declares itself pending. This is the
- * same call `src/ui/choiceScreen.ts` made with `WORK_ORDER_NOTICE`: a control that
- * silently does nothing is worse than a missing one, so it is labelled instead of
- * implied.
+ * types, boss variants, work-order types. Eight of the ten below carry a non-null
+ * `awaiting` naming exactly what they are waiting on, the hangar prints it, and a
+ * test enforces that a grant is either live *or* declares itself pending. This is
+ * the same call `src/ui/choiceScreen.ts` made with `WORK_ORDER_NOTICE`: a control
+ * that silently does nothing is worse than a missing one, so it is labelled instead
+ * of implied.
  *
  * The two live ones are real today: `WORK_ORDERS` already defines `vault` and
- * `unlisted` with authored copy, and `World` offers only three of the five kinds.
+ * `unlisted` with authored copy, and `World` draws its work-order kinds from
+ * `RunContent.workOrders`, which the app fills from `poolFor(...)`.
+ *
+ * ## "PENDING" NOW MEANS TWO DIFFERENT THINGS, AND THE COPY HAS TO SAY WHICH
+ *
+ * M5 shipped most of the content these grants name — five hulls, five bosses with
+ * variants, five hazards — so a grant can now be pending for a second reason: the
+ * content exists and *the run does not draw that slice from the pool*.
+ *
+ *   - `workOrders` is drawn from the pool. A grant there takes effect.
+ *   - `hulls` reaches `poolFor(...).hulls`, but the app issues `pool.hulls[0]`,
+ *     which is always the Lien because the base pool is always first. There is no
+ *     hull selection screen yet, so a granted hull enters the pool and is never
+ *     issued. Every hull grant below says so.
+ *   - `bossVariants` and `hazards` are not consulted at all: `pickVariant` reads
+ *     `BossDef.variants` directly and hazards are armed from the stage definition.
+ *   - `items` and `enemies` are handed to the sim as whole tables, not as pools.
+ *
+ * Naming the real blocker matters more than it looks. "Content pending: the hull
+ * roster" was true in M4 and is now false — the roster shipped — and a hangar that
+ * keeps saying it is a hangar that has started lying about a reward that has
+ * arrived but cannot be flown.
  */
 
 import { ENEMIES } from './enemies'
@@ -226,7 +246,7 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
     ],
     effect:
       'Adds 2 Tally convoy enemies that escort a lane instead of parking in it.',
-    awaiting: 'the sector-two roster (M5)',
+    awaiting: 'the Tally convoy enemies',
   },
 
   /**
@@ -251,7 +271,7 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
       'Adds 2 drone items: drones fire a weaker copy of your main weapon.',
     // Kept to one line in the hangar. `docs/DESIGN.md` records the longer version of
     // this: the `drone` tag exists and nothing spawns one.
-    awaiting: 'drone entities (M5)',
+    awaiting: 'drone entities',
   },
 
   /**
@@ -263,6 +283,14 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
    * is not a stunt — it is what sector 1 was tuned against before items existed.
    * What it asks is that the player look at a free reward and decline it, which is
    * a decision the game otherwise never poses.
+   *
+   * THE EFFECT LINE USED TO SAY "draws more elites", WHICH THE HULL DOES NOT DO.
+   * `docs/DESIGN.md` gives Arrears that drawback and `src/content/hulls.ts` records
+   * that it could not be expressed — the elite rate lives in the spawner's wave
+   * scripts and `HullDef` has nowhere to bias it. The hull card is honest about
+   * that; this card was not, and a certification promising a drawback the hull does
+   * not have is the same lie in a different place. Quoting the hull's own numbers is
+   * what keeps the two from drifting again.
    */
   {
     id: 'austerity-endorsement',
@@ -270,8 +298,8 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
     condition: { kind: 'bareHull', waves: 16 },
     grants: [{ slice: 'hulls', id: 'arrears' }],
     effect:
-      'Adds the Arrears hull: fast, fragile, funded, and draws more elites.',
-    awaiting: 'the hull roster (M5)',
+      'Adds the Arrears hull: +42 speed, 150 scrap, 45 less effective health.',
+    awaiting: 'a hull selection screen',
   },
 
   /**
@@ -301,7 +329,7 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
     ],
     effect:
       'Adds 2 sighting items that trade volume of fire for placement.',
-    awaiting: 'the expanded item roster (M5)',
+    awaiting: 'the sighting items',
   },
 
   /**
@@ -312,15 +340,26 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
    * `austerity-endorsement`: that one rewards refusing power, this one rewards
    * using it, and the two are the reason the hangar is not a single difficulty
    * ladder.
+   *
+   * COLLATERAL IS HERE because the hull and the condition ask for the same thing.
+   * Collateral trades its shield generator for 30 shots per second — 120 dps against
+   * the baseline's 80 — so it is the roster's engagement hull, and 110 kills is the
+   * roster's engagement condition. A pilot who has just cleared four fifths of a
+   * sector by shooting it is being handed the ship for doing that, which is the
+   * lateral trade `docs/DESIGN.md` wants a hull grant to be rather than a reward for
+   * having already won.
    */
   {
     id: 'clearance-commendation',
     name: 'Clearance Commendation',
     condition: { kind: 'killsInRun', kills: 110 },
-    grants: [{ slice: 'hazards', id: 'debris-cascade' }],
+    grants: [
+      { slice: 'hazards', id: 'debris-cascade' },
+      { slice: 'hulls', id: 'collateral' },
+    ],
     effect:
-      'Adds the debris cascade hazard: a timed collapse that closes lanes.',
-    awaiting: 'sector hazards (M5)',
+      'Adds the debris cascade hazard, and the Collateral hull: 120 dps, no shield.',
+    awaiting: 'the debris cascade hazard, and a hull selection screen',
   },
 
   /**
@@ -331,15 +370,25 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
    * predecessors died collecting". The elite arrives at 134 s — wave 22 or so — so
    * a pilot cannot file this without reaching the sector's hardest positional
    * problem and losing to it. It is not a participation award; it is an autopsy.
+   *
+   * PROBATE IS HERE for the obvious reason and it is the right one: the hull is a
+   * dead pilot's estate, and this is the certification you file by dying. "The
+   * accumulated data your predecessors died collecting" is `docs/DESIGN.md`'s line
+   * about meta-progression, and a hull inherited from a corpse is that sentence made
+   * into a ship. It was unreachable content before this — authored, tested, and in
+   * no pool.
    */
   {
     id: 'posthumous-data-annex',
     name: 'Posthumous Data Annex',
     condition: { kind: 'lostTo', enemyId: 'turret-heavy' },
-    grants: [{ slice: 'enemies', id: 'turret-siege' }],
+    grants: [
+      { slice: 'enemies', id: 'turret-siege' },
+      { slice: 'hulls', id: 'probate' },
+    ],
     effect:
-      'Adds the Siege Turret elite: a 5-shot fan walked across the lane.',
-    awaiting: 'the elite roster (M5)',
+      'Adds the Siege Turret elite, and the Probate hull: 132 effective health.',
+    awaiting: 'the Siege Turret elite, and a hull selection screen',
   },
 
   /**
@@ -356,7 +405,13 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
     grants: [{ slice: 'bossVariants', id: 'manifest-warden' }],
     effect:
       'Adds a second Deep Manifest boss: the Warden seals the lane in sections.',
-    awaiting: 'the sector-five boss (M5)',
+    // The variant SHIPPED — `src/content/bosses.ts` defines `manifest-warden` and
+    // `tests/bosses.test.ts` checks this grant resolves to it. What has not shipped
+    // is the gating: `pickVariant` draws from `BossDef.variants` directly and never
+    // sees `poolFor(...).bossVariants`, so the Warden is already reachable by anyone
+    // and this certification currently changes nothing. Saying "the sector-five
+    // boss" would now be false in both directions.
+    awaiting: 'boss variants drawn from your certifications',
   },
 
   /**
@@ -372,19 +427,37 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
    * hardest certification, it is the unreachable one, and an unreachable entry in a
    * list of unlock conditions is the hangar lying politely. The threshold is data,
    * so tightening it later is a one-number change if a sweep says 40 is soft.
+   *
+   * ## THIS GRANTED `writ`, WHICH IS NOT A HULL AND IS NOT GOING TO BE ONE SOON
+   *
+   * `src/content/hulls.ts` ships five hulls and records three more in
+   * `HULLS_AWAITING_MECHANICS`. Writ is one of them, and what it waits on is not
+   * content but *simulation*: a player-triggered phase state needs an input action,
+   * and `InputSnapshot` is the whole contract between the player and the sim — five
+   * fields, packed into one byte, and every recorded replay in existence is built on
+   * that byte. Adding a sixth is a format change, not an afternoon.
+   *
+   * So the grant pointed at an id that resolves to nothing. `getHull('writ')` throws,
+   * `poolFor` would have handed the app a hull it cannot look up, and the only reason
+   * nothing crashed is that the app never reads past `pool.hulls[0]`. A dangling
+   * reference that survives a typecheck and is masked by a second defect is exactly
+   * the kind of thing that surfaces the day the second defect is fixed.
+   *
+   * Repointed at Surety, which ships and which fits the condition better than Writ
+   * did: 210 effective health against the baseline's 140, bought with speed. This
+   * certification asks the player to come home untouched, and it hands them the hull
+   * built to be come home in. Writ stays in `HULLS_AWAITING_MECHANICS` with its
+   * reason; when the phase state exists it needs a certification of its own, not
+   * this one back.
    */
   {
     id: 'flawless-conduct-citation',
     name: 'Flawless Conduct Citation',
     condition: { kind: 'cleanExtraction', damage: 40 },
-    grants: [{ slice: 'hulls', id: 'writ' }],
+    grants: [{ slice: 'hulls', id: 'surety' }],
     effect:
-      // NOT "shortens the phase window": `tools/check-contracts.mjs` matches
-      // `window.` as a host-global access and flags it, string literal or not. The
-      // checker is right to be blunt about that pattern — this is the sentence
-      // changing, not the rule.
-      'Adds the Writ hull: it phases through bullets, and firing cuts it short.',
-    awaiting: 'the hull roster (M5)',
+      'Adds the Surety hull: 210 effective health, +1 damage, and 155 speed.',
+    awaiting: 'a hull selection screen',
   },
 ]
 
@@ -408,17 +481,22 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
  *
  * `hulls` is `['lien']` because `docs/DESIGN.md` says so outright: three hulls are
  * offered per run "drawn from what's been certified", and "`Lien` is always
- * available".
+ * available". THE OTHER FOUR SHIPPED HULLS ARE EACH BEHIND A CERTIFICATION —
+ * `arrears`, `probate`, `collateral`, `surety` — and `tests/certifications.test.ts`
+ * asserts that every hull in `HULLS` is either here or granted, so a hull can never
+ * again be authored, tuned, tested, and reachable by nobody.
  */
 export const BASE_POOL: Readonly<Record<PoolSlice, readonly string[]>> = {
   items: Object.keys(ITEMS),
   enemies: Object.keys(ENEMIES),
   workOrders: ['supply', 'hazard', 'repair'],
   hulls: ['lien'],
-  // No boss and no hazard system exists yet, so their base pools are empty and
-  // every entry in them arrives certified. Stated rather than omitted so the shape
-  // of the record is total — a missing slice would read as zero at some call site
-  // and as undefined at another.
+  // Empty, and for a reason that is NOT "the content does not exist" any more —
+  // bosses, variants and hazards all shipped with M5. Nothing consults these two
+  // slices: `pickVariant` reads `BossDef.variants` and hazards are armed from the
+  // stage definition, so both pools are inert. They are stated rather than omitted
+  // so the shape of the record is total — a missing slice would read as zero at one
+  // call site and as undefined at another.
   bossVariants: [],
   hazards: [],
 }

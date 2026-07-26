@@ -172,6 +172,7 @@ function buildWorstCase(seed: string): { world: World; refill: () => void } {
         alive: true,
         kind: 'pellet',
         sourceDefId: 'skiff',
+        causeKind: 'enemy-fire',
       })
     }
     for (let i = world.enemies.length; i < TARGET_ENEMIES; i++) {

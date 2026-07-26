@@ -144,6 +144,62 @@ const SHOTS = [
     waitFor: 'choiceKind === "shop"',
     holdMs: 0,
   },
+  // --- M5: the run past sector one ------------------------------------------
+  //
+  // Every one of these waits on run STATE, never on elapsed time. A sector is three
+  // minutes and a whole run is fifteen, so a duration guess here is not merely
+  // fragile — it is the exact mistake that once photographed a healthy ship and
+  // filed it as the death screen. `holdchoice=1` stops the bot resolving a card
+  // before the shutter opens.
+  {
+    // The world map. It only exists at a stage boundary, which is why the wait is on
+    // the card rather than on a stage index — by the time stageIndex has moved, the
+    // card the capture is for has already closed.
+    name: 'world-map',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=28&holdchoice=1`,
+    waitFor: 'choiceKind === "route"',
+    holdMs: 0,
+  },
+  {
+    // Sector two, in progress. Proves the panel is describing the run and not the
+    // roadmap — "SECTOR 1 / 5" for an entire game is a bug a tester actually reported.
+    name: 'sector-two',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=28`,
+    waitFor: 'stageIndex >= 1 && enemyCount >= 2',
+    holdMs: 0,
+  },
+  {
+    // A hazard mid-warning. This is the single most important second in the game to
+    // get right: it is the whole reaction window, and if it is not unmissable here
+    // then the hazard is indistinguishable from integrity draining for no reason.
+    name: 'hazard-warning',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=20`,
+    waitFor: 'hazardPhase === "warning"',
+    holdMs: 0,
+  },
+  {
+    name: 'hazard-active',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=20`,
+    waitFor: 'hazardPhase === "active"',
+    holdMs: 0,
+  },
+  {
+    // A boss on screen. Waits on the health bar being readable rather than on the
+    // spawn tick, so the capture shows a fight rather than an entrance.
+    name: 'boss-fight',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=24`,
+    waitFor: 'bossName !== null && bossHealth < 0.95',
+    holdMs: 0,
+  },
+  {
+    // A LATER boss phase, which is the part that has to announce itself. A capture of
+    // phase 0 would prove nothing about the callout, and the callout is the thing
+    // standing between "difficult" and "unfair".
+    name: 'boss-phase-two',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=24`,
+    waitFor: 'bossPhase >= 1',
+    holdMs: 0,
+  },
   {
     // Reachable from the title: left to the hangar, right to personnel files.
     name: 'hangar',
@@ -293,19 +349,22 @@ async function capture() {
               (expression) => {
                 const api = window.__nextPilot
                 if (!api) return false
-                // Must stay in step with the reporting object below. A predicate
-                // naming a field absent here throws instead of waiting, and
-                // waitForFunction reports that as "never became true" — which reads
-                // like a game problem rather than a harness typo.
-                const view = {
-                  screen: api.screen,
-                  runState: api.runState,
-                  enemyCount: api.enemyCount,
-                  integrity: api.integrity,
-                  choiceKind: api.choiceKind,
-                  heldItems: api.heldItems,
-                  stats: api.stats,
-                }
+                /*
+                 * EVERY probe field, snapshotted generically — never a hand-listed
+                 * subset.
+                 *
+                 * There used to be a literal here naming seven fields, with a comment
+                 * warning that it "must stay in step" with the probe or a predicate
+                 * would throw and be reported as "never became true", reading like a
+                 * game problem rather than a harness typo. That comment correctly
+                 * predicted its own failure: six M5 captures were added, the probe
+                 * gained the fields they needed, this list did not, and the run
+                 * reported six broken game states that were all fine.
+                 *
+                 * A warning that a duplicate must be kept in sync is not a fix. The
+                 * probe's fields are enumerable getters, so spreading it cannot drift.
+                 */
+                const view = { ...api }
                 // eslint-disable-next-line no-new-func
                 return Boolean(new Function('v', `with (v) { return (${expression}) }`)(view))
               },
@@ -338,18 +397,10 @@ async function capture() {
         const state = await page.evaluate(() => {
           const api = window.__nextPilot
           if (!api) return null
-          return {
-            screen: api.screen,
-            choiceKind: api.choiceKind,
-            heldItems: api.heldItems,
-            certified: api.certifiedCount,
-            filedRuns: api.filedRuns,
-            seed: api.seed,
-            stats: api.stats,
-            runState: api.runState,
-            enemies: api.enemyCount,
-            integrity: api.integrity,
-          }
+          // Spread for the same reason the predicate does: a hand-listed subset here
+          // silently drops a field from the per-shot log line, which is the only
+          // record of what a capture actually contained.
+          return { ...api }
         })
         const droppedWhileRunning = (state?.stats?.droppedTicks ?? 0) - before
 
@@ -358,9 +409,11 @@ async function capture() {
         for (const key of shot.keys ?? []) await page.keyboard.up(key)
         step(
           `${file}  screen=${state?.screen ?? '?'} run=${state?.runState ?? '-'} ` +
-            `tick=${state?.stats?.tick ?? '?'} enemies=${state?.enemies ?? '?'} ` +
+            `stage=${(state?.stageIndex ?? 0) + 1}/${state?.stageCount ?? '?'} ` +
+            `tick=${state?.stats?.tick ?? '?'} enemies=${state?.enemyCount ?? '?'} ` +
             `hull=${state?.integrity ?? '?'} items=${state?.heldItems ?? '?'} ` +
-            `cert=${state?.certified ?? '?'} filed=${state?.filedRuns ?? '?'} ` +
+            `boss=${state?.bossName ?? '-'} hazard=${state?.hazardPhase ?? '-'} ` +
+            `cert=${state?.certifiedCount ?? '?'} filed=${state?.filedRuns ?? '?'} ` +
             `choice=${state?.choiceKind ?? '-'} dropped=${droppedWhileRunning}`,
         )
 

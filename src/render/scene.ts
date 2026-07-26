@@ -38,6 +38,7 @@
 import { TICK_SECONDS } from '../core/loop'
 import { PLAYFIELD_H, PLAYFIELD_W } from '../core/space'
 import type { Bullet, EnemyBullet, EnemyInstance, Hull, WorldView } from '../sim/entities'
+import { drawBossCallout, drawBossHull } from './boss'
 import {
   blitGlow,
   drawExplosions,
@@ -48,12 +49,15 @@ import {
 } from './effects'
 import {
   drawFeelLabels,
+  drawFeelShells,
   drawFeelSparks,
   drawMuzzleGlow,
   shakeOffset,
   type FeelState,
 } from './feel'
-import { Palette } from './palette'
+import { blackoutDepth, drawBlackout } from './hazards'
+import { pulse } from './intensity'
+import { Palette, withAlpha } from './palette'
 import { drawEnemyShape, enemyTopOffset } from './shapes'
 import type { Starfield } from './starfield'
 
@@ -201,27 +205,45 @@ function drawEnemies(
   ctx: CanvasRenderingContext2D,
   enemies: readonly EnemyInstance[],
   alpha: number,
+  tick: number,
+  reduceFlashes: boolean,
 ): void {
   for (const e of enemies) {
     if (!e.alive) continue
     const x = lerp(e.prevX, e.x, alpha)
     const y = lerp(e.prevY, e.y, alpha)
-    drawEnemyShape(ctx, e.shape, x, y, e.radius, {
-      elite: e.elite,
-      flash: hitFlashStrength(e.hitFlashTicks),
-      age: e.age + alpha,
-      charge: telegraphProgress(e),
-    })
-    drawDamageBar(ctx, e, x, y)
+    if (e.boss) {
+      // A boss goes through render/boss.ts instead: same silhouette underneath, plus
+      // the plating and phase ring that stop it reading as a scaled-up skiff. Its
+      // damage bar is the ring and the panel block, so it does not get the strip
+      // every other enemy gets.
+      drawBossHull(ctx, e, x, y, { tick: tick + alpha, reduceFlashes })
+    } else {
+      drawEnemyShape(ctx, e.shape, x, y, e.radius, {
+        elite: e.elite,
+        flash: hitFlashStrength(e.hitFlashTicks, reduceFlashes),
+        age: e.age + alpha,
+        charge: telegraphProgress(e),
+      })
+      drawDamageBar(ctx, e, x, y)
+    }
     // Drawn per enemy rather than batched: only the handful of enemies actually
     // winding up pay for it, and it must sit above its own silhouette.
-    drawTelegraph(ctx, x, y, e.radius, e.telegraphTicks ?? 0, e.telegraphTotal ?? 0)
+    drawTelegraph(
+      ctx,
+      x,
+      y,
+      e.radius,
+      e.telegraphTicks ?? 0,
+      e.telegraphTotal ?? 0,
+      reduceFlashes,
+    )
   }
 
   ctx.globalCompositeOperation = 'lighter'
   for (const e of enemies) {
     if (!e.alive) continue
-    const strength = hitFlashStrength(e.hitFlashTicks)
+    const strength = hitFlashStrength(e.hitFlashTicks, reduceFlashes)
     if (strength <= 0) continue
     drawHitFlash(ctx, lerp(e.prevX, e.x, alpha), lerp(e.prevY, e.y, alpha), e.radius, strength)
   }
@@ -396,18 +418,45 @@ function drawEnemyBullets(
   ctx.globalCompositeOperation = 'source-over'
 }
 
-function drawHull(
+/**
+ * The player hull, including its engine plume.
+ *
+ * EXPORTED for the rule-10 test, not because anything else draws a hull. The plume
+ * shipped flickering at 8.59 Hz — inside the photosensitive band — and the existing
+ * rule-10 suite could not see it, because that suite enumerates *exported* effects and
+ * this function was private. A safety rule enforced only over the public surface is a
+ * safety rule with a hole in it exactly where the most-looked-at object lives.
+ */
+export function drawHull(
   ctx: CanvasRenderingContext2D,
   hull: Hull,
   alpha: number,
   tick: number,
   muzzleHeat: number,
+  reduceFlashes: boolean,
 ): void {
   const x = lerp(hull.prevX, hull.x, alpha)
   const y = lerp(hull.prevY, hull.y, alpha)
 
-  // Engine plume first, so the hull sits on top of it.
-  const flicker = 0.7 + 0.3 * Math.sin(tick * 0.9)
+  /**
+   * Engine plume first, so the hull sits on top of it.
+   *
+   * THIS WAS A RULE 10 VIOLATION AND A GENUINE SAFETY DEFECT. It read
+   * `0.7 + 0.3 * Math.sin(tick * 0.9)` — 0.9 rad/tick at 60Hz is **8.59 Hz**, squarely
+   * inside the 3-30 Hz photosensitive band, modulating an additive `glowSelf` plume
+   * between 8.8 and 22 units of emitting area. Attached to the one object a player
+   * looks at continuously for the whole run. It also ignored `reduceFlashes` while the
+   * muzzle glow two lines below honoured it.
+   *
+   * `pulse()` is the shared rate: 0.85 Hz, and it attenuates under the setting. The
+   * plume still breathes; it no longer flickers.
+   *
+   * Why the existing rule-10 test missed it: that suite measures the frequency of
+   * every *exported* effect, and `drawHull` is not exported. The lesson is not "add
+   * this one to the list" — it is that a coverage guard enumerating exports cannot see
+   * a private function, so the plume is now on that list explicitly.
+   */
+  const flicker = pulse(tick, 0.3, reduceFlashes)
   ctx.globalCompositeOperation = 'lighter'
   const plume = ctx.createLinearGradient(x, y + 10, x, y + 10 + 22 * flicker)
   plume.addColorStop(0, Palette.glowSelf)
@@ -458,9 +507,17 @@ function drawHull(
 
   // Muzzles, after the hull so the glow sits on the nose. A smoothed level, not a
   // flash per shot — see `FeelState.muzzleHeat`.
-  drawMuzzleGlow(ctx, x, y - 13, muzzleHeat)
+  drawMuzzleGlow(ctx, x, y - 13, muzzleHeat, reduceFlashes)
 
-  drawInvulnRing(ctx, x, y, Math.max(hull.radius * 2.4, 21), tick, hull.invulnTicks)
+  drawInvulnRing(
+    ctx,
+    x,
+    y,
+    Math.max(hull.radius * 2.4, 21),
+    tick,
+    hull.invulnTicks,
+    reduceFlashes,
+  )
 }
 
 /**
@@ -519,17 +576,27 @@ function drawThreatIndicators(
  * state a player must not have to look away to discover. Corner brackets appear
  * with it so the warning has a shape as well as a colour (rule 3).
  *
- * The pulse is a ~0.9Hz sine that never reaches zero — rule 10 is a hard
- * accessibility constraint, so no blinking and no full-screen flash.
+ * The pulse is a sub-1Hz sine that never reaches zero — rule 10 is a hard
+ * accessibility constraint, so no blinking and no full-screen flash. The rate comes
+ * from render/intensity.ts, which is also where `reduceFlashes` shrinks its swing.
+ *
+ * Exported so tests/render.test.ts can measure that swing directly: this is the
+ * largest area the renderer ever modulates, so it is the one place where "the comment
+ * says 0.9Hz" is not good enough.
  */
-function drawLowIntegrityRim(ctx: CanvasRenderingContext2D, hull: Hull, tick: number): void {
+export function drawLowIntegrityRim(
+  ctx: CanvasRenderingContext2D,
+  hull: Hull,
+  tick: number,
+  reduceFlashes = false,
+): void {
   if (hull.maxIntegrity <= 0 || hull.integrity <= 0) return
   const fraction = hull.integrity / hull.maxIntegrity
   if (fraction > LOW_INTEGRITY_AT) return
 
   const severity = 1 - fraction / LOW_INTEGRITY_AT
-  const pulse = 0.6 + 0.4 * Math.sin(tick * 0.092)
-  const peak = (0.16 + 0.32 * severity) * pulse
+  const breath = pulse(tick, 0.4, reduceFlashes)
+  const peak = (0.16 + 0.32 * severity) * breath
   const depth = 26
 
   const edges: ReadonlyArray<readonly [number, number, number, number, number, number]> = [
@@ -541,14 +608,16 @@ function drawLowIntegrityRim(ctx: CanvasRenderingContext2D, hull: Hull, tick: nu
 
   for (const [x0, y0, x1, y1, w, h] of edges) {
     const gradient = ctx.createLinearGradient(x0, y0, x1, y1)
-    gradient.addColorStop(0, `rgba(255, 74, 56, ${peak.toFixed(3)})`)
-    gradient.addColorStop(1, 'rgba(255, 74, 56, 0)')
+    // Derived from the token rather than written as a literal, so a palette retune
+    // moves the rim with everything else instead of stranding it on the old red.
+    gradient.addColorStop(0, withAlpha(Palette.danger, peak))
+    gradient.addColorStop(1, withAlpha(Palette.danger, 0))
     ctx.fillStyle = gradient
     ctx.fillRect(Math.min(x0, x1), Math.min(y0, y1), w, h)
   }
 
   ctx.strokeStyle = Palette.danger
-  ctx.globalAlpha = 0.5 + 0.45 * pulse
+  ctx.globalAlpha = 0.5 + 0.45 * breath
   ctx.lineWidth = 2
   const inset = 5
   const len = 20
@@ -586,6 +655,14 @@ export interface SceneOptions {
    * preferences live, and a test needs to be able to ask for zero.
    */
   shakeScale?: number
+  /**
+   * `Settings.reduceFlashes`, threaded to every bright transient in the frame.
+   *
+   * A parameter for the same reason `shakeScale` is one. What it attenuates is listed
+   * in render/intensity.ts and enforced per effect in tests/render.test.ts, so an
+   * effect added later that ignores it fails a test rather than quietly shipping.
+   */
+  reduceFlashes?: boolean
 }
 
 export function drawScene(
@@ -597,6 +674,11 @@ export function drawScene(
 ): void {
   const tick = view.stats.tick
   const feel = options.feel
+  const reduceFlashes = options.reduceFlashes ?? false
+  // Defensive reads. These view fields arrived with M5 and a caller may hand over a
+  // world built before they existed — a missing hazard list must mean "no hazards",
+  // never a thrown frame.
+  const hazards = view.hazards ?? []
 
   /**
    * Hitstop. The sim is frozen, so the interpolation fraction must be too.
@@ -630,13 +712,22 @@ export function drawScene(
 
   starfield.draw(ctx)
 
-  drawEnemies(ctx, view.enemies, a)
+  drawEnemies(ctx, view.enemies, a, tick, reduceFlashes)
   drawPlayerBullets(ctx, view.playerBullets, a, tick)
+
+  // Blackout goes HERE, and the position is the entire design of the effect. The
+  // background, the starfield and the enemies are behind it and go dark; everything
+  // below is in front of it and does not. Enemy fire keeps full contrast because
+  // hiding the bullets is a difficulty that produces deaths a player cannot explain,
+  // and the player's own hull stays findable for the same reason.
+  drawBlackout(ctx, blackoutDepth(hazards, reduceFlashes))
+
   // Above the enemies, by design. See the header comment.
   drawEnemyBullets(ctx, view.enemyBullets, a)
-  drawExplosions(ctx, view.explosions, a)
-  if (feel) drawFeelSparks(ctx, feel, a)
-  drawHull(ctx, view.hull, a, tick, feel ? feel.muzzleHeat : 0)
+  drawExplosions(ctx, view.explosions, a, reduceFlashes)
+  if (feel) drawFeelShells(ctx, feel, a)
+  if (feel) drawFeelSparks(ctx, feel, a, reduceFlashes)
+  drawHull(ctx, view.hull, a, tick, feel ? feel.muzzleHeat : 0, reduceFlashes)
 
   if (shaking) ctx.restore()
 
@@ -644,10 +735,14 @@ export function drawScene(
   // After the vignette: both of these are warnings that live at the edge, which
   // is exactly where the vignette is darkest. Muting a warning by 45% to
   // preserve draw-order purity would be the wrong trade.
-  drawLowIntegrityRim(ctx, view.hull, tick)
+  drawLowIntegrityRim(ctx, view.hull, tick, reduceFlashes)
   drawThreatIndicators(ctx, view.enemies, a)
 
   // Last, and outside the shake: text is the one thing that must never rattle, and
-  // a number half-hidden by the vignette is a number nobody reads.
+  // a number half-hidden by the vignette is a number nobody reads. The boss callout
+  // is text under the same rule; see render/boss.ts for why rule 1 permits it over
+  // the playfield at all, and where it is allowed to sit.
   if (feel) drawFeelLabels(ctx, feel, a)
+  const boss = view.boss ?? null
+  if (boss?.boss && boss.alive) drawBossCallout(ctx, boss.boss)
 }

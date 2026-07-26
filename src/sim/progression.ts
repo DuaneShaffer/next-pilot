@@ -7,10 +7,17 @@
  * edge-detection below is fiddly enough to deserve its own tests.
  */
 
-import type { InteractionDef, ItemDef } from '../content/types'
+import type { HazardDef, InteractionDef, ItemDef } from '../content/types'
 import type { InputSnapshot } from '../core/input'
 import { Rng } from '../core/rng'
-import type { HeldItem, ItemOffer, PendingChoice, PendingChoiceKind } from './entities'
+import type {
+  HeldItem,
+  ItemOffer,
+  PendingChoice,
+  PendingChoiceKind,
+  RouteOption,
+  RouteReward,
+} from './entities'
 import { interactionsUnlockedBy } from './inventory'
 
 /** How many options a choice presents. Three is the genre default and it fits the card. */
@@ -118,6 +125,27 @@ const TIER_COST_MULTIPLIER: Record<ItemDef['tier'], number> = {
  * first unbuyable — which is exactly what happened. Progress scaling lets one
  * number serve both.
  */
+/**
+ * Price a between-sector shop.
+ *
+ * A SEPARATE curve from `shopCosts`, deliberately. That one scales +6% per wave,
+ * which was measured and tuned against a single 30-wave sector; running the same
+ * rate across a five-sector run compounds to nearly 10x and prices the last shop
+ * out of existence. Stage-based scaling reaches about 3.4x over a full run, against
+ * a scrap curve that grows faster than that.
+ */
+export function transitShopCosts(
+  offers: readonly ItemOffer[],
+  itemsById: Readonly<Record<string, ItemDef>>,
+  stageIndex: number,
+): readonly number[] {
+  const progress = 1 + Math.max(0, stageIndex) * 0.6
+  return offers.map((offer) => {
+    const tier = itemsById[offer.defId]?.tier ?? 'common'
+    return Math.round(SHOP_BASE_COST * TIER_COST_MULTIPLIER[tier] * progress)
+  })
+}
+
 export function shopCosts(
   offers: readonly ItemOffer[],
   itemsById: Readonly<Record<string, ItemDef>>,
@@ -138,8 +166,157 @@ export function makeChoice(
   offers: readonly ItemOffer[],
   costs: readonly number[],
   workOrders: readonly string[] = [],
+  routes: readonly RouteOption[] = [],
 ): PendingChoice {
-  return { kind, offers, costs, workOrders }
+  return { kind, offers, costs, workOrders, routes }
+}
+
+// ---------------------------------------------------------------------------
+// routing between sectors — the world map
+// ---------------------------------------------------------------------------
+
+/**
+ * Scrap paid by a supply route, per stage.
+ *
+ * Scaled against the measured curve: median holdings are 67 by wave 8 and 370 by
+ * wave 23 of a single sector, so a flat bonus would be transformative on the first
+ * leg and rounding error on the last.
+ */
+const ROUTE_SCRAP_BASE = 70
+const ROUTE_SCRAP_PER_STAGE = 55
+
+/** Repair route: a fraction of maximum integrity, stated in points when offered. */
+const ROUTE_REPAIR_FRACTION = 0.35
+
+/**
+ * Build the approach options into `stageIndex`.
+ *
+ * THE SHAPE OF THE CHOICE: the sector order is authored and never varies, so a route
+ * cannot let a player skip the difficulty curve. What varies is the price of
+ * arriving well-equipped — each non-direct route attaches a hazard that will be live
+ * for the whole sector, and pays for it once on arrival.
+ *
+ * The direct route is always first and always costs nothing. A risk/reward screen
+ * with no safe option is not a choice, it is a tax.
+ *
+ * Returns an EMPTY array when the stage has no hazards to trade against. A card
+ * offering three rewards and no downside is a free lunch dressed as a decision, and
+ * the caller skips straight to the shop instead — see World.beginTransition.
+ */
+export function buildRoutes(
+  rng: Rng,
+  stageIndex: number,
+  sectorName: string,
+  bossName: string | null,
+  hazards: readonly HazardDef[],
+  maxIntegrity: number,
+): readonly RouteOption[] {
+  const direct: RouteOption = {
+    stageIndex,
+    name: 'DIRECT APPROACH',
+    sectorName,
+    bossName,
+    hazards: [],
+    hazardIds: [],
+    reward: { kind: 'none' },
+    // STATED FLATLY, not hedged. A sector carries no hazards of its own — the only
+    // way one becomes live is a route arming it — so "none at all" is the literal
+    // truth and the screen should say it. The screen was hedging ("adds nothing to
+    // the sector ahead") to stay honest about a case that does not exist, and the
+    // cost of that caution was a player reasonably reading it as "there may be
+    // hazards anyway, this just doesn't add any".
+    rewardText: 'No hazards on this leg, and no bonus. Arrive as you are.',
+  }
+  if (hazards.length === 0) return []
+
+  // Two priced routes, each carrying one hazard. Drawn without replacement so the
+  // two options are actually different when the sector has more than one hazard;
+  // with only one hazard both routes carry it and the choice is purely the reward.
+  const pool = [...hazards]
+  const first = rng.weighted(pool, () => 1)
+  pool.splice(pool.indexOf(first), 1)
+  const second = pool.length > 0 ? rng.weighted(pool, () => 1) : first
+
+  // Which reward pairs with which hazard is rolled, so learning "the left one is
+  // always the item" is not a substitute for reading the card.
+  const scrap = ROUTE_SCRAP_BASE + ROUTE_SCRAP_PER_STAGE * stageIndex
+  const repair = Math.round(maxIntegrity * ROUTE_REPAIR_FRACTION)
+  const paid: RouteReward[] = [
+    { kind: 'item' },
+    rng.chance(0.5) ? { kind: 'scrap', amount: scrap } : { kind: 'repair', amount: repair },
+  ]
+  if (rng.chance(0.5)) paid.reverse()
+
+  return [
+    direct,
+    routeFor(stageIndex, sectorName, bossName, first, paid[0] as RouteReward),
+    routeFor(stageIndex, sectorName, bossName, second, paid[1] as RouteReward),
+  ]
+}
+
+function routeFor(
+  stageIndex: number,
+  sectorName: string,
+  bossName: string | null,
+  hazard: HazardDef,
+  reward: RouteReward,
+): RouteOption {
+  return {
+    stageIndex,
+    name: routeName(reward),
+    sectorName,
+    bossName,
+    hazards: [{ name: hazard.name, description: hazard.description }],
+    hazardIds: [hazard.id],
+    reward,
+    rewardText: rewardText(reward),
+  }
+}
+
+/**
+ * The name of a route, from what it pays.
+ *
+ * Institutional rather than heroic, per the tone in docs/DESIGN.md: these are work
+ * orders, and the company does not think of them as adventures.
+ */
+function routeName(reward: RouteReward): string {
+  switch (reward.kind) {
+    case 'none':
+      return 'DIRECT APPROACH'
+    case 'item':
+      return 'CACHE RECOVERY'
+    case 'scrap':
+      return 'SALVAGE DETOUR'
+    case 'repair':
+      return 'REPAIR DOCK'
+  }
+}
+
+/**
+ * The reward in one sentence with real numbers (UI.md rules 2 and 4).
+ *
+ * Written here rather than on the screen so every surface that mentions a route —
+ * the map, the panel, a future run summary — says the same thing. A screen that
+ * composes its own description is a screen that can describe a reward the
+ * simulation will not pay.
+ */
+export function rewardText(reward: RouteReward): string {
+  switch (reward.kind) {
+    case 'none':
+      return 'No hazard, no bonus. Arrive as you are.'
+    case 'item':
+      return 'One item, chosen from three on arrival.'
+    // UNITS MATCH THE PANEL: `cr` and `hp`, not "scrap" and "integrity".
+    //
+    // The route card shows the amount twice — once as a chip and once in this
+    // sentence — and the chip uses the panel's units because that is what the player
+    // has been reading for fifteen minutes. Two spellings of one number on one screen
+    // is a small clarity tax for no gain, and the cheaper side to change is this one.
+    case 'scrap':
+      return `+${reward.amount} cr on arrival.`
+    case 'repair':
+      return `+${reward.amount} hp on arrival.`
+  }
 }
 
 /**
@@ -220,7 +397,29 @@ export const CHOICE_TIMEOUT_TICKS = 20 * 60
  */
 export const HELD_CONFIRM_DWELL_TICKS = 48
 
-export type ChoiceAction = { kind: 'none' } | { kind: 'confirm'; index: number } | { kind: 'skip' }
+export type ChoiceAction =
+  | { kind: 'none' }
+  | {
+      kind: 'confirm'
+      index: number
+      /**
+       * True when this confirm came from the held-trigger DWELL rather than from a
+       * deliberate press.
+       *
+       * The caller needs to tell them apart, and the reason is a second soft freeze
+       * hiding behind the fix for the first. If the dwell confirms an option the
+       * player cannot afford, the world refuses it, the card stays open, and the next
+       * tick tries again — forever, until the 20-second timeout. That is precisely the
+       * unresponsive card `HELD_CONFIRM_DWELL_TICKS` exists to prevent, reappearing
+       * one layer down.
+       *
+       * A deliberate press on an unaffordable option must still do nothing (the option
+       * is greyed out and the player can navigate to another). A *rescue* that cannot
+       * complete has to become a decline instead of a loop.
+       */
+      fromDwell: boolean
+    }
+  | { kind: 'skip' }
 
 /**
  * Advance the cursor and report what the player did this tick.
@@ -274,7 +473,9 @@ export function updateCursor(
   cursor.prevFire = input.fire
   cursor.prevSpecial = input.special
 
-  if (confirmed && optionCount > 0) return { kind: 'confirm', index: cursor.index }
+  if (confirmed && optionCount > 0) {
+    return { kind: 'confirm', index: cursor.index, fromDwell: heldPastDwell && !risingEdge }
+  }
   if (skipped) return { kind: 'skip' }
   return { kind: 'none' }
 }

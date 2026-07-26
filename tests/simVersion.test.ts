@@ -30,6 +30,25 @@ import { INTERACTIONS } from '../src/content/interactions'
  */
 const CANONICAL_HISTORY: ReadonlyArray<{ version: number; hash: string }> = [
   { version: 1, hash: 'f1dfc56a2e907d8a' },
+  /**
+   * M5. Read the reason carefully, because this row is a warning as much as a fact.
+   *
+   * The canonical run's *state* did not change at all: replayed under the pre-M5
+   * component hashes it still produces `f1dfc56a2e907d8a` exactly. The number below
+   * moved only because `hashWorld` widened to cover boss phases, second barrels,
+   * enemy uids, the stage, hazards, the inventory and the pending card.
+   *
+   * So this probe did NOT detect the M5 behaviour change, and could not have: it
+   * runs 1,800 ticks (30 s) of the single-sector default content, which never
+   * reaches a seam, a boss, a hazard or a route card. It is a guard against silent
+   * drift in sector one, not a guard against the run machine, and the corpus has the
+   * same blind spot — every fixture is `new World(seed)`, which is one sector.
+   *
+   * A probe that covered the whole run would have to be pinned to the shipping
+   * content tables, and until those settle it would fail on every balance edit. That
+   * is the trade; it is recorded here rather than assumed away.
+   */
+  { version: 2, hash: 'e80d55ca83c419dc' },
 ]
 
 function makeWorld() {

@@ -173,6 +173,14 @@ function worldFixture(shake: number, freezeTicks: number): WorldView {
   return {
     seed: 'TEST-SEED',
     runState: 'active',
+    // M5 view fields. Fixtures state them explicitly rather than spreading a shared
+    // default, so adding a WorldView field fails here and someone decides what the
+    // fixture should say instead of inheriting a silent placeholder.
+    stage: { index: 0, count: 1, sectorId: 'debris-shelf', sectorName: 'Debris Shelf', bossName: null },
+    hullName: 'Lien',
+    boss: null,
+    hazards: [],
+    choiceResolve: null,
     inventory: [],
     activeInteractions: [],
     resolvedStats: {},

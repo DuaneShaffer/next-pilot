@@ -121,7 +121,14 @@ describe('choice cursor — confirming', () => {
     const cursor = newCursor()
     expect(updateCursor(cursor, FIRE, OFFER_COUNT).kind).toBe('none')
     expect(updateCursor(cursor, IDLE, OFFER_COUNT).kind).toBe('none')
-    expect(updateCursor(cursor, FIRE, OFFER_COUNT)).toEqual({ kind: 'confirm', index: 0 })
+    expect(updateCursor(cursor, FIRE, OFFER_COUNT)).toEqual({
+      kind: 'confirm',
+      index: 0,
+      // A deliberate press, not the held-trigger rescue. The distinction is
+      // load-bearing: only a rescue may decline an unaffordable option on the
+      // player's behalf. See ChoiceAction.fromDwell.
+      fromDwell: false,
+    })
   })
 
   it('confirms once per press, not once per held tick', () => {
@@ -132,7 +139,7 @@ describe('choice cursor — confirming', () => {
     drive(cursor, [IDLE], OFFER_COUNT)
     const actions = drive(cursor, repeat(FIRE, 30), OFFER_COUNT)
     expect(actions.filter((a) => a.kind === 'confirm')).toHaveLength(1)
-    expect(actions[0]).toEqual({ kind: 'confirm', index: 0 })
+    expect(actions[0]).toEqual({ kind: 'confirm', index: 0, fromDwell: false })
   })
 
   it('confirms the option the same tick moved to', () => {
@@ -144,6 +151,7 @@ describe('choice cursor — confirming', () => {
     expect(updateCursor(cursor, input({ moveX: 1, fire: true }), OFFER_COUNT)).toEqual({
       kind: 'confirm',
       index: 1,
+      fromDwell: false,
     })
   })
 
@@ -487,13 +495,18 @@ describe('shopCosts', () => {
 // --- the choice record -------------------------------------------------------
 
 describe('makeChoice', () => {
-  it('carries the offers, their costs, and no work orders by default', () => {
+  it('carries the offers, their costs, and no work orders or routes by default', () => {
+    // A WHOLE-OBJECT comparison on purpose. Every card kind reads a different field
+    // off the same struct, so a new kind that forgets to default its own field would
+    // hand the world an `undefined` to take `.length` of. This is the assertion that
+    // makes adding a kind fail here rather than at a stage boundary.
     const offers = [offer('alpha'), offer('bravo')]
     expect(makeChoice('item', offers, [0, 0])).toEqual({
       kind: 'item',
       offers,
       costs: [0, 0],
       workOrders: [],
+      routes: [],
     })
   })
 

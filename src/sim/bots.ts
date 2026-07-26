@@ -51,13 +51,34 @@
  *   view. That is why `dodger` shares the aggressive policies' heuristic instead
  *   of having a survival-flavoured one, and why the roster's `defence` items are
  *   currently only ever picked for their synergies or their price.
+ *
+ * ## Routes are a SECOND, INDEPENDENT preference — deliberately
+ *
+ * A five-sector run opens a `'route'` card at every seam: option 0 is always the
+ * free direct approach, and the rest trade a sector-long hazard for a reward. That
+ * is a risk appetite, and risk appetite is not the same axis as item preference —
+ * so it is chosen by `chooseRoute` and a per-policy `RouteStyle`, and `chooseOffer`
+ * is untouched.
+ *
+ * Keeping them separate is not tidiness, it is the measurement. Item pick rates
+ * were swept over 2,000 runs and sit in a documented band; folding route scoring
+ * into the item heuristic would have moved every one of those numbers for a reason
+ * that has nothing to do with items. `random` even draws its route rolls from a
+ * *third* stream (`bot:random-route`) so that the number of seams a run reaches
+ * cannot shift a single one of its item draws.
+ *
+ * Route preference varying by policy is itself an instrument: `greedy` accepts
+ * every hazard it is paid for and `dodger` never does, so the gap between them is
+ * the measured price of the world map. `aggressor` is deliberately held at
+ * `direct` — it is the policy the clear-rate exit criterion is read off, and a
+ * benchmark that also takes optional risk is measuring two things at once.
  */
 
 import type { Axis, InputSnapshot } from '../core/input'
 import { NEUTRAL_INPUT } from '../core/input'
 import { Rng } from '../core/rng'
 import { Playfield } from '../core/space'
-import type { EnemyBullet, EnemyInstance, PendingChoice, WorldView } from './entities'
+import type { EnemyBullet, EnemyInstance, PendingChoice, RouteOption, WorldView } from './entities'
 
 /**
  * A little over one tick of hull travel at the M1 hull speed.
@@ -106,8 +127,16 @@ export interface BotDef {
   readonly name: BotName
   /** What this probe measures. Printed by the playtest runner. */
   readonly measures: string
+  /**
+   * How this probe treats the world map by default. See `RouteStyle`.
+   *
+   * Declared on the def rather than buried in the closure so a sweep can print it:
+   * a clear-rate table where one policy silently accepts hazards and another does
+   * not is unreadable unless the report says which is which.
+   */
+  readonly routeStyle: RouteStyle
   /** Fresh policy instance for one run. Per-run state lives in the closure. */
-  create(seed: string): BotPolicy
+  create(seed: string, options?: BotOptions): BotPolicy
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +287,94 @@ export const BUILD_FOCUSED_TARGET: readonly string[] = ['split-shot', 'warheads'
 export const MAX_CHOICE_RESOLUTION_TICKS = 6
 
 /**
+ * How a policy treats the world map between sectors.
+ *
+ *   direct    — always the free approach. No hazard, no bonus, no confound.
+ *   rewarding — take the best-paying hazard route. The risk appetite probe.
+ *   item-only — accept a hazard only for an *item*; decline scrap and repair.
+ *   random    — uniform over the options. The control.
+ */
+export type RouteStyle = 'direct' | 'rewarding' | 'item-only' | 'random'
+
+/**
+ * What one free item is worth to a `rewarding` policy, in route-score units.
+ *
+ * The other rewards are scaled so the comparison is legible rather than tuned:
+ * scrap is worth its face value over `ROUTE_SCRAP_UNIT`, and repair is worth the
+ * integrity it would *actually* restore over `ROUTE_REPAIR_UNIT`. At the shipped
+ * numbers (70-290 scrap, ~35% of maximum integrity) an item outscores a scrap
+ * payout until the last seam and outscores a repair on a healthy hull always,
+ * which is the ordering a player who is building a run would use.
+ *
+ * These are the PROBE'S STATED PREFERENCE, not a claim about which route is
+ * correct. `chooseRoute` is where you change the question a sweep is asking.
+ */
+const ROUTE_ITEM_SCORE = 2.5
+const ROUTE_SCRAP_UNIT = 100
+const ROUTE_REPAIR_UNIT = 20
+
+/**
+ * What a route is worth to this policy, right now. Zero means "not worth a hazard".
+ *
+ * Repair is scored against the damage the hull has actually taken, because a full
+ * repair on a full hull is worth nothing and a bot that took a hazard for it would
+ * make the world map look more attractive than it is. That reading is available
+ * from `WorldView.hull` alone — no content table involved.
+ */
+function routeScore(view: WorldView, route: RouteOption, style: RouteStyle): number {
+  const reward = route.reward
+  switch (reward.kind) {
+    case 'none':
+      return 0
+    case 'item':
+      return style === 'item-only' ? 1 : ROUTE_ITEM_SCORE
+    case 'scrap':
+      return style === 'item-only' ? 0 : reward.amount / ROUTE_SCRAP_UNIT
+    case 'repair': {
+      if (style === 'item-only') return 0
+      const missing = Math.max(0, view.hull.maxIntegrity - view.hull.integrity)
+      return Math.min(reward.amount, missing) / ROUTE_REPAIR_UNIT
+    }
+  }
+}
+
+/**
+ * Which approach into the next sector to take. Never null — the run must go on.
+ *
+ * Index 0 is always the free direct approach (`buildRoutes` guarantees it and
+ * `tests/run.test.ts` asserts it), so falling back to 0 is the safe answer for
+ * every degenerate case: an empty card, a style with no appetite, a tie. That is
+ * also what the sim does when a route card is declined, so a policy that cannot
+ * decide behaves identically to one that walked away.
+ */
+function chooseRoute(
+  view: WorldView,
+  choice: Readonly<PendingChoice>,
+  style: RouteStyle,
+  rng: Rng | null,
+): number | null {
+  const count = choice.routes.length
+  if (count === 0) return null
+  if (style === 'random') return rng === null ? 0 : rng.int(count)
+  if (style === 'direct') return 0
+
+  let bestIndex = 0
+  let bestScore = 0
+  for (let i = 0; i < count; i++) {
+    const route = choice.routes[i]
+    if (route === undefined) continue
+    const score = routeScore(view, route, style)
+    // Strictly greater, so a tie keeps the earlier (and therefore safer) option and
+    // the tie-break is stated rather than dependent on array order.
+    if (score > bestScore) {
+      bestScore = score
+      bestIndex = i
+    }
+  }
+  return bestIndex
+}
+
+/**
  * Cost as a tie-break score, in the range [0, 1).
  *
  * Costs are tier-scaled in a shop and zero on a free item choice, so this is a
@@ -361,6 +478,22 @@ function chooseOffer(
 // choices — resolution
 // ---------------------------------------------------------------------------
 
+/**
+ * How many options this card has, which is what the cursor wraps on.
+ *
+ * MUST mirror `World.updateChoice`. It got out of step once: this returned
+ * `offers.length` for every non-work-order kind, and a route card carries its
+ * options in `routes` with `offers` empty — so every policy saw a zero-option
+ * screen, took the skip branch, and the sim resolved the skip as "take the direct
+ * approach". Nothing stalled and nothing crashed; the world map simply never
+ * happened, in every run, for every policy, silently.
+ */
+function optionCountOf(choice: Readonly<PendingChoice>): number {
+  if (choice.kind === 'work-order') return choice.workOrders.length
+  if (choice.kind === 'route') return choice.routes.length
+  return choice.offers.length
+}
+
 const PRESS_RIGHT: InputSnapshot = { moveX: 1, moveY: 0, fire: false, special: false, focus: false }
 const PRESS_FIRE: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
 const PRESS_SKIP: InputSnapshot = { moveX: 0, moveY: 0, fire: false, special: true, focus: false }
@@ -424,7 +557,7 @@ class ChoiceResolver {
 
     if (!this.open) {
       this.open = true
-      const count = choice.kind === 'work-order' ? choice.workOrders.length : choice.offers.length
+      const count = optionCountOf(choice)
       if (count === 0) {
         // Zero options cannot be confirmed at all — the sim requires
         // `optionCount > 0` — so the only exit is a skip. Without this branch the
@@ -456,6 +589,38 @@ class ChoiceResolver {
 // ---------------------------------------------------------------------------
 
 /**
+ * Per-run knobs a sweep may override.
+ *
+ * `routeStyle` exists so the world map can be ABLATED: running one policy at
+ * `direct` and again at `rewarding` on the same seeds isolates what accepting
+ * hazards costs, which a comparison between two different policies cannot do
+ * because they also fly differently. Everything else about a policy stays fixed.
+ */
+export interface BotOptions {
+  readonly routeStyle?: RouteStyle
+}
+
+/**
+ * One selector for every card kind a run can open.
+ *
+ * Routes and items are scored by separate functions on purpose — see this file's
+ * header. This only routes the card to the right one.
+ */
+function selectorFor(
+  view: WorldView,
+  style: SelectionStyle,
+  routeStyle: RouteStyle,
+  offerRng: Rng | null,
+  routeRng: Rng | null,
+  targets: readonly string[],
+): (choice: Readonly<PendingChoice>) => number | null {
+  return (choice) =>
+    choice.kind === 'route'
+      ? chooseRoute(view, choice, routeStyle, routeRng)
+      : chooseOffer(view, choice, style, offerRng, targets)
+}
+
+/**
  * Survival first. Establishes the floor.
  *
  * Two details that are load-bearing:
@@ -471,11 +636,12 @@ class ChoiceResolver {
  * use, because a survival-flavoured one is not expressible: `ItemOffer` carries no
  * tags, so nothing in the view distinguishes Plating Shim from Machined Slugs.
  */
-function dodgerPolicy(): BotPolicy {
+function dodgerPolicy(routeStyle: RouteStyle): BotPolicy {
   const resolver = new ChoiceResolver()
   return (view) => {
-    const choosing = resolver.next(view, (choice) =>
-      chooseOffer(view, choice, 'synergy', null, BUILD_FOCUSED_TARGET),
+    const choosing = resolver.next(
+      view,
+      selectorFor(view, 'synergy', routeStyle, null, null, BUILD_FOCUSED_TARGET),
     )
     if (choosing) return choosing
 
@@ -507,11 +673,12 @@ function dodgerPolicy(): BotPolicy {
  * never evades. Its death rate is the price of ignoring incoming fire, and the
  * gap between its clear speed and dodger's is the difficulty budget.
  */
-function aggressorPolicy(): BotPolicy {
+function aggressorPolicy(routeStyle: RouteStyle): BotPolicy {
   const resolver = new ChoiceResolver()
   return (view) => {
-    const choosing = resolver.next(view, (choice) =>
-      chooseOffer(view, choice, 'synergy', null, BUILD_FOCUSED_TARGET),
+    const choosing = resolver.next(
+      view,
+      selectorFor(view, 'synergy', routeStyle, null, null, BUILD_FOCUSED_TARGET),
     )
     if (choosing) return choosing
 
@@ -540,11 +707,12 @@ function aggressorPolicy(): BotPolicy {
  * it can afford rather than the best one: the question it answers is whether the
  * shop's prices are reachable at all from the scrap the sector pays.
  */
-function greedyPolicy(): BotPolicy {
+function greedyPolicy(routeStyle: RouteStyle): BotPolicy {
   const resolver = new ChoiceResolver()
   return (view) => {
-    const choosing = resolver.next(view, (choice) =>
-      chooseOffer(view, choice, 'expensive', null, BUILD_FOCUSED_TARGET),
+    const choosing = resolver.next(
+      view,
+      selectorFor(view, 'expensive', routeStyle, null, null, BUILD_FOCUSED_TARGET),
     )
     if (choosing) return choosing
 
@@ -575,17 +743,23 @@ function greedyPolicy(): BotPolicy {
  * draw, so `random`'s survival numbers would stop being comparable with the M1
  * and M2 sweeps for a reason that has nothing to do with the game.
  */
-function randomPolicy(seed: string): BotPolicy {
+function randomPolicy(seed: string, routeStyle: RouteStyle): BotPolicy {
   // Its own named stream. Sharing 'spawn' would consume draws the spawner needs
   // and make every wave in a bot run different from the same seed played by hand.
   const rng = Rng.fromSeed(seed, 'bot:random')
   const choiceRng = Rng.fromSeed(seed, 'bot:random-choice')
+  // A THIRD stream, for the same reason `choiceRng` is a second one. Rolling a
+  // route off `bot:random-choice` would mean the number of seams a run reached
+  // shifted every subsequent item draw, and this policy's measured pick rates
+  // would stop being comparable with the M3 sweep for a reason unrelated to items.
+  const routeRng = Rng.fromSeed(seed, 'bot:random-route')
   const resolver = new ChoiceResolver()
   let held: InputSnapshot = NEUTRAL_INPUT
   let ticksHeld = 0
   return (view) => {
-    const choosing = resolver.next(view, (choice) =>
-      chooseOffer(view, choice, 'random', choiceRng, BUILD_FOCUSED_TARGET),
+    const choosing = resolver.next(
+      view,
+      selectorFor(view, 'random', routeStyle, choiceRng, routeRng, BUILD_FOCUSED_TARGET),
     )
     if (choosing) return choosing
     if (ticksHeld <= 0) {
@@ -617,11 +791,15 @@ function randomPolicy(seed: string): BotPolicy {
  * build must not be so bad at flying that the build's contribution disappears
  * into its death rate.
  */
-function buildFocusedPolicy(targets: readonly string[] = BUILD_FOCUSED_TARGET): BotPolicy {
+function buildFocusedPolicy(
+  targets: readonly string[] = BUILD_FOCUSED_TARGET,
+  routeStyle: RouteStyle = 'item-only',
+): BotPolicy {
   const resolver = new ChoiceResolver()
   return (view) => {
-    const choosing = resolver.next(view, (choice) =>
-      chooseOffer(view, choice, 'build', null, targets),
+    const choosing = resolver.next(
+      view,
+      selectorFor(view, 'build', routeStyle, null, null, targets),
     )
     if (choosing) return choosing
 
@@ -654,27 +832,40 @@ export const BOTS: Readonly<Record<BotName, BotDef>> = {
   dodger: {
     name: 'dodger',
     measures: 'survivability floor — evades, fires only when unthreatened, takes stated synergies',
-    create: () => dodgerPolicy(),
+    routeStyle: 'direct',
+    create: (_seed, options) => dodgerPolicy(options?.routeStyle ?? 'direct'),
   },
   aggressor: {
     name: 'aggressor',
     measures: 'clear-speed ceiling — aligns and fires constantly, takes stated synergies',
-    create: () => aggressorPolicy(),
+    // The clear-rate benchmark. Held at `direct` so the number the M5 exit criterion
+    // is read off is not also a measurement of optional risk-taking.
+    routeStyle: 'direct',
+    create: (_seed, options) => aggressorPolicy(options?.routeStyle ?? 'direct'),
   },
   greedy: {
     name: 'greedy',
-    measures: 'difficulty curve under early engagement, and whether the shop is affordable at all',
-    create: () => greedyPolicy(),
+    measures:
+      'difficulty curve under early engagement, whether the shop is affordable, and the price of the world map',
+    // "Always takes the scrap and the risky route" — docs/VERIFICATION.md §2. The
+    // route half of that sentence was unimplementable until the world map existed.
+    routeStyle: 'rewarding',
+    create: (_seed, options) => greedyPolicy(options?.routeStyle ?? 'rewarding'),
   },
   random: {
     name: 'random',
     measures: 'control — depth here means the curve is broken; uniform picks anchor the 1-in-3 baseline',
-    create: (seed) => randomPolicy(seed),
+    routeStyle: 'random',
+    create: (seed, options) => randomPolicy(seed, options?.routeStyle ?? 'random'),
   },
   'build-focused': {
     name: 'build-focused',
     measures: `strength of one named synergy — chases ${BUILD_FOCUSED_TARGET.join(' + ')}`,
-    create: () => buildFocusedPolicy(),
+    // Accepts a hazard for an item and for nothing else: extra item screens are the
+    // only route reward that helps it assemble the pair it exists to measure, and
+    // taking a hazard for scrap would add deaths that the build gets blamed for.
+    routeStyle: 'item-only',
+    create: (_seed, options) => buildFocusedPolicy(BUILD_FOCUSED_TARGET, options?.routeStyle ?? 'item-only'),
   },
 }
 
@@ -692,6 +883,16 @@ export function isBotName(value: string): value is BotName {
  * same reason the combat tests fabricate enemy defs — a balance change must not
  * be able to break a bot test.
  */
-export function createBuildFocused(targets: readonly string[]): BotPolicy {
-  return buildFocusedPolicy(targets)
+export function createBuildFocused(
+  targets: readonly string[],
+  routeStyle: RouteStyle = 'item-only',
+): BotPolicy {
+  return buildFocusedPolicy(targets, routeStyle)
+}
+
+/** Every route style, so a sweep can enumerate them without hardcoding the list. */
+export const ROUTE_STYLES = ['direct', 'rewarding', 'item-only', 'random'] as const
+
+export function isRouteStyle(value: string): value is RouteStyle {
+  return (ROUTE_STYLES as readonly string[]).includes(value)
 }

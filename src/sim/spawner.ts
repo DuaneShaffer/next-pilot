@@ -91,6 +91,18 @@ export class Spawner {
     return this.wavesReleased
   }
 
+  /**
+   * Reserve the next instance id.
+   *
+   * Exposed so a boss — which is spawned by the World rather than by a wave script —
+   * draws from the same sequence. Two sequences would eventually issue the same uid
+   * to two live enemies, and a piercing round would then skip whichever it met
+   * second, silently and only sometimes.
+   */
+  takeUid(): number {
+    return this.nextUid++
+  }
+
   /** True once the script is exhausted and no staggered spawns remain. */
   get finished(): boolean {
     return this.nextWave >= this.schedule.length && this.pending.length === 0

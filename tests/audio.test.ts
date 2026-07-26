@@ -30,11 +30,19 @@ import {
   cueForEvent,
   layersDuration,
   panForX,
+  peakLayerGain,
   webAudioAvailable,
   type SoundCategory,
   type SoundId,
 } from '../src/audio'
 import { RecordingBackend } from '../src/audio/testing'
+import {
+  INSTRUCTION,
+  SEPARATION_FLOOR,
+  floorFor,
+  opposedPairs,
+  tierFor,
+} from '../src/audio/meaning'
 
 /**
  * One sample event per `SimEvent` variant, keyed by the union.
@@ -54,6 +62,12 @@ const SAMPLE_EVENTS: Record<SimEvent['kind'], SimEvent> = {
   'hull-lost': { kind: 'hull-lost', x: 224, y: 640 },
   'scrap-collected': { kind: 'scrap-collected', x: 180, y: 400, amount: 3 },
   'wave-released': { kind: 'wave-released', index: 4 },
+  'boss-spawned': { kind: 'boss-spawned', bossId: 'auditor', name: 'The Auditor' },
+  'boss-phase': { kind: 'boss-phase', bossId: 'auditor', phaseIndex: 1, callout: 'ESCALATING' },
+  'boss-killed': { kind: 'boss-killed', x: 224, y: 180, bossId: 'auditor' },
+  'hazard-warning': { kind: 'hazard-warning', hazardId: 'sweep' },
+  'hazard-fired': { kind: 'hazard-fired', hazardId: 'sweep' },
+  'stage-cleared': { kind: 'stage-cleared', stageIndex: 0 },
 }
 
 function fakeEnemy(overrides: Partial<EnemyInstance> = {}): EnemyInstance {
@@ -131,6 +145,11 @@ function fakeView(options: {
     activeInteractions: [],
     resolvedStats: {},
     pendingChoice: null,
+    stage: { index: 0, count: 3, sectorId: 'sector-1', sectorName: 'Outer Yard', bossName: null },
+    hullName: 'Lien',
+    boss: null,
+    hazards: [],
+    choiceResolve: null,
   }
 }
 
@@ -454,6 +473,178 @@ describe('the twenty-shots-per-second problem', () => {
   })
 })
 
+describe('the hazard warning', () => {
+  /**
+   * The one-second reaction window. `npm run audio` proves it cannot be MASKED —
+   * that it stands 29dB above combat in its own bands. These prove the other half:
+   * that it cannot be DROPPED, which is a mixer-policy question and therefore
+   * answerable here, headlessly, on every commit.
+   */
+  it('is never refused a voice, whatever else is sounding', () => {
+    const backend = new RecordingBackend()
+    const mixer = new Mixer(backend)
+    // Saturate every category, including alarms, with everything short of the
+    // run ending.
+    const filler = SOUND_IDS.filter((id) => id !== 'alarm.hullLost' && id !== 'alarm.hazardWarning')
+    for (let i = 0; i < 600 && mixer.activeVoices < MAX_VOICES; i++) {
+      const id = filler[i % filler.length]
+      if (id !== undefined) mixer.play(id)
+      backend.advance(0.003)
+    }
+    expect(mixer.activeVoices).toBe(MAX_VOICES)
+    expect(mixer.play('alarm.hazardWarning')).toBe(true)
+  })
+
+  it('survives a 256-event tick, which is the cap the sim enforces', () => {
+    const { audio, backend } = recordingDirector()
+    const storm: SimEvent[] = []
+    for (let i = 0; i < 256; i++) {
+      storm.push({ kind: 'enemy-killed', x: 20 + ((i * 37) % 400), y: 200, defId: 'skiff', scrap: 3, elite: i % 8 === 0 })
+    }
+    audio.handleEvents([...storm, SAMPLE_EVENTS['hazard-warning']])
+    const warnings = backend.startsOf('alarm.hazardWarning')
+    expect(warnings.length).toBe(1)
+    expect(warnings[0]?.stoppedAt).toBeNull()
+
+    // And nothing that arrives afterwards may steal it back.
+    backend.advance(0.05)
+    audio.handleEvents(storm)
+    expect(backend.startsOf('alarm.hazardWarning')[0]?.stoppedAt).toBeNull()
+  })
+
+  it('outranks everything except the run ending', () => {
+    for (const id of SOUND_IDS) {
+      if (id === 'alarm.hazardWarning' || id === 'alarm.hullLost') continue
+      expect(SOUNDS['alarm.hazardWarning'].priority, id).toBeGreaterThan(SOUNDS[id].priority)
+    }
+    expect(SOUNDS['alarm.hullLost'].priority).toBeGreaterThan(SOUNDS['alarm.hazardWarning'].priority)
+  })
+
+  it('never doubles, because the rhythm is what carries the meaning', () => {
+    // Three pulses at a known spacing are the cue. Two overlapping copies are
+    // six pulses at an unknown spacing, which is a different sound.
+    expect(SOUNDS['alarm.hazardWarning'].maxVoices).toBe(1)
+    const { audio, backend } = recordingDirector()
+    for (let i = 0; i < 20; i++) {
+      audio.handleEvents([SAMPLE_EVENTS['hazard-warning']])
+      backend.advance(0.01)
+    }
+    expect(backend.startsOf('alarm.hazardWarning').length).toBe(1)
+  })
+
+  it('fills the reaction window it is named after', () => {
+    // A telegraph that finishes early stops being a countdown. The hazard's
+    // window is one second; the cue must end with it, not halfway through.
+    const length = layersDuration(SOUNDS['alarm.hazardWarning'].layers)
+    expect(length).toBeGreaterThan(0.85)
+    expect(length).toBeLessThanOrEqual(1)
+  })
+
+  it('is not panned, because a hazard is not in a direction', () => {
+    for (const x of [0, PLAYFIELD_W, PLAYFIELD_W / 2]) {
+      void x
+      expect(cueForEvent({ kind: 'hazard-warning', hazardId: 'sweep' }).pan).toBe(0)
+    }
+  })
+})
+
+describe('the events added with bosses and hazards', () => {
+  it('gives each one its own sound rather than reusing a near neighbour', () => {
+    const added: SimEvent['kind'][] = [
+      'boss-spawned',
+      'boss-phase',
+      'boss-killed',
+      'hazard-warning',
+      'hazard-fired',
+      'stage-cleared',
+    ]
+    const sounds = added.map((kind) => cueForEvent(SAMPLE_EVENTS[kind]).sound)
+    expect(new Set(sounds).size).toBe(added.length)
+    // And none of them borrows a sound that already means something else.
+    const existing = SIM_EVENT_KINDS.filter((kind) => !added.includes(kind)).map(
+      (kind) => cueForEvent(SAMPLE_EVENTS[kind]).sound,
+    )
+    for (const sound of sounds) expect(existing).not.toContain(sound)
+  })
+
+  it('makes a boss death bigger than an elite death, which is bigger than a grunt', () => {
+    const grunt = layersDuration(SOUNDS['impact.kill'].layers)
+    const elite = layersDuration(SOUNDS['impact.killElite'].layers)
+    const boss = layersDuration(SOUNDS['impact.bossKilled'].layers)
+    expect(elite).toBeGreaterThan(grunt)
+    expect(boss).toBeGreaterThan(elite)
+    expect(SOUNDS['impact.bossKilled'].priority).toBeGreaterThan(SOUNDS['impact.killElite'].priority)
+  })
+
+  it('keeps the stage-cleared cue out of the way of the warning', () => {
+    // Structural feedback must never compete with the one cue a player has a
+    // second to act on — not in priority, and not in the mix.
+    expect(SOUNDS['ui.stageCleared'].priority).toBeLessThan(SOUNDS['alarm.hazardWarning'].priority)
+    expect(DEFAULT_CATEGORY_VOLUMES.ui).toBeLessThan(DEFAULT_CATEGORY_VOLUMES.alarm)
+  })
+})
+
+describe('what a cue tells the player to do', () => {
+  /**
+   * The classification in src/audio/meaning.ts is what decides how far apart two
+   * cues have to be. `npm run audio` does the measuring; these guard the
+   * structure, so a cue added later cannot slip past the demanding tier by simply
+   * not being in anybody's list.
+   */
+  it('classifies every sound, with no strays', () => {
+    // The Record makes a missing sound a typecheck error. This catches the other
+    // direction — a key for a sound that no longer exists — at runtime.
+    expect(Object.keys(INSTRUCTION).sort()).toEqual([...SOUND_IDS].sort())
+  })
+
+  it('derives the opposed pairs instead of listing them', () => {
+    const pairs = opposedPairs()
+    expect(pairs.length).toBeGreaterThan(0)
+
+    // Every opposed pair really is one instruction against its contradiction.
+    for (const [a, b] of pairs) {
+      const kinds = [INSTRUCTION[a], INSTRUCTION[b]].sort()
+      expect(kinds, `${a}/${b}`).toEqual(['evade', 'stand-down'])
+    }
+
+    // The derivation is complete: every stand-down × evade combination is present.
+    const expected = SOUND_IDS.filter((id) => INSTRUCTION[id] === 'stand-down').length *
+      SOUND_IDS.filter((id) => INSTRUCTION[id] === 'evade').length
+    expect(pairs.length).toBe(expected)
+
+    // And the pair that motivated all of this is in there.
+    const has = pairs.some(
+      ([a, b]) =>
+        (a === 'alarm.shieldAbsorb' && b === 'alarm.shieldBroken') ||
+        (a === 'alarm.shieldBroken' && b === 'alarm.shieldAbsorb'),
+    )
+    expect(has, 'shield held vs shield gone must be an opposed pair').toBe(true)
+  })
+
+  it('demands more of an opposed pair than of a merely different one', () => {
+    expect(SEPARATION_FLOOR.opposed).toBeGreaterThan(SEPARATION_FLOOR.distinct)
+    expect(floorFor('alarm.shieldAbsorb', 'alarm.shieldBroken')).toBe(SEPARATION_FLOOR.opposed)
+    expect(floorFor('ui.confirm', 'ui.cancel')).toBe(SEPARATION_FLOOR.distinct)
+    // Order must not matter.
+    expect(tierFor('alarm.shieldBroken', 'alarm.shieldAbsorb')).toBe('opposed')
+    expect(tierFor('alarm.shieldAbsorb', 'alarm.shieldBroken')).toBe('opposed')
+  })
+
+  it('keeps a stand-down cue out of the hazard warning’s reserved band', () => {
+    // The warning owns 3.1-3.8kHz (see its recipe). A cue meaning "you are fine"
+    // living in the band that means "you have one second" is backwards, and it is
+    // what the in-combat measurement caught.
+    const standDown = SOUND_IDS.filter((id) => INSTRUCTION[id] === 'stand-down')
+    expect(standDown.length).toBeGreaterThan(0)
+    for (const id of standDown) {
+      for (const layer of SOUNDS[id].layers) {
+        const inReserve = layer.freq >= 2900 && layer.freq <= 4000
+        expect(inReserve, `${id} has a layer at ${layer.freq}Hz, inside the warning's band`).toBe(false)
+      }
+    }
+  })
+})
+
 describe('unlock', () => {
   it('is idempotent and safe when already running', () => {
     const backend = new RecordingBackend({ state: 'suspended' })
@@ -602,14 +793,74 @@ describe('gain structure', () => {
     }
   })
 
-  it('keeps a single voice inside the output range at default levels', () => {
-    // Layers sum inside a voice, so a recipe with four loud layers can clip on
-    // its own even with a legal voice gain. The master limiter is a safety net,
-    // not an excuse.
+  it('has no recipe whose simultaneous layers could run away', () => {
+    // A SMOKE TEST, and worth being clear about which. Layers sum inside a voice,
+    // so a recipe with a mistyped gain can be far hotter than its category says.
+    // This catches that. It cannot tell you whether a cue clips, because it
+    // assumes every overlapping layer hits its envelope peak at the same instant
+    // through no filter, which is roughly 8dB pessimistic in practice — the real
+    // clipping check is the measured true peak in `npm run audio`, which asserts
+    // -1 dBTP per cue against an actual render.
+    //
+    // The bound is on the *overlapping* gain, not the total: `alarm.hazardWarning`
+    // is three pulses that never coincide, and summing them regardless of time
+    // would reject the most important sound in the game for being loud once.
     for (const id of SOUND_IDS) {
-      const sum = SOUNDS[id].layers.reduce((total, layer) => total + layer.gain, 0)
-      expect(sum * VOICE_PEAK_CEILING * DEFAULT_MASTER_VOLUME, `${id} sums too hot`).toBeLessThanOrEqual(1)
+      expect(peakLayerGain(SOUNDS[id].layers), `${id} stacks too hot`).toBeLessThanOrEqual(2.5)
     }
+    // And the bound is not vacuous: something in the library is genuinely dense.
+    expect(Math.max(...SOUND_IDS.map((id) => peakLayerGain(SOUNDS[id].layers)))).toBeGreaterThan(2)
+  })
+
+  it('applies the voice ceiling as a scale, so the hierarchy survives it', () => {
+    // The regression this locks: `VOICE_PEAK_CEILING` was once a clamp, which
+    // pinned every sound whose nominal gain exceeded 0.7 to exactly 0.7 —
+    // ten of twenty sounds, including every alarm and every threat. A shield
+    // absorbing a hit left the mixer at the same level as losing the run.
+    const backend = new RecordingBackend()
+    const mixer = new Mixer(backend)
+    for (const id of SOUND_IDS) {
+      mixer.play(id)
+      backend.advance(2)
+    }
+    const gains = backend.started.map((voice) => voice.request.gain)
+    expect(gains.length).toBe(SOUND_IDS.length)
+    for (const gain of gains) expect(gain).toBeLessThanOrEqual(VOICE_PEAK_CEILING)
+
+    const gainOf = (id: SoundId): number => backend.startsOf(id)[0]?.request.gain ?? Number.NaN
+    const nominal = (id: SoundId): number =>
+      DEFAULT_CATEGORY_VOLUMES[SOUNDS[id].category] * SOUNDS[id].gain
+
+    // THE PROPERTY: headroom must not destroy information. Every distinct level
+    // the hierarchy asks for must still be a distinct level coming out. Under the
+    // clamp, five distinct nominal levels (0.71, 0.76, 0.8, 0.95, 1.0) became one.
+    const distinctAsked = new Set(SOUND_IDS.map((id) => Math.min(1, nominal(id)).toFixed(6)))
+    const distinctGot = new Set(gains.map((gain) => gain.toFixed(6)))
+    expect(distinctGot.size, 'the ceiling collapsed levels the hierarchy asked for').toBe(
+      distinctAsked.size,
+    )
+
+    // The specific collapse that used to happen, named so it cannot come back:
+    // a shield holding is not the same event as the run ending.
+    expect(nominal('alarm.shieldAbsorb')).toBeLessThan(nominal('alarm.hullLost'))
+    expect(gainOf('alarm.shieldAbsorb')).toBeLessThan(gainOf('alarm.hullLost'))
+
+    // And the gain a sound gets is exactly proportional to what it was granted.
+    for (const id of SOUND_IDS) {
+      expect(gainOf(id), id).toBeCloseTo(Math.min(1, nominal(id)) * VOICE_PEAK_CEILING, 6)
+    }
+    expect(gainOf('alarm.hullLost')).toBeGreaterThan(gainOf('threat.enemyShot'))
+    expect(gainOf('threat.enemyShot')).toBeGreaterThan(gainOf('impact.kill'))
+  })
+
+  it('keeps the master level inside the headroom the render measured', () => {
+    // Raised from 0.55 to 0.7 on the evidence in `npm run audio`: the worst mix
+    // the simulation can produce measured -6.3 dBTP at the old level. Anything
+    // near 1.0 would put a 256-event tick into the converter's face, and the
+    // harness is the only thing that can see that — so this test exists to make
+    // the next change to this number deliberate rather than incidental.
+    expect(DEFAULT_MASTER_VOLUME).toBeGreaterThanOrEqual(0.5)
+    expect(DEFAULT_MASTER_VOLUME).toBeLessThanOrEqual(0.8)
   })
 
   it('lets each category be turned down independently', () => {

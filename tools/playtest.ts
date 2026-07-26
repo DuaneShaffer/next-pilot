@@ -25,16 +25,30 @@ import type { InputSnapshot } from '../src/core/input'
 import { TICK_HZ } from '../src/core/loop'
 import { normalizeSeed } from '../src/core/seed'
 import { Playfield } from '../src/core/space'
+import { BOSSES, SECTOR_PLAYER_DPS } from '../src/content/bosses'
+import { HAZARDS } from '../src/content/hazards'
+import { HULLS, HULL_ORDER } from '../src/content/hulls'
 import { INTERACTIONS } from '../src/content/interactions'
 import { ITEMS } from '../src/content/items'
+import { STANDARD_RUN } from '../src/content/runs'
+import { SECTORS } from '../src/content/sectors'
 import type {
+  Bullet,
   DeathCauseKind,
   PendingChoiceKind,
   RunState,
   WorldView,
 } from '../src/sim/entities'
-import type { BotName } from '../src/sim/bots'
-import { BOTS, BOT_NAMES, BUILD_FOCUSED_TARGET, MAX_CHOICE_RESOLUTION_TICKS, isBotName } from '../src/sim/bots'
+import type { BotName, RouteStyle } from '../src/sim/bots'
+import {
+  BOTS,
+  BOT_NAMES,
+  BUILD_FOCUSED_TARGET,
+  MAX_CHOICE_RESOLUTION_TICKS,
+  ROUTE_STYLES,
+  isBotName,
+  isRouteStyle,
+} from '../src/sim/bots'
 import type { RunContent } from '../src/sim/world'
 import { World } from '../src/sim/world'
 import { digestWorld } from '../src/meta/snapshot'
@@ -56,23 +70,96 @@ import { decodeReplay, playback, ReplayRecorder } from '../src/meta/replay'
  * criterion is meant to catch. The bots themselves still see nothing but
  * `WorldView`.
  */
-const RUN_CONTENT: RunContent = { items: ITEMS, interactions: INTERACTIONS }
+const RUN_CONTENT: RunContent = {
+  items: ITEMS,
+  interactions: INTERACTIONS,
+  run: STANDARD_RUN,
+  sectors: Object.fromEntries(SECTORS.map((sector) => [sector.id, sector])),
+  bosses: BOSSES,
+  hazards: HAZARDS,
+}
+
+/**
+ * The five-sector run as the app wires it, plus one hull.
+ *
+ * Mirrors `src/main.ts` exactly. A sweep that flew a different run from the one
+ * that ships would produce numbers about a game nobody plays, and this is the one
+ * place in the harness where that could quietly happen.
+ */
+function contentForHull(hullId: string | null): RunContent {
+  if (hullId === null) return RUN_CONTENT
+  const hull = HULLS[hullId]
+  if (hull === undefined) fail(`unknown hull "${hullId}". Known: ${HULL_ORDER.join(', ')}`)
+  return { ...RUN_CONTENT, hull }
+}
+
+/** Single-sector content, for numbers comparable with the M1–M4 sweeps. */
+const SECTOR_ONE_CONTENT: RunContent = { items: ITEMS, interactions: INTERACTIONS }
 
 const ALL_ITEM_IDS: readonly string[] = Object.keys(ITEMS).sort()
 const ALL_INTERACTION_IDS: readonly string[] = INTERACTIONS.map((i) => i.id).sort()
+
+/** Boss id -> authored HP, so a measured time-to-kill can become a measured dps. */
+const BOSS_HP: Readonly<Record<string, number>> = Object.fromEntries(
+  Object.values(BOSSES).map((boss) => [boss.id, boss.hp]),
+)
+
+/** Sector id -> authored wave count, so "died on wave 12" has a denominator. */
+const SECTOR_WAVES: Readonly<Record<string, number>> = Object.fromEntries(
+  SECTORS.map((sector) => [sector.id, sector.waves.length]),
+)
+
+function sectorWaveCount(sectorId: string): number {
+  return SECTOR_WAVES[sectorId] ?? 0
+}
+
+/** A route as it was offered, reduced to what can be matched after the fact. */
+interface RouteOfferSummary {
+  hazardIds: string
+  reward: string
+}
+
+/**
+ * Which approach the policy took, inferred from the hazards that ended up armed.
+ *
+ * The sim does not report the chosen index on `WorldView` — a route resolves and
+ * the card is gone — so this matches the hazard set the next sector actually armed
+ * against the sets the card offered. THE AMBIGUOUS CASE IS REAL AND IS NOT HIDDEN:
+ * when a sector has only one hazard, `buildRoutes` puts the same hazard on both
+ * priced options and only the reward differs, so the two are indistinguishable
+ * here and the first match wins. That makes the `routeReward` column unreliable in
+ * exactly that case, which COVERAGE states. The column this report actually reads
+ * is "did the pilot arrive with a hazard armed", and that is exact.
+ */
+function matchRoute(
+  offered: readonly RouteOfferSummary[] | null,
+  armed: readonly string[],
+): { index: number; reward: string } | null {
+  if (offered === null) return null
+  const key = [...armed].sort().join(',')
+  for (let i = 0; i < offered.length; i++) {
+    if (offered[i]?.hazardIds === key) return { index: i, reward: offered[i]?.reward ?? 'none' }
+  }
+  return null
+}
 
 const DEFAULT_RUNS = 200
 const DEFAULT_SEED = 'K7F29XQM3RTV'
 /**
  * Hard tick ceiling per run, in seconds of sim time.
  *
- * Sector 1 is nominally ~3 minutes, so 240s leaves room for a slow clear. Runs
- * that hit the cap are counted and called out: survival statistics over censored
- * data are lower bounds, and reporting a median as if it were exact when a
- * quarter of runs were cut short is exactly the kind of quiet lie this harness
+ * The shipped run is 180+180+180+180+210 = 930 seconds of authored sector time
+ * before a single boss fight, and a stage is held open until its boss is dead —
+ * so a *cleared* run is comfortably over twenty minutes. 1,800s is roughly 1.6x
+ * the longest clear observed, which leaves room for a slow build without letting
+ * a stalled run consume a sweep.
+ *
+ * Runs that hit the cap are counted and called out: survival statistics over
+ * censored data are lower bounds, and reporting a median as if it were exact when
+ * a quarter of runs were cut short is exactly the kind of quiet lie this harness
  * exists to prevent.
  */
-const DEFAULT_MAX_SECONDS = 240
+const DEFAULT_MAX_SECONDS = 1800
 
 /** How often to sample the live enemy set for coverage reporting. */
 const ENEMY_SAMPLE_TICKS = 15
@@ -160,6 +247,93 @@ interface ChoiceObservation {
   resolved: boolean
 }
 
+/**
+ * One sector of one run, from arrival to whatever ended it.
+ *
+ * THE REASON THIS TYPE EXISTS: every M5 exit criterion is per-sector or per-hull,
+ * and an aggregate clear rate cannot show a cliff. "38% of runs clear" is the same
+ * number whether the difficulty is a smooth ramp or whether four sectors are free
+ * and the fifth kills everyone, and those are opposite problems with opposite fixes.
+ *
+ * Entry state is snapshotted BEFORE the sector's first tick, so "scrap on entry to
+ * sector 4" is what the pilot arrived with rather than what they left with.
+ */
+export interface StageObservation {
+  index: number
+  sectorId: string
+  sectorName: string
+
+  // --- what the pilot arrived with -----------------------------------------
+  entryScrap: number
+  entryItems: number
+  entryIntegrity: number
+  entryMaxIntegrity: number
+  entryShield: number
+  /**
+   * The build's damage-per-second CEILING on arrival: damage x volley x rate.
+   *
+   * Same arithmetic `SECTOR_PLAYER_DPS` in `src/content/bosses.ts` is built from
+   * (80 = 4 damage x 1 projectile x 20 shots/s). The volley width is MEASURED —
+   * counted off new player bullets — because `projectilesPerShot` is a stat and
+   * split-shot is an *effect*, and only the first reaches `resolvedStats`. A build
+   * holding Flak Spread reports `projectilesPerShot: 1` and fires six.
+   *
+   * IT IS A CEILING, NOT A PREDICTION, and the gap matters for exactly the builds
+   * that make it large. It assumes every projectile in the fan lands on one target,
+   * which is true for a single stream and false for a six-shot spread — so a
+   * split-shot build's ceiling can be several times its real single-target output.
+   * The honest single-target figure is `hp / measured boss ttk`, which is reported
+   * beside it. Read the two together or not at all.
+   */
+  entryCeilingDps: number
+  /** Volley width the nominal figure was computed from. 1 until an item widens it. */
+  entryVolley: number
+  /** Hazards armed for this sector by the route the policy took in. */
+  hazardIds: readonly string[]
+  /** Index of the approach taken. 0 is always the free direct one. Null for sector 1. */
+  routeIndex: number | null
+  routeReward: string | null
+
+  // --- what happened --------------------------------------------------------
+  ticks: number
+  /** Positive hp decrements observed across every live enemy. See COVERAGE. */
+  damageDealt: number
+  /**
+   * Ticks with at least one enemy on screen.
+   *
+   * `damageDealt / ticks` is not a dps: a sector is 180 seconds of authored script
+   * with real gaps between waves, so dividing by wall time measures how much HP the
+   * sector contains rather than what the pilot can put out. Dividing by engaged
+   * time is the honest denominator.
+   */
+  engagedTicks: number
+  damageTaken: number
+  kills: number
+  scrapEarned: number
+  /** Waves released in this sector. Resets per sector, so it is not survival time. */
+  wavesReached: number
+  waveCount: number
+
+  // --- how it ended ---------------------------------------------------------
+  outcome: 'cleared' | 'died' | 'unfinished'
+  deathCauseKind: string | null
+  deathCauseId: string | null
+  /** Wave of THIS sector the pilot died on. Null when they did not die here. */
+  deathWaveIndex: number | null
+
+  // --- the boss -------------------------------------------------------------
+  bossId: string | null
+  bossName: string | null
+  bossSpawned: boolean
+  bossKilled: boolean
+  /** Ticks from `boss-spawned` to `boss-killed`, or to death. Null if never met. */
+  bossTicks: number | null
+  /** Highest phase index reached. -1 when the boss never spawned. */
+  bossPhaseReached: number
+  /** True when the run ended during the boss fight rather than during the waves. */
+  diedToBoss: boolean
+}
+
 export interface RunResult {
   seed: string
   policy: BotName
@@ -193,6 +367,16 @@ export interface RunResult {
   finalInteractions: readonly string[]
   /** Scrap paid out across the run. `scrap` is the balance left over. */
   scrapSpent: number
+
+  // --- M5: the five-sector run ---------------------------------------------
+  hullId: string
+  routeStyle: RouteStyle
+  /** One entry per sector entered, in order. Length is "how far the run got". */
+  stages: readonly StageObservation[]
+  /** Index of the sector the run ended in. */
+  finalStageIndex: number
+  /** Stages cleared. 5 means the run was completed. */
+  stagesCleared: number
 }
 
 interface RunObservations {
@@ -217,6 +401,10 @@ function emptyObservations(): RunObservations {
 interface RunOptions {
   maxTicks: number
   observations: RunObservations
+  /** Hull the run flies. Null means the stat-table baseline, which is the Lien. */
+  hullId?: string | null
+  /** Overrides the policy's own world-map appetite, for ablation sweeps. */
+  routeStyle?: RouteStyle | undefined
   /**
    * Item pool the run draws from.
    *
@@ -249,6 +437,52 @@ function acquiredId(
   return null
 }
 
+/**
+ * Everything accumulating about the sector currently being flown.
+ *
+ * Separate from `StageObservation` because the entry snapshot has to be taken at a
+ * different moment from the totals: entry is read the instant `stage.index` moves,
+ * and the totals are differences against the run-wide counters at that instant.
+ */
+interface OpenStage {
+  index: number
+  sectorId: string
+  sectorName: string
+  bossId: string | null
+  bossName: string | null
+  startTick: number
+  entryScrap: number
+  entryItems: number
+  entryIntegrity: number
+  entryMaxIntegrity: number
+  entryShield: number
+  entryCeilingDps: number
+  entryVolley: number
+  hazardIds: readonly string[]
+  routeIndex: number | null
+  routeReward: string | null
+  killsAtStart: number
+  damageTakenAtStart: number
+  scrapEarnedAtStart: number
+  damageDealt: number
+  engagedTicks: number
+  maxWaveIndex: number
+  bossSpawnTick: number | null
+  bossEndTick: number | null
+  bossKilled: boolean
+  bossPhaseReached: number
+}
+
+/**
+ * The build's damage-per-second ceiling as it stands. See `entryCeilingDps`.
+ */
+function ceilingDps(view: WorldView, volley: number): number {
+  const damage = view.resolvedStats.projectileDamage ?? 4
+  const interval = view.resolvedStats.fireIntervalTicks ?? 3
+  if (interval <= 0) return 0
+  return damage * volley * (TICK_HZ / interval)
+}
+
 /** A choice screen currently open, waiting to be resolved. */
 interface OpenChoice {
   kind: PendingChoiceKind
@@ -263,13 +497,109 @@ interface OpenChoice {
 function runOnce(policyName: BotName, seed: string, options: RunOptions): RunResult {
   const world = options.content === undefined ? new World(seed) : new World(seed, options.content)
   const view: WorldView = world
-  const policy = BOTS[policyName].create(seed)
+  const policy = BOTS[policyName].create(
+    seed,
+    options.routeStyle === undefined ? undefined : { routeStyle: options.routeStyle },
+  )
   const obs = options.observations
 
   const choices: ChoiceObservation[] = []
   let open: OpenChoice | null = null
   let scrapSpent = 0
   let shopsSeen = 0
+
+  // --- per-sector instrumentation --------------------------------------------
+  const stages: StageObservation[] = []
+  let stagesCleared = 0
+  /**
+   * Enemy hp as it stood at the end of the previous tick, keyed by uid.
+   *
+   * Summing positive decrements is the only way to see damage output from outside
+   * the sim: nothing on `WorldView` reports damage dealt. It undercounts by the
+   * hp an enemy had left on the tick it died, because reaping removes it from the
+   * array in the same tick — see COVERAGE.
+   */
+  const enemyHp = new Map<number, number>()
+  /** Player bullets already counted, so each volley's width is counted once. */
+  const seenBullets = new WeakSet<Bullet>()
+  /** Widest volley seen in the current sector. Max, not last: the cap can clip one. */
+  let volley = 1
+  /** The route card resolved most recently, waiting for its sector to open. */
+  let pendingRoute: { index: number; reward: string } | null = null
+  /** The route card's options while it is open, for `matchRoute` after it closes. */
+  let routeOffer: readonly RouteOfferSummary[] | null = null
+
+  const takeStage = (): OpenStage => ({
+    index: view.stage.index,
+    sectorId: view.stage.sectorId,
+    sectorName: view.stage.sectorName,
+    bossId: null,
+    bossName: view.stage.bossName,
+    startTick: view.stats.tick,
+    entryScrap: view.stats.scrap,
+    entryItems: view.inventory.length,
+    entryIntegrity: view.hull.integrity,
+    entryMaxIntegrity: view.hull.maxIntegrity,
+    entryShield: view.hull.shield,
+    entryCeilingDps: ceilingDps(view, volley),
+    entryVolley: volley,
+    hazardIds: view.hazards.map((h) => h.id),
+    routeIndex: pendingRoute?.index ?? null,
+    routeReward: pendingRoute?.reward ?? null,
+    killsAtStart: view.stats.kills,
+    damageTakenAtStart: view.stats.damageTaken,
+    scrapEarnedAtStart: view.stats.scrap + scrapSpent,
+    damageDealt: 0,
+    engagedTicks: 0,
+    maxWaveIndex: 0,
+    bossSpawnTick: null,
+    bossEndTick: null,
+    bossKilled: false,
+    bossPhaseReached: -1,
+  })
+
+  const closeStage = (stage: OpenStage, outcome: StageObservation['outcome']): StageObservation => {
+    const diedToBoss = outcome === 'died' && stage.bossSpawnTick !== null && !stage.bossKilled
+    return {
+      index: stage.index,
+      sectorId: stage.sectorId,
+      sectorName: stage.sectorName,
+      entryScrap: stage.entryScrap,
+      entryItems: stage.entryItems,
+      entryIntegrity: stage.entryIntegrity,
+      entryMaxIntegrity: stage.entryMaxIntegrity,
+      entryShield: stage.entryShield,
+      entryCeilingDps: stage.entryCeilingDps,
+      entryVolley: stage.entryVolley,
+      hazardIds: stage.hazardIds,
+      routeIndex: stage.routeIndex,
+      routeReward: stage.routeReward,
+      ticks: view.stats.tick - stage.startTick,
+      damageDealt: stage.damageDealt,
+      engagedTicks: stage.engagedTicks,
+      damageTaken: view.stats.damageTaken - stage.damageTakenAtStart,
+      kills: view.stats.kills - stage.killsAtStart,
+      scrapEarned: view.stats.scrap + scrapSpent - stage.scrapEarnedAtStart,
+      wavesReached: stage.maxWaveIndex,
+      waveCount: sectorWaveCount(stage.sectorId),
+      outcome,
+      deathCauseKind: outcome === 'died' ? (view.incident?.causeKind ?? 'unattributed') : null,
+      deathCauseId: outcome === 'died' ? (view.incident?.causeEnemyId ?? null) : null,
+      deathWaveIndex: outcome === 'died' ? stage.maxWaveIndex : null,
+      bossId: stage.bossId,
+      bossName: stage.bossName,
+      bossSpawned: stage.bossSpawnTick !== null,
+      bossKilled: stage.bossKilled,
+      bossTicks:
+        stage.bossSpawnTick === null
+          ? null
+          : (stage.bossEndTick ?? view.stats.tick) - stage.bossSpawnTick,
+      bossPhaseReached: stage.bossPhaseReached,
+      diedToBoss,
+    }
+  }
+
+  let stage: OpenStage = takeStage()
 
   let ticks = 0
   while (view.runState === 'active' && ticks < options.maxTicks) {
@@ -330,11 +660,91 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
       open = null
     }
 
+    // --- damage output, measured from the outside --------------------------
+    // Every live enemy's hp against what it was last tick. Unavoidably per-tick:
+    // sampling would miss most of the decrements entirely.
+    let engaged = false
+    for (const enemy of view.enemies) {
+      if (enemy.alive) engaged = true
+      const previous = enemyHp.get(enemy.uid)
+      if (previous !== undefined && enemy.hp < previous) stage.damageDealt += previous - enemy.hp
+      enemyHp.set(enemy.uid, enemy.hp)
+    }
+    if (engaged) stage.engagedTicks++
+
+    // --- volley width, measured from new player bullets ---------------------
+    let fresh = 0
+    for (const bullet of view.playerBullets) {
+      if (seenBullets.has(bullet)) continue
+      seenBullets.add(bullet)
+      fresh++
+    }
+    // RETALIATION FIRE IS ALSO A PLAYER BULLET. `retaliate()` pushes a whole ring
+    // into the same array on any tick the hull loses integrity, so counting fresh
+    // bullets blindly reported a Retaliation Coil build as firing a 13-shot volley
+    // and inflated its nominal dps by an order of magnitude. Only ticks that fired
+    // the weapon and took no hull hit are admissible.
+    let shot = false
+    let hit = false
+    for (const event of view.events) {
+      if (event.kind === 'player-shot') shot = true
+      else if (event.kind === 'hull-hit') hit = true
+    }
+    // Max over admissible ticks, not last: the projectile cap can refuse a fan's
+    // outer shots, and one clipped volley must not read as a narrower build.
+    if (shot && !hit && fresh > volley) volley = fresh
+
+    // --- the boss ------------------------------------------------------------
+    for (const event of view.events) {
+      if (event.kind === 'boss-spawned') {
+        stage.bossId = event.bossId
+        stage.bossName = event.name
+        stage.bossSpawnTick = view.stats.tick
+        stage.bossPhaseReached = 0
+      } else if (event.kind === 'boss-phase') {
+        if (event.phaseIndex > stage.bossPhaseReached) stage.bossPhaseReached = event.phaseIndex
+      } else if (event.kind === 'boss-killed') {
+        stage.bossKilled = true
+        stage.bossEndTick = view.stats.tick
+      }
+    }
+    if (view.stats.waveIndex > stage.maxWaveIndex) stage.maxWaveIndex = view.stats.waveIndex
+
+    // --- the route card, so an arriving sector knows how it was entered ------
+    if (routeOffer === null && pending?.kind === 'route') {
+      routeOffer = pending.routes.map((route) => ({
+        hazardIds: [...route.hazardIds].sort().join(','),
+        reward: route.reward.kind,
+      }))
+    }
+
+    // --- the seam ------------------------------------------------------------
+    if (view.stage.index !== stage.index) {
+      stages.push(closeStage(stage, 'cleared'))
+      stagesCleared++
+      // Set, read by `takeStage`, then cleared — so a sector entered without a
+      // route card (sector 1, or a stage whose card was skipped) reports null
+      // rather than inheriting the previous seam's answer.
+      pendingRoute = matchRoute(routeOffer, view.hazards.map((h) => h.id))
+      routeOffer = null
+      stage = takeStage()
+      pendingRoute = null
+    }
+
     // Sampled rather than per-tick: this is coverage bookkeeping, not sim state,
     // and scanning every enemy every tick would show up in the sweep timing.
     if (ticks % ENEMY_SAMPLE_TICKS === 0) {
       for (const enemy of view.enemies) if (enemy.alive) obs.enemyDefsSeen.add(enemy.defId)
     }
+  }
+
+  // The final sector: cleared only when the run actually extracted, because the
+  // last stage has no seam to cross and would otherwise never be recorded.
+  if (view.runState === 'extracted') {
+    stages.push(closeStage(stage, 'cleared'))
+    stagesCleared++
+  } else {
+    stages.push(closeStage(stage, view.runState === 'lost' ? 'died' : 'unfinished'))
   }
 
   // A run that ended (or was truncated) with a screen still open never got to
@@ -384,6 +794,11 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
     finalStacks: Object.fromEntries(view.inventory.map((entry) => [entry.defId, entry.count])),
     finalInteractions: view.activeInteractions.map((entry) => entry.defId),
     scrapSpent,
+    hullId: options.hullId ?? 'lien',
+    routeStyle: options.routeStyle ?? BOTS[policyName].routeStyle,
+    stages,
+    finalStageIndex: view.stage.index,
+    stagesCleared,
   }
 }
 
@@ -795,6 +1210,210 @@ function summariseBuilds(runs: readonly RunResult[]): BuildReport {
   }
 }
 
+// ---------------------------------------------------------------------------
+// M5: the five-sector run, per sector
+// ---------------------------------------------------------------------------
+
+export interface SectorRow {
+  index: number
+  sectorId: string
+  sectorName: string
+  waveCount: number
+
+  entered: number
+  cleared: number
+  died: number
+  unfinished: number
+  /** cleared / entered. The conditional clear rate — the shape of the curve. */
+  clearRate: number
+  /**
+   * This sector's share of ALL deaths in the sweep.
+   *
+   * The number M5's third exit criterion is written against ("no single spike
+   * above 35%"). Deliberately NOT the same as `1 - clearRate`: a sector that kills
+   * everyone who reaches it is a cliff only if people reach it, and a conditional
+   * rate on eleven survivors is not a spike.
+   */
+  deathShare: number
+
+  medianSeconds: number
+  /** Entry state, at the median across every run that arrived. */
+  medianEntryScrap: number
+  medianEntryItems: number
+  medianEntryIntegrity: number
+  medianEntryHealthPct: number
+  /** Damage x volley x rate at entry. An UPPER BOUND — see `entryCeilingDps`. */
+  medianEntryCeilingDps: number
+  p10EntryCeilingDps: number
+  p90EntryCeilingDps: number
+  /** Realised dps: observed damage dealt over ENGAGED seconds. Includes uptime. */
+  medianSectorDps: number
+  medianDamageTaken: number
+  /**
+   * Incoming damage per ENGAGED second. How hard the sector hits, build-independent.
+   */
+  medianIncomingDps: number
+  /**
+   * Effective health at entry divided by incoming damage per engaged second.
+   *
+   * "Seconds of contact this pilot could survive on arrival." The point of it is to
+   * separate two explanations of a death spike that a clear rate cannot: a sector
+   * that throws more damage, and a sector entered by a weaker pilot. Both move the
+   * clear rate; only the first moves incoming dps, and only the second moves entry
+   * health. This combines them into the number that actually decides the fight.
+   */
+  medianSurvivableSeconds: number
+  /** Runs that arrived with at least one hazard armed. */
+  hazardRuns: number
+
+  deathsDuringWaves: number
+  deathsDuringBoss: number
+  medianDeathWave: number
+  topDeathCauses: ReadonlyArray<[string, number]>
+
+  bossId: string | null
+  bossName: string | null
+  bossHp: number | null
+  bossEncounters: number
+  bossKills: number
+  bossKillRate: number
+  /** Seconds from `boss-spawned` to `boss-killed`, over kills only. */
+  bossTtkMedian: number
+  bossTtkP10: number
+  bossTtkP90: number
+  /** bossHp / measured ttk. The realistic dps the boss HP figures should assume. */
+  bossDpsMedian: number
+  /** Phase index the pilot reached when they died to this boss. */
+  bossPhaseAtDeath: Readonly<Record<number, number>>
+}
+
+export interface SectorReport {
+  rows: readonly SectorRow[]
+  totalRuns: number
+  totalDeaths: number
+  /** Runs that reached 'extracted'. The five-sector clear rate. */
+  fullClears: number
+  fullClearRate: number
+  /** Sector time of a completed run, median seconds. Zero when none completed. */
+  medianClearSeconds: number
+}
+
+function summariseSectors(runs: readonly RunResult[]): SectorReport {
+  const byIndex = new Map<number, StageObservation[]>()
+  for (const run of runs) {
+    for (const stage of run.stages) {
+      let bucket = byIndex.get(stage.index)
+      if (bucket === undefined) {
+        bucket = []
+        byIndex.set(stage.index, bucket)
+      }
+      bucket.push(stage)
+    }
+  }
+
+  const totalDeaths = runs.filter((r) => r.runState === 'lost').length
+  const rows: SectorRow[] = []
+
+  for (const [index, observed] of [...byIndex.entries()].sort((a, b) => a[0] - b[0])) {
+    const first = observed[0] as StageObservation
+    const died = observed.filter((s) => s.outcome === 'died')
+    const withBoss = observed.filter((s) => s.bossSpawned)
+    const killed = withBoss.filter((s) => s.bossKilled && s.bossTicks !== null)
+    const bossId = observed.find((s) => s.bossId !== null)?.bossId ?? null
+    const bossHp = bossId === null ? null : (BOSS_HP[bossId] ?? null)
+    const ttk = sortedNumbers(killed.map((s) => (s.bossTicks as number) / TICK_HZ))
+
+    const causes: Record<string, number> = {}
+    const phases: Record<number, number> = {}
+    for (const stage of died) {
+      const key = `${stage.deathCauseKind ?? 'unattributed'}:${stage.deathCauseId ?? '-'}`
+      causes[key] = (causes[key] ?? 0) + 1
+      if (stage.diedToBoss) phases[stage.bossPhaseReached] = (phases[stage.bossPhaseReached] ?? 0) + 1
+    }
+
+    const entryDps = sortedNumbers(observed.map((s) => s.entryCeilingDps))
+    const sectorDps = observed
+      .filter((s) => s.engagedTicks > 0)
+      .map((s) => s.damageDealt / (s.engagedTicks / TICK_HZ))
+    const engaged = observed.filter((s) => s.engagedTicks > 0)
+    const incoming = engaged.map((s) => s.damageTaken / (s.engagedTicks / TICK_HZ))
+    const survivable = engaged
+      .map((s) => {
+        const rate = s.damageTaken / (s.engagedTicks / TICK_HZ)
+        return rate <= 0 ? Infinity : (s.entryIntegrity + s.entryShield) / rate
+      })
+      .filter((v) => Number.isFinite(v))
+
+    rows.push({
+      index,
+      sectorId: first.sectorId,
+      sectorName: first.sectorName,
+      waveCount: first.waveCount,
+      entered: observed.length,
+      cleared: observed.filter((s) => s.outcome === 'cleared').length,
+      died: died.length,
+      unfinished: observed.filter((s) => s.outcome === 'unfinished').length,
+      clearRate:
+        observed.length === 0
+          ? 0
+          : observed.filter((s) => s.outcome === 'cleared').length / observed.length,
+      deathShare: totalDeaths === 0 ? 0 : died.length / totalDeaths,
+      medianSeconds: percentile(sortedNumbers(observed.map((s) => s.ticks / TICK_HZ)), 0.5),
+      medianEntryScrap: percentile(sortedNumbers(observed.map((s) => s.entryScrap)), 0.5),
+      medianEntryItems: percentile(sortedNumbers(observed.map((s) => s.entryItems)), 0.5),
+      medianEntryIntegrity: percentile(sortedNumbers(observed.map((s) => s.entryIntegrity)), 0.5),
+      medianEntryHealthPct: percentile(
+        sortedNumbers(
+          observed.map((s) =>
+            s.entryMaxIntegrity + s.entryShield === 0
+              ? 0
+              : (s.entryIntegrity + s.entryShield) / (s.entryMaxIntegrity + s.entryShield),
+          ),
+        ),
+        0.5,
+      ),
+      medianEntryCeilingDps: percentile(entryDps, 0.5),
+      p10EntryCeilingDps: percentile(entryDps, 0.1),
+      p90EntryCeilingDps: percentile(entryDps, 0.9),
+      medianSectorDps: percentile(sortedNumbers(sectorDps), 0.5),
+      medianDamageTaken: percentile(sortedNumbers(observed.map((s) => s.damageTaken)), 0.5),
+      medianIncomingDps: percentile(sortedNumbers(incoming), 0.5),
+      medianSurvivableSeconds: percentile(sortedNumbers(survivable), 0.5),
+      hazardRuns: observed.filter((s) => s.hazardIds.length > 0).length,
+      deathsDuringWaves: died.filter((s) => !s.diedToBoss).length,
+      deathsDuringBoss: died.filter((s) => s.diedToBoss).length,
+      medianDeathWave: percentile(sortedNumbers(died.map((s) => s.deathWaveIndex ?? 0)), 0.5),
+      topDeathCauses: Object.entries(causes)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4),
+      bossId,
+      bossName: observed.find((s) => s.bossName !== null)?.bossName ?? null,
+      bossHp,
+      bossEncounters: withBoss.length,
+      bossKills: killed.length,
+      bossKillRate: withBoss.length === 0 ? 0 : killed.length / withBoss.length,
+      bossTtkMedian: percentile(ttk, 0.5),
+      bossTtkP10: percentile(ttk, 0.1),
+      bossTtkP90: percentile(ttk, 0.9),
+      bossDpsMedian:
+        bossHp === null || ttk.length === 0 || percentile(ttk, 0.5) === 0
+          ? 0
+          : bossHp / percentile(ttk, 0.5),
+      bossPhaseAtDeath: phases,
+    })
+  }
+
+  const clears = runs.filter((r) => r.runState === 'extracted')
+  return {
+    rows,
+    totalRuns: runs.length,
+    totalDeaths,
+    fullClears: clears.length,
+    fullClearRate: runs.length === 0 ? 0 : clears.length / runs.length,
+    medianClearSeconds: percentile(sortedNumbers(clears.map((r) => r.seconds)), 0.5),
+  }
+}
+
 export interface PolicySummary {
   policy: BotName
   measures: string
@@ -823,6 +1442,14 @@ export interface PolicySummary {
   items: ItemReport
   economy: EconomyReport
   builds: BuildReport
+  /** M5: how far the run got, sector by sector. */
+  sectors: SectorReport
+  /** Default world-map appetite of this probe, or the sweep's override. */
+  routeStyle: RouteStyle
+  /** Runs that reached 'extracted' — a completed five-sector run. */
+  fullClearRate: number
+  /** Mean stages cleared. A blunt depth number that survives a 0% clear rate. */
+  meanStagesCleared: number
 }
 
 function summarise(policy: BotName, runs: readonly RunResult[]): PolicySummary {
@@ -877,6 +1504,11 @@ function summarise(policy: BotName, runs: readonly RunResult[]): PolicySummary {
     items: summariseItems(runs),
     economy: summariseEconomy(runs),
     builds: summariseBuilds(runs),
+    sectors: summariseSectors(runs),
+    routeStyle: runs[0]?.routeStyle ?? BOTS[policy].routeStyle,
+    fullClearRate:
+      runs.length === 0 ? 0 : runs.filter((r) => r.runState === 'extracted').length / runs.length,
+    meanStagesCleared: mean(runs.map((r) => r.stagesCleared)),
   }
 }
 
@@ -908,7 +1540,12 @@ function topCauses(summary: PolicySummary, limit: number): string {
 function printTable(summaries: readonly PolicySummary[]): void {
   const columns: Array<[string, number, (s: PolicySummary) => string]> = [
     ['policy', 10, (s) => s.policy],
+    ['route', 11, (s) => s.routeStyle],
     ['runs', 6, (s) => String(s.runs)],
+    // The M5 number. `surv` counts a truncated run as survival; `clear` counts only
+    // a run that actually reached the extraction at the end of sector five.
+    ['clear', 7, (s) => pct(s.fullClearRate)],
+    ['stages', 7, (s) => s.meanStagesCleared.toFixed(2)],
     ['surv', 7, (s) => pct(s.survivalRate)],
     ['p10 s', 7, (s) => s.seconds.p10.toFixed(1)],
     ['med s', 7, (s) => s.seconds.median.toFixed(1)],
@@ -931,7 +1568,13 @@ function printTable(summaries: readonly PolicySummary[]): void {
     )
   }
   console.log('')
-  console.log('wave column is median/max. p10/med/p90 are survival time in seconds.')
+  console.log(
+    'clear = full five-sector runs, the M5 number. stages = mean sectors cleared, which stays' +
+      ' informative at a 0% clear rate. wave is median/max WITHIN A SECTOR, so it is no longer',
+  )
+  console.log(
+    'survival time re-expressed. p10/med/p90 are survival time in seconds across the whole run.',
+  )
 }
 
 function printDeaths(summaries: readonly PolicySummary[]): void {
@@ -958,6 +1601,201 @@ function printDeaths(summaries: readonly PolicySummary[]): void {
       `    where (horizontal thirds): left ${share(left)}  centre ${share(centre)}  right ${share(right)}`,
     )
   }
+}
+
+// ---------------------------------------------------------------------------
+// M5 reporting
+// ---------------------------------------------------------------------------
+
+/** M5's third exit criterion: no sector may own more than this share of deaths. */
+const DEATH_SPIKE_MAX = 0.35
+/** M5's first exit criterion: a competent policy's full-run clear rate band. */
+const CLEAR_RATE_BAND = { min: 0.2, max: 0.4 } as const
+/** M5's second exit criterion: hull spread around the mean, in percentage points. */
+const HULL_SPREAD_MAX_PP = 15
+
+/**
+ * The per-sector table. THE central output of an M5 sweep.
+ *
+ * Every column here answers something the aggregate cannot. `enter` and `clear%`
+ * separate "hard" from "rarely reached"; `death%` is the cliff criterion and is a
+ * share of all deaths rather than a conditional rate; `dps` is what the boss HP
+ * ladder in `src/content/bosses.ts` is built on.
+ */
+function printSectors(report: SectorReport, label: string): void {
+  console.log('')
+  console.log(`PER-SECTOR — ${label}`)
+  if (report.rows.length === 0) {
+    console.log('  no sector was entered')
+    return
+  }
+  const header =
+    `  ${pad('#', 3)}${pad('sector', 16)}${padStart('enter', 7)}${padStart('clear', 7)}${padStart('clear%', 8)}` +
+    `${padStart('died', 6)}${padStart('death%', 8)}${padStart('med s', 8)}${padStart('scrap', 8)}` +
+    `${padStart('items', 7)}${padStart('hp%', 7)}${padStart('dps', 7)}${padStart('real', 7)}` +
+    `${padStart('incoming', 10)}${padStart('survive s', 11)}${padStart('hazard', 8)}`
+  console.log(header)
+  console.log(`  ${'-'.repeat(header.length - 2)}`)
+  for (const row of report.rows) {
+    console.log(
+      `  ${pad(String(row.index + 1), 3)}${pad(row.sectorName.slice(0, 15), 16)}` +
+        `${padStart(String(row.entered), 7)}${padStart(String(row.cleared), 7)}${padStart(pct(row.clearRate), 8)}` +
+        `${padStart(String(row.died), 6)}${padStart(pct(row.deathShare), 8)}` +
+        `${padStart(row.medianSeconds.toFixed(0), 8)}${padStart(row.medianEntryScrap.toFixed(0), 8)}` +
+        `${padStart(row.medianEntryItems.toFixed(0), 7)}${padStart(pct(row.medianEntryHealthPct), 7)}` +
+        `${padStart(row.medianEntryCeilingDps.toFixed(0), 7)}${padStart(row.medianSectorDps.toFixed(0), 7)}` +
+        `${padStart(row.medianIncomingDps.toFixed(1), 10)}${padStart(row.medianSurvivableSeconds.toFixed(1), 11)}` +
+        `${padStart(pct(row.entered === 0 ? 0 : row.hazardRuns / row.entered), 8)}`,
+    )
+  }
+  console.log('')
+  console.log(
+    '  clear% is conditional on ARRIVING; death% is this sector\'s share of every death in the sweep,',
+  )
+  console.log(
+    '  which is the number the "no difficulty cliff" criterion is written against. scrap/items/hp%/dps',
+  )
+  console.log(
+    '  are medians AT ENTRY. dps is the CEILING (damage x volley x rate, all shots on one target); real is',
+  )
+  console.log(
+    '  observed damage dealt over ENGAGED seconds (ticks with an enemy on screen), so it carries trigger',
+  )
+  console.log(
+    '  uptime, accuracy and dodging without being diluted by the gaps the wave script leaves.',
+  )
+  console.log(
+    '  incoming = damage TAKEN per engaged second; survive s = effective health at entry / incoming.',
+  )
+  console.log(
+    '  Those two split a death spike into its causes: a sector that hits harder moves `incoming`, a',
+  )
+  console.log(
+    '  sector entered by a weaker pilot moves `hp%`, and only `survive s` combines them the way the',
+  )
+  console.log('  fight does. It is the column to read when clear% and death% disagree.')
+
+  console.log('')
+  console.log('  where the deaths happened')
+  for (const row of report.rows) {
+    if (row.died === 0) {
+      console.log(`  ${pad(`${row.index + 1} ${row.sectorName}`, 20)} no deaths`)
+      continue
+    }
+    const phases = Object.entries(row.bossPhaseAtDeath)
+      .sort((a, b) => Number(a[0]) - Number(b[0]))
+      .map(([phase, n]) => `p${phase}:${n}`)
+      .join(' ')
+    console.log(
+      `  ${pad(`${row.index + 1} ${row.sectorName}`, 20)} ${padStart(String(row.died), 4)} deaths — ` +
+        `${row.deathsDuringWaves} in the waves (median wave ${row.medianDeathWave}/${row.waveCount}), ` +
+        `${row.deathsDuringBoss} on the boss${phases === '' ? '' : ` [${phases}]`}`,
+    )
+    console.log(
+      `  ${' '.repeat(20)} ${row.topDeathCauses
+        .map(([cause, n]) => `${cause} ${((n / row.died) * 100).toFixed(0)}%`)
+        .join(', ')}`,
+    )
+  }
+}
+
+/**
+ * Boss defeat rates and measured time-to-kill against what the content assumed.
+ *
+ * `src/content/bosses.ts` derives every boss's HP from `SECTOR_PLAYER_DPS` and
+ * states a band of 20-40 seconds at full uptime. Both halves are checkable here:
+ * the measured ttk is the fight the player actually has, and `hp / ttk` is the dps
+ * the HP figure should have been divided by.
+ */
+function printBosses(report: SectorReport): void {
+  const rows = report.rows.filter((row) => row.bossId !== null)
+  if (rows.length === 0) return
+  console.log('')
+  console.log('BOSSES — defeat rate and measured time-to-kill')
+  const header =
+    `  ${pad('#', 3)}${pad('boss', 20)}${padStart('hp', 7)}${padStart('met', 6)}${padStart('killed', 8)}` +
+    `${padStart('kill%', 8)}${padStart('ttk p10', 9)}${padStart('ttk med', 9)}${padStart('ttk p90', 9)}` +
+    `${padStart('hp/ttk', 8)}${padStart('assumed', 9)}`
+  console.log(header)
+  console.log(`  ${'-'.repeat(header.length - 2)}`)
+  for (const row of rows) {
+    const assumed = SECTOR_PLAYER_DPS[row.index]
+    console.log(
+      `  ${pad(String(row.index + 1), 3)}${pad((row.bossName ?? row.bossId ?? '?').slice(0, 19), 20)}` +
+        `${padStart(String(row.bossHp ?? 0), 7)}${padStart(String(row.bossEncounters), 6)}` +
+        `${padStart(String(row.bossKills), 8)}${padStart(pct(row.bossKillRate), 8)}` +
+        `${padStart(row.bossKills === 0 ? '-' : row.bossTtkP10.toFixed(1), 9)}` +
+        `${padStart(row.bossKills === 0 ? '-' : row.bossTtkMedian.toFixed(1), 9)}` +
+        `${padStart(row.bossKills === 0 ? '-' : row.bossTtkP90.toFixed(1), 9)}` +
+        `${padStart(row.bossKills === 0 ? '-' : row.bossDpsMedian.toFixed(0), 8)}` +
+        `${padStart(assumed === undefined ? '-' : String(assumed), 9)}`,
+    )
+  }
+  console.log('')
+  console.log(
+    `  hp/ttk is the dps the fight actually took, measured. assumed is SECTOR_PLAYER_DPS from`,
+  )
+  console.log(
+    `  src/content/bosses.ts, which every HP figure in that file is divided by. ttk band is` +
+      ` ${20}-${40}s at full uptime.`,
+  )
+  console.log('  kill% is conditional on the boss having spawned at all.')
+}
+
+/**
+ * The assumed dps ladder against three measured ones.
+ *
+ * Printed as its own block because it is the highest-leverage number in M5: if the
+ * ladder is wrong then all five boss HP figures are wrong with it, and no amount of
+ * per-phase tuning fixes a fight that is twice as long as intended.
+ */
+function printDpsLadder(report: SectorReport): void {
+  console.log('')
+  console.log('PLAYER DPS LADDER — SECTOR_PLAYER_DPS against what the sweep measured')
+  const header =
+    `  ${pad('#', 3)}${pad('sector', 16)}${padStart('assumed', 9)}${padStart('ceiling', 9)}` +
+    `${padStart('p10', 8)}${padStart('p90', 8)}${padStart('realised', 10)}${padStart('boss dps', 10)}${padStart('ratio', 8)}`
+  console.log(header)
+  console.log(`  ${'-'.repeat(header.length - 2)}`)
+  for (const row of report.rows) {
+    const assumed = SECTOR_PLAYER_DPS[row.index]
+    // Ratio is read off the BOSS figure, not the ceiling: a boss fight is the only
+    // sustained single-target engagement in the game, which is exactly the situation
+    // SECTOR_PLAYER_DPS was authored to describe.
+    const ratio =
+      assumed === undefined || assumed === 0 || row.bossKills === 0
+        ? 0
+        : row.bossDpsMedian / assumed
+    console.log(
+      `  ${pad(String(row.index + 1), 3)}${pad(row.sectorName.slice(0, 15), 16)}` +
+        `${padStart(assumed === undefined ? '-' : String(assumed), 9)}` +
+        `${padStart(row.medianEntryCeilingDps.toFixed(0), 9)}${padStart(row.p10EntryCeilingDps.toFixed(0), 8)}` +
+        `${padStart(row.p90EntryCeilingDps.toFixed(0), 8)}${padStart(row.medianSectorDps.toFixed(0), 10)}` +
+        `${padStart(row.bossKills === 0 ? '-' : row.bossDpsMedian.toFixed(0), 10)}` +
+        `${padStart(ratio === 0 ? '-' : `${ratio.toFixed(2)}x`, 8)}`,
+    )
+  }
+  console.log('')
+  console.log(
+    '  ceiling  = projectile damage x MEASURED volley width x volleys/second, at entry. Same arithmetic',
+  )
+  console.log(
+    '             the assumed column was authored from (80 = 4 damage x 1 projectile x 20 shots/s), but',
+  )
+  console.log(
+    '             it assumes EVERY projectile lands on one target — false for a split-shot fan, so this',
+  )
+  console.log('             is an upper bound and not the number to retune HP against.')
+  console.log(
+    '  realised = observed damage dealt / engaged seconds. Spread across whatever is on screen.',
+  )
+  console.log(
+    '  boss dps = boss hp / measured time-to-kill. THE COMPARABLE FIGURE: a boss fight is the only',
+  )
+  console.log(
+    '             sustained single-target engagement in the game, which is the situation SECTOR_PLAYER_DPS',
+  )
+  console.log('             describes. ratio is boss dps / assumed. All figures are medians.')
 }
 
 /**
@@ -1123,6 +1961,163 @@ function printExitCriteria(report: ItemReport, builds: BuildReport): void {
   )
 }
 
+export interface HullRow {
+  hullId: string
+  hullName: string
+  runs: number
+  clears: number
+  clearRate: number
+  meanStagesCleared: number
+  medianSeconds: number
+  medianEntryCeilingDpsSector1: number
+  deepestStage: number
+}
+
+/**
+ * M5's exit criteria, stated as met or not met against the numbers above.
+ *
+ * The verdicts are printed rather than left for a reader to derive, for the same
+ * reason M3's are: a criterion nobody evaluates is a criterion nobody meets.
+ *
+ * WHICH POLICY COUNTS AS "COMPETENT" IS A JUDGEMENT AND IT IS STATED, not hidden.
+ * `aggressor` is the one the roadmap's clear-rate band is read off — it is the only
+ * policy that has ever cleared a sector in any sweep since M1 — and its route style
+ * is held at `direct` so the number is not also measuring optional risk-taking.
+ */
+const COMPETENT_POLICY: BotName = 'aggressor'
+
+function printM5ExitCriteria(
+  summaries: readonly PolicySummary[],
+  pooled: SectorReport,
+  hulls: readonly HullRow[],
+): void {
+  console.log('')
+  console.log('M5 EXIT CRITERIA')
+
+  // --- 1. clear rate --------------------------------------------------------
+  const competent = summaries.find((s) => s.policy === COMPETENT_POLICY)
+  /**
+   * THE DEATH DISTRIBUTION IS READ OFF THE COMPETENT POLICY, NOT THE POOL, and
+   * that is a correction rather than a preference.
+   *
+   * Pooling every probe puts `random`, `dodger` and `greedy` into the denominator,
+   * and all three are designed to die in sector one — `random` cleared it 0 times
+   * in 300 runs. Pooled, sector one owns two thirds of all deaths and the criterion
+   * reads NOT MET for a reason that is a property of the instruments rather than of
+   * the game. The criterion is about the difficulty curve a player experiences, so
+   * it has to be read off the probe that experiences a curve at all.
+   *
+   * The pooled table is still printed above, because "the control never leaves
+   * sector one" is exactly the signal `random` exists to give.
+   */
+  const cliffSource = competent?.sectors ?? pooled
+  const cliffLabel = competent === undefined ? 'all policies pooled' : COMPETENT_POLICY
+  if (competent === undefined) {
+    console.log(
+      `  UNJUDGED  clear rate: ${COMPETENT_POLICY} was not in this sweep (--policy excluded it)`,
+    )
+  } else {
+    const rate = competent.fullClearRate
+    const met = rate >= CLEAR_RATE_BAND.min && rate <= CLEAR_RATE_BAND.max
+    console.log(
+      `  ${met ? 'MET    ' : 'NOT MET'}  20-40% clear rate for a competent policy: ` +
+        `${COMPETENT_POLICY} ${pct(rate)} over ${competent.runs} runs ` +
+        `(${Math.round(rate * competent.runs)} full five-sector clears), ` +
+        `mean ${competent.meanStagesCleared.toFixed(2)}/5 stages`,
+    )
+    if (!met) {
+      console.log(
+        `           ${rate < CLEAR_RATE_BAND.min ? 'BELOW the band — the run is too hard' : 'ABOVE the band — the run is too easy'}`,
+      )
+    }
+  }
+
+  // --- 2. hull spread -------------------------------------------------------
+  if (hulls.length === 0) {
+    console.log('  UNJUDGED  hull spread: no hull sweep was run (pass --hulls)')
+  } else {
+    const meanRate = mean(hulls.map((h) => h.clearRate))
+    const worst = hulls.reduce((acc, h) =>
+      Math.abs(h.clearRate - meanRate) > Math.abs(acc.clearRate - meanRate) ? h : acc,
+    )
+    const spreadPp = Math.abs(worst.clearRate - meanRate) * 100
+    const met = spreadPp <= HULL_SPREAD_MAX_PP
+    console.log(
+      `  ${met ? 'MET    ' : 'NOT MET'}  every hull within ${HULL_SPREAD_MAX_PP}pp of the mean: ` +
+        `mean ${pct(meanRate)}, furthest is ${worst.hullName} at ${pct(worst.clearRate)} ` +
+        `(${spreadPp.toFixed(1)}pp)`,
+    )
+    for (const hull of hulls) {
+      const delta = (hull.clearRate - meanRate) * 100
+      console.log(
+        `           ${pad(hull.hullName, 12)}${padStart(pct(hull.clearRate), 8)}` +
+          `${padStart(`${delta >= 0 ? '+' : ''}${delta.toFixed(1)}pp`, 10)}` +
+          `${Math.abs(delta) > HULL_SPREAD_MAX_PP ? '  OUT OF BAND' : ''}`,
+      )
+    }
+  }
+
+  // --- 3. no difficulty cliff ----------------------------------------------
+  if (cliffSource.totalDeaths === 0) {
+    console.log('  UNJUDGED  death distribution: nothing died in this sweep')
+  } else {
+    const spikes = cliffSource.rows.filter((row) => row.deathShare > DEATH_SPIKE_MAX)
+    const worst = cliffSource.rows.reduce((acc, row) =>
+      row.deathShare > acc.deathShare ? row : acc,
+    )
+    const met = spikes.length === 0
+    console.log(
+      `  ${met ? 'MET    ' : 'NOT MET'}  no sector above a ${pct(DEATH_SPIKE_MAX)} share of deaths ` +
+        `(read off ${cliffLabel}): worst is sector ${worst.index + 1} ${worst.sectorName} at ` +
+        `${pct(worst.deathShare)} (${worst.died} of ${cliffSource.totalDeaths} deaths)`,
+    )
+    for (const row of cliffSource.rows) {
+      console.log(
+        `           sector ${row.index + 1} ${pad(row.sectorName, 18)}${padStart(pct(row.deathShare), 8)} of deaths` +
+          `${padStart(pct(row.clearRate), 9)} cleared on arrival` +
+          `${row.deathShare > DEATH_SPIKE_MAX ? '   SPIKE' : ''}`,
+      )
+    }
+    if (competent !== undefined && pooled.totalDeaths > 0) {
+      const pooledWorst = pooled.rows.reduce((acc, row) =>
+        row.deathShare > acc.deathShare ? row : acc,
+      )
+      console.log(
+        `           (pooled over every probe the worst is sector ${pooledWorst.index + 1} at ` +
+          `${pct(pooledWorst.deathShare)}, which is dominated by the control policies dying in sector one` +
+          ' by design — see the note in the source)',
+      )
+    }
+  }
+}
+
+function printHulls(hulls: readonly HullRow[]): void {
+  if (hulls.length === 0) return
+  console.log('')
+  console.log('HULLS — same policy, same seeds, one hull each')
+  const header =
+    `  ${pad('hull', 14)}${padStart('runs', 6)}${padStart('clears', 8)}${padStart('clear%', 8)}` +
+    `${padStart('stages', 8)}${padStart('deepest', 9)}${padStart('med s', 8)}${padStart('dps s1', 8)}`
+  console.log(header)
+  console.log(`  ${'-'.repeat(header.length - 2)}`)
+  for (const hull of hulls) {
+    console.log(
+      `  ${pad(hull.hullName, 14)}${padStart(String(hull.runs), 6)}${padStart(String(hull.clears), 8)}` +
+        `${padStart(pct(hull.clearRate), 8)}${padStart(hull.meanStagesCleared.toFixed(2), 8)}` +
+        `${padStart(String(hull.deepestStage + 1), 9)}${padStart(hull.medianSeconds.toFixed(0), 8)}` +
+        `${padStart(hull.medianEntryCeilingDpsSector1.toFixed(0), 8)}`,
+    )
+  }
+  console.log('')
+  console.log(
+    '  Same base seed for every hull, so the wave scripts and offer rolls are identical and the',
+  )
+  console.log(
+    '  difference is the hull. stages is the mean number cleared; deepest is the furthest sector any',
+  )
+  console.log('  run reached. dps s1 is the full-uptime output the hull launches with.')
+}
+
 function printBuilds(report: BuildReport, runs: number): void {
   console.log('')
   console.log('BUILDS AT RUN END')
@@ -1235,6 +2230,9 @@ interface Coverage {
   itemsEnabled: boolean
   items: ItemReport
   builds: BuildReport
+  /** Hull flown, and whether the whole roster was covered. */
+  hullId: string
+  hullsSwept: boolean
 }
 
 function printCoverage(coverage: Coverage, summaries: readonly PolicySummary[]): void {
@@ -1326,7 +2324,41 @@ function printCoverage(coverage: Coverage, summaries: readonly PolicySummary[]):
       " (empty pool), because tests/replay.test.ts rebuilds fixtures with `new World(seed)` and a" +
       ' content-bearing fixture could not reproduce there. The item path has no replay regression.',
   )
-  notes.push('hull variants are not swept — one hull exists')
+  if (!coverage.hullsSwept) {
+    notes.push(
+      `only one hull was flown (${coverage.hullId}) — M5's per-hull criterion needs --hulls, and nothing` +
+        ' here says anything about the other four',
+    )
+  }
+  notes.push(
+    'EVERY PER-SECTOR NUMBER PAST SECTOR ONE IS CONDITIONED ON SURVIVING TO IT. The population entering' +
+      ' sector four is the population that already cleared three, so a later sector looking easier is' +
+      ' partly the sector and partly the pilots. `survive s` is the column written to separate those two' +
+      ' — it divides entry health by measured incoming damage — but it is an index, not a controlled' +
+      ' experiment. Isolating a sector properly needs a run that STARTS there with a fixed build, which' +
+      ' the sim cannot currently be asked for.',
+  )
+  notes.push(
+    'DAMAGE DEALT IS OBSERVED, NOT REPORTED. Nothing on WorldView says how much damage the pilot did,' +
+      ' so it is summed from per-tick hp decrements across live enemies. That undercounts by whatever hp' +
+      ' an enemy had left on the tick it died (reaping removes it inside the same tick), which is up to' +
+      " one tick of output per kill — order 1-2% of the total. The `dps` column's *nominal* figure is" +
+      ' unaffected; the `realised` and `hp/ttk` columns are the ones this touches, and only downward.',
+  )
+  notes.push(
+    'A ROUTE REWARD IS INFERRED FROM THE HAZARD ARMED, not reported. When a sector has only one hazard,' +
+      ' both priced routes carry it and the two are indistinguishable afterwards, so `routeReward` is' +
+      ' unreliable in that case. "Arrived with a hazard armed" is exact; "took the scrap one" is not.',
+  )
+  notes.push(
+    'BOSS VARIANTS ARE NOT SPLIT OUT. Three bosses roll a seeded variant that replaces a middle phase,' +
+      ' and every time-to-kill above pools them. A variant that is twice as long as its sibling would be' +
+      ' invisible here as anything but a wide p10-p90 spread.',
+  )
+  notes.push(
+    'ELITES, VAULTS AND CURSES are not measured as such: this tool sees enemy def ids and item offers,' +
+      ' and has no column for whether a spawn was elite beyond what the enemy table names.',
+  )
   notes.push('nothing here measures whether the game is fun; that needs screenshots and a human')
 
   for (const note of notes) console.log(`  - ${note}`)
@@ -1499,6 +2531,14 @@ interface Args {
   recordFixture: string | null
   /** Sweep with an empty item pool, for comparison against the M1/M2 numbers. */
   noItems: boolean
+  /** Fly sector one alone, for numbers comparable with the M1-M4 sweeps. */
+  singleSector: boolean
+  /** One hull for the whole sweep. Null means the baseline Lien. */
+  hull: string | null
+  /** Repeat the sweep once per hull and report the spread. M5 criterion two. */
+  hulls: boolean
+  /** Override every policy's world-map appetite. The ablation switch. */
+  routeStyle: RouteStyle | null
   help: boolean
 }
 
@@ -1512,6 +2552,10 @@ function parseArgs(argv: readonly string[]): Args {
     maxSeconds: DEFAULT_MAX_SECONDS,
     recordFixture: null,
     noItems: false,
+    singleSector: false,
+    hull: null,
+    hulls: false,
+    routeStyle: null,
     help: false,
   }
   for (const raw of argv) {
@@ -1529,6 +2573,21 @@ function parseArgs(argv: readonly string[]): Args {
         break
       case '--no-items':
         args.noItems = true
+        break
+      case '--single-sector':
+        args.singleSector = true
+        break
+      case '--hulls':
+        args.hulls = true
+        break
+      case '--hull':
+        if (value === '') fail(`--hull needs a name. Known: ${HULL_ORDER.join(', ')}`)
+        if (HULLS[value] === undefined) fail(`unknown hull "${value}". Known: ${HULL_ORDER.join(', ')}`)
+        args.hull = value
+        break
+      case '--route-style':
+        if (!isRouteStyle(value)) fail(`--route-style must be one of ${ROUTE_STYLES.join(', ')}`)
+        args.routeStyle = value
         break
       case '--runs': {
         const n = Number.parseInt(value, 10)
@@ -1586,11 +2645,18 @@ function printHelp(): void {
   --json                machine-readable output instead of the table
   --detail              with --json, include every individual run
   --no-items            sweep with an empty item pool (M1/M2-comparable numbers)
+  --single-sector       fly sector one alone (M1-M4-comparable numbers)
+  --hull=ID             fly one hull for the whole sweep (default: lien)
+  --hulls               repeat the sweep once per hull; M5's per-hull criterion
+  --route-style=STYLE   override every policy's world-map appetite, for ablation
+                        (${ROUTE_STYLES.join(', ')})
   --record-fixture=NAME record one run to tests/replays/NAME.json and verify it
                         (always runs with the World default pool — see COVERAGE)
 
 Policies:
-${BOT_NAMES.map((name) => `  ${pad(name, 14)}${BOTS[name].measures}`).join('\n')}
+${BOT_NAMES.map((name) => `  ${pad(name, 14)}${pad(name === 'build-focused' ? 'item-only' : BOTS[name].routeStyle, 11)}${BOTS[name].measures}`).join('\n')}
+
+The second column is the policy's default world-map appetite. --route-style overrides it.
 `)
 }
 
@@ -1632,21 +2698,80 @@ function main(argv: readonly string[]): void {
   }
 
   const observations = emptyObservations()
-  const content = args.noItems ? undefined : RUN_CONTENT
+  const baseContent = args.singleSector ? SECTOR_ONE_CONTENT : contentForHull(args.hull)
+  const content = args.noItems
+    ? args.singleSector
+      ? undefined
+      : { ...baseContent, items: {}, interactions: [] }
+    : baseContent
   const startedNs = process.hrtime.bigint()
   const summaries: PolicySummary[] = []
   const allRuns: RunResult[] = []
   let totalTicks = 0
 
+  const routeOverride = args.routeStyle ?? undefined
   for (const policy of args.policies) {
     const runs: RunResult[] = []
     for (let i = 0; i < args.runs; i++) {
-      const result = runOnce(policy, deriveSeed(args.seed, i), { maxTicks, observations, content })
+      const result = runOnce(policy, deriveSeed(args.seed, i), {
+        maxTicks,
+        observations,
+        content,
+        hullId: args.hull,
+        routeStyle: routeOverride,
+      })
       runs.push(result)
       totalTicks += result.ticks
     }
     summaries.push(summarise(policy, runs))
     allRuns.push(...runs)
+  }
+
+  // --- the hull sweep -------------------------------------------------------
+  // Deliberately the SAME seeds for every hull. Comparing hulls across different
+  // seeds would put the wave scripts and the offer rolls inside the difference,
+  // and a 15pp criterion cannot survive that much noise at any sample size a
+  // sweep can afford.
+  const hullRows: HullRow[] = []
+  if (args.hulls) {
+    const hullPolicy = args.policies.includes(COMPETENT_POLICY)
+      ? COMPETENT_POLICY
+      : (args.policies[0] ?? COMPETENT_POLICY)
+    for (const hullId of HULL_ORDER) {
+      const hull = HULLS[hullId]
+      const withHull: RunContent =
+        hull === undefined
+          ? (args.singleSector ? SECTOR_ONE_CONTENT : RUN_CONTENT)
+          : { ...(args.singleSector ? SECTOR_ONE_CONTENT : RUN_CONTENT), hull }
+      const hullContent = args.noItems ? { ...withHull, items: {}, interactions: [] } : withHull
+      const runs: RunResult[] = []
+      for (let i = 0; i < args.runs; i++) {
+        const result = runOnce(hullPolicy, deriveSeed(args.seed, i), {
+          maxTicks,
+          observations,
+          content: hullContent,
+          hullId,
+          routeStyle: routeOverride,
+        })
+        runs.push(result)
+        totalTicks += result.ticks
+      }
+      const clears = runs.filter((r) => r.runState === 'extracted')
+      hullRows.push({
+        hullId,
+        hullName: HULLS[hullId]?.name ?? hullId,
+        runs: runs.length,
+        clears: clears.length,
+        clearRate: runs.length === 0 ? 0 : clears.length / runs.length,
+        meanStagesCleared: mean(runs.map((r) => r.stagesCleared)),
+        medianSeconds: percentile(sortedNumbers(runs.map((r) => r.seconds)), 0.5),
+        medianEntryCeilingDpsSector1: percentile(
+          sortedNumbers(runs.map((r) => r.stages[0]?.entryCeilingDps ?? 0)),
+          0.5,
+        ),
+        deepestStage: runs.reduce((max, r) => Math.max(max, r.finalStageIndex), 0),
+      })
+    }
   }
 
   // The exit criterion is about the game, not about one probe, so the verdict is
@@ -1668,7 +2793,11 @@ function main(argv: readonly string[]): void {
     itemsEnabled: !args.noItems,
     items: aggregateItems,
     builds: aggregateBuilds,
+    hullId: args.hull ?? 'lien',
+    hullsSwept: hullRows.length > 0,
   }
+
+  const aggregateSectors = summariseSectors(allRuns)
 
   const timing = {
     elapsedMs: Math.round(elapsedMs),
@@ -1692,12 +2821,33 @@ function main(argv: readonly string[]): void {
         itemsEnabled: !args.noItems,
         itemPoolSize: args.noItems ? 0 : ALL_ITEM_IDS.length,
         buildFocusedTarget: BUILD_FOCUSED_TARGET,
+        run: args.singleSector ? 'sector-one' : STANDARD_RUN.id,
+        hull: args.hull ?? 'lien',
+        hullsSwept: hullRows.map((row) => row.hullId),
+        routeStyleOverride: args.routeStyle,
       },
       timing,
       policies: summaries,
       /** Pooled across every policy. This is what the M3 verdict is read from. */
       items: aggregateItems,
       builds: aggregateBuilds,
+      sectors: aggregateSectors,
+      hulls: hullRows,
+      m5ExitCriteria: {
+        clearRateBand: CLEAR_RATE_BAND,
+        competentPolicy: COMPETENT_POLICY,
+        competentClearRate: summaries.find((s) => s.policy === COMPETENT_POLICY)?.fullClearRate ?? null,
+        hullSpreadMaxPp: HULL_SPREAD_MAX_PP,
+        hullMeanClearRate: hullRows.length === 0 ? null : mean(hullRows.map((h) => h.clearRate)),
+        deathSpikeMax: DEATH_SPIKE_MAX,
+        worstDeathShare:
+          aggregateSectors.rows.length === 0
+            ? null
+            : Math.max(...aggregateSectors.rows.map((row) => row.deathShare)),
+        assumedDps: SECTOR_PLAYER_DPS,
+        measuredCeilingDps: aggregateSectors.rows.map((row) => Math.round(row.medianEntryCeilingDps)),
+        measuredBossDps: aggregateSectors.rows.map((row) => Math.round(row.bossDpsMedian)),
+      },
       exitCriteria: {
         pickRateMax: PICK_RATE_MAX,
         pickRateMin: PICK_RATE_MIN,
@@ -1724,7 +2874,8 @@ function main(argv: readonly string[]): void {
         choiceResolutionBudgetTicks: MAX_CHOICE_RESOLUTION_TICKS,
         notMeasured: [
           'fun',
-          'hull variants',
+          'boss variants split out (all time-to-kill figures pool them)',
+          'per-sector difficulty free of survivorship (later sectors are conditioned on clearing earlier ones)',
           'per-item damage contribution (needs an ablation sweep)',
           'item tier and tag preference (not on ItemOffer)',
           'stacking',
@@ -1743,9 +2894,35 @@ function main(argv: readonly string[]): void {
     `PLAYTEST  base seed ${args.seed}  ${args.runs} runs x ${args.policies.length} policies  cap ${args.maxSeconds}s  ` +
       `items ${args.noItems ? 'OFF' : `on (${ALL_ITEM_IDS.length} in pool, ${ALL_INTERACTION_IDS.length} interactions)`}`,
   )
+  console.log(
+    `          run ${args.singleSector ? 'sector one alone' : `${STANDARD_RUN.name} (${STANDARD_RUN.stages.length} sectors)`}  ` +
+      `hull ${args.hull ?? 'lien'}${hullRows.length > 0 ? ` (+ ${hullRows.length}-hull sweep)` : ''}  ` +
+      `routes ${args.routeStyle ?? 'per policy'}`,
+  )
   console.log('')
   printTable(summaries)
   printDeaths(summaries)
+  if (!args.singleSector) {
+    // The competent policy's own tables come FIRST and are what the verdicts read.
+    // Pooling puts three probes that are designed to die in sector one into every
+    // denominator, which makes the pooled death distribution a fact about the
+    // instruments rather than about the difficulty curve.
+    const competentSummary = summaries.find((s) => s.policy === COMPETENT_POLICY)
+    if (competentSummary !== undefined) {
+      printSectors(competentSummary.sectors, `${competentSummary.runs} ${COMPETENT_POLICY} runs`)
+      printBosses(competentSummary.sectors)
+      printDpsLadder(competentSummary.sectors)
+    }
+    if (summaries.length > 1) {
+      printSectors(aggregateSectors, `${allRuns.length} runs, ALL policies pooled (diagnostic only)`)
+      if (competentSummary === undefined) {
+        printBosses(aggregateSectors)
+        printDpsLadder(aggregateSectors)
+      }
+    }
+  }
+  printHulls(hullRows)
+  if (!args.singleSector) printM5ExitCriteria(summaries, aggregateSectors, hullRows)
   if (!args.noItems) {
     printItems(aggregateItems, `${allRuns.length} runs, all policies pooled`)
     printPickRatesByPolicy(summaries, aggregateItems)

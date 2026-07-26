@@ -172,11 +172,29 @@ export class Mixer {
     const gainRotation = pick(def.gainRotation, step)
 
     const timeScale = sanitizeScale(options?.timeScale, 0.25, 4)
-    const gain = clamp(
+    /**
+     * Headroom is applied as a SCALE, not a clamp, and the difference is the
+     * whole mix.
+     *
+     * This used to be `clamp(category × gain × …, 0, VOICE_PEAK_CEILING)`. With a
+     * ceiling of 0.7 that pinned six of the loudest fourteen sounds — every alarm,
+     * both threats — to the identical value 0.700, so a shield absorbing a hit, an
+     * enemy taking a shot at you and losing the hull all left the mixer at exactly
+     * the same level. The hierarchy in src/audio/sounds.ts was being enforced on
+     * the constants and destroyed on the way out, and no test could see it because
+     * every test read the constants too. `npm run audio` measures the rendered
+     * output, which is how it was found.
+     *
+     * Scaling instead preserves every ratio the hierarchy specifies and still
+     * guarantees the same absolute ceiling, because the scaled term is clamped to
+     * 1 first.
+     */
+    const nominal = clamp(
       this.categoryVolumes[def.category] * def.gain * sanitizeScale(options?.gain, 0, 2) * gainRotation,
       0,
-      VOICE_PEAK_CEILING,
+      1,
     )
+    const gain = nominal * VOICE_PEAK_CEILING
     // A gain that rounds to nothing is still a full voice graph. Refuse it.
     if (gain <= 0.0005) return false
 

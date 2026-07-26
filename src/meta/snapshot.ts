@@ -29,20 +29,57 @@
  *    every replay fixture for no reason, and the corpus would get re-recorded
  *    reflexively until it stopped meaning anything. The cosmetic digest is still
  *    computed and reported, so a divergence there is visible rather than hidden.
+ *
+ * ## THE TEST FOR "DOES THIS FIELD BELONG IN THE REGRESSION HASH"
+ *
+ * Not "is it visible" — *does the next tick read it*. Two states that differ only
+ * in a field nothing reads produce the same future, and failing a fixture over one
+ * is the noise that gets a corpus rubber-stamped. Two states that differ in a field
+ * something reads produce different futures, and a digest that cannot tell them
+ * apart is worse than no digest: the corpus goes green while the game diverges.
+ *
+ * Applied to what M5 added:
+ *
+ *   - `EnemyInstance.boss.phaseIndex` / `variantId` — IN. The phase decides the
+ *     pattern, and `bossPhaseDefId` does not encode the variant, so two runs
+ *     fighting different forms of the same boss carry the *same* `defId` at the
+ *     same phase. Without `variantId` the digest cannot separate them at all.
+ *   - `EnemyInstance.secondary.cooldown` / `.windup` — IN. A second barrel's
+ *     cadence decides when a volley leaves, exactly like the primary's.
+ *   - `EnemyInstance.uid` — IN. `entities.ts` already documents it as hashed and it
+ *     was not; piercing reads it to decide what a round may still hit.
+ *   - `stage`, `hazards`, `pendingChoice`, `inventory`, `hullName` — IN. Which
+ *     sector is being flown, when a hazard fires, whether the run is paused on a
+ *     card, and what the pilot is carrying all steer the next tick, and a run that
+ *     diverged on any of them would otherwise compare equal.
+ *   - `secondary.windupTotal`, `boss.calloutTicks`, `HazardView.progress` —
+ *     COSMETIC. Each is a denominator or a display countdown that nothing branches
+ *     on, the same call `telegraphTotal` already gets.
+ *   - `resolvedStats` and `activeInteractions` — NEITHER, deliberately. Both are
+ *     pure functions of the hull and the inventory, which are hashed. Hashing a
+ *     derived value means renaming a stat key fails every fixture without any
+ *     behaviour having changed.
  */
 
 import type {
   Bullet,
-  CosmeticState,
   EnemyBullet,
   EnemyInstance,
-  Explosion,
   Hull,
-  Incident,
   RunStats,
   SimEvent,
   WorldView,
 } from '../sim/entities'
+
+/**
+ * Tags for optional sub-objects.
+ *
+ * Present and absent must hash differently, and the tag has to be a value the
+ * following field could not itself produce — otherwise an enemy with no second
+ * barrel and an enemy whose barrel is on cooldown 0 collide.
+ */
+const ABSENT = 0xfeedface
+const PRESENT = 0x00000002
 
 /**
  * One reused 8-byte scratch buffer. Allocating per call would make hashing a
@@ -183,7 +220,8 @@ function hashEnemies(enemies: readonly EnemyInstance[]): string {
   h.u32(enemies.length)
   for (const e of enemies) {
     hashInterpolated(h, e)
-    h.str(e.defId)
+    h.num(e.uid)
+      .str(e.defId)
       .num(e.hp)
       .num(e.maxHp)
       .num(e.radius)
@@ -204,9 +242,27 @@ function hashEnemies(enemies: readonly EnemyInstance[]): string {
       // and a windup that fired a tick early is a difficulty change, not a visual
       // one. entities.ts is explicit that this is sim state and not an animation.
       .num(e.telegraphTicks)
-    // hitFlashTicks and telegraphTotal deliberately omitted — entities.ts documents
-    // both as render-only (a flash, and a progress denominator), so they belong in
-    // the cosmetic digest, not this one.
+
+    // Second barrel. Its cadence decides when a volley leaves the enemy exactly as
+    // the primary's does, so a run whose secondary is one tick out of step is a run
+    // that diverges. `windupTotal` is the display denominator and stays cosmetic,
+    // matching the call already made for `telegraphTotal`.
+    const secondary = e.secondary
+    if (secondary === undefined) h.u32(ABSENT)
+    else h.u32(PRESENT).num(secondary.cooldown).num(secondary.windup)
+
+    // Boss phase script. `defId` already moves when a phase advances, but it is
+    // NOT sufficient on its own: `bossPhaseDefId` is `${bossId}#${index}` with no
+    // variant in it, so the base form and every variant share ids phase for phase.
+    // Without `variantId` two runs fighting genuinely different patterns hash the
+    // same, which is precisely the failure this digest exists to make impossible.
+    const boss = e.boss
+    if (boss === undefined) h.u32(ABSENT)
+    else h.u32(PRESENT).str(boss.bossId).strOrNull(boss.variantId).num(boss.phaseIndex)
+
+    // hitFlashTicks, telegraphTotal, secondary.windupTotal and boss.calloutTicks are
+    // deliberately omitted — each is a flash or a progress denominator that nothing
+    // branches on, so they belong in the cosmetic digest, not this one.
   }
   return h.digest()
 }
@@ -226,25 +282,25 @@ function hashStats(stats: Readonly<RunStats>): string {
 }
 
 /**
- * Whole-run gameplay state: the outcome, the incident report, and the hitstop
- * clock.
+ * Whole-run gameplay state: the outcome, the incident report, the hitstop clock,
+ * which sector is being flown, what is armed, what is held, and what the run is
+ * waiting on.
  *
  * `freezeTicks` is play-affecting — a freeze spends real ticks, so a run that
  * froze differently diverges from that point on — and so it must be in the
  * regression hash rather than in the cosmetic digest.
  *
- * It rides in this component rather than getting one of its own because
+ * EVERYTHING RIDES IN THIS ONE COMPONENT rather than getting one each, because
  * `tools/playtest.ts` enumerates component names by hand when it writes a fixture.
  * A component that tool does not know about would be silently absent from every
- * recorded fixture, which is a worse outcome than a slightly less precise diff.
+ * recorded fixture, which is a worse outcome than a slightly less precise diff. So
+ * the M5 run state joins the existing three here instead of becoming `stage`,
+ * `hazards` and `choice` components that no fixture would carry.
  */
-function hashRun(
-  runState: string,
-  incident: Readonly<Incident> | null,
-  freezeTicks: number,
-): string {
+function hashRun(view: WorldView): string {
   const h = new Hasher()
-  h.str(runState).num(freezeTicks)
+  h.str(view.runState).num(view.freezeTicks)
+  const incident = view.incident
   if (incident === null) {
     h.u32(0xffffffff)
   } else {
@@ -256,6 +312,58 @@ function hashRun(
       .num(incident.waveIndex)
       .num(incident.scrap)
       .num(incident.kills)
+  }
+
+  // Which leg of the run. Wave numbering restarts per sector, so `stats.waveIndex`
+  // alone cannot tell wave 4 of the Debris Shelf from wave 4 of the Deep Manifest —
+  // two states that share a wave index and differ by four sectors would otherwise
+  // be indistinguishable to the corpus. `sectorName` and `bossName` are display
+  // strings derived from the id and are left out.
+  h.num(view.stage.index).num(view.stage.count).str(view.stage.sectorId)
+
+  // Armed hazards. `ticksToChange` is the countdown to the next warning or hit, so
+  // it decides when the player takes damage; `progress` is the arc's numerator and
+  // is cosmetic.
+  h.u32(view.hazards.length)
+  for (const hazard of view.hazards) {
+    h.str(hazard.id).str(hazard.phase).num(hazard.ticksToChange)
+  }
+
+  // The hull issued, and what is fitted. Acquisition order is hook dispatch order,
+  // so the array order is state and not presentation. `resolvedStats` and
+  // `activeInteractions` are pure functions of these two and are not hashed —
+  // see the header.
+  h.str(view.hullName)
+  h.u32(view.inventory.length)
+  for (const item of view.inventory) {
+    h.str(item.defId).num(item.acquiredAtTick).num(item.count)
+  }
+
+  // A card being open pauses the simulation, and *which* card decides what the next
+  // confirm does. A run stopped on a route card and a run flying free are different
+  // futures from identical entity lists.
+  const choice = view.pendingChoice
+  if (choice === null) {
+    h.u32(0xffffffff)
+  } else {
+    h.u32(0x00000001).str(choice.kind)
+    h.u32(choice.offers.length)
+    // `interactionText` is derived copy, so only the identity and price of an offer
+    // are hashed.
+    for (const offer of choice.offers) h.str(offer.defId).str(offer.tier)
+    h.u32(choice.costs.length)
+    for (const cost of choice.costs) h.num(cost)
+    h.u32(choice.workOrders.length)
+    for (const kind of choice.workOrders) h.str(kind)
+    h.u32(choice.routes.length)
+    for (const route of choice.routes) {
+      h.num(route.stageIndex).str(route.reward.kind)
+      // The payout is what the sim credits on arrival, so it is state; the
+      // `rewardText` that states it is derived from it.
+      h.num(route.reward.kind === 'scrap' || route.reward.kind === 'repair' ? route.reward.amount : 0)
+      h.u32(route.hazardIds.length)
+      for (const id of route.hazardIds) h.str(id)
+    }
   }
   return h.digest()
 }
@@ -274,22 +382,26 @@ function hashRun(
  * is real sim output that nothing else in the digest would catch — an event
  * emitted twice, or at the wrong position, is a bug the cosmetic digest can see.
  */
-function hashCosmetic(
-  explosions: readonly Explosion[],
-  enemies: readonly EnemyInstance[],
-  cosmetic: Readonly<CosmeticState>,
-  events: readonly SimEvent[],
-): string {
+function hashCosmetic(view: WorldView): string {
   const h = new Hasher()
-  h.u32(explosions.length)
-  for (const e of explosions) {
+  h.u32(view.explosions.length)
+  for (const e of view.explosions) {
     h.num(e.x).num(e.y).num(e.age).num(e.lifetime).num(e.radius).str(e.kind)
   }
-  h.u32(enemies.length)
-  for (const e of enemies) h.num(e.hitFlashTicks).num(e.telegraphTotal)
-  h.num(cosmetic.shake)
-  h.u32(events.length)
-  for (const event of events) hashEvent(h, event)
+  h.u32(view.enemies.length)
+  for (const e of view.enemies) {
+    // -1 for absent: a real countdown is never negative, so the sentinel cannot be
+    // confused with a barrel that happens to be idle.
+    h.num(e.hitFlashTicks)
+      .num(e.telegraphTotal)
+      .num(e.secondary?.windupTotal ?? -1)
+      .num(e.boss?.calloutTicks ?? -1)
+  }
+  h.u32(view.hazards.length)
+  for (const hazard of view.hazards) h.num(hazard.progress)
+  h.num(view.cosmetic.shake)
+  h.u32(view.events.length)
+  for (const event of view.events) hashEvent(h, event)
   return h.digest()
 }
 
@@ -299,6 +411,10 @@ function hashCosmetic(
  * The switch is exhaustive on purpose: adding a variant to `SimEvent` without
  * hashing it should fail the typecheck here, not pass silently and leave the new
  * event outside the only thing that would notice it changing.
+ *
+ * IT DID NOT ENFORCE THAT until M5, and the six events bosses and hazards added
+ * arrived unhashed and unnoticed. A switch with no default is not exhaustive
+ * checking; the `never` assignment below is what makes the comment above true.
  */
 function hashEvent(h: Hasher, event: SimEvent): void {
   h.str(event.kind)
@@ -328,6 +444,28 @@ function hashEvent(h: Hasher, event: SimEvent): void {
     case 'wave-released':
       h.num(event.index)
       return
+    case 'boss-spawned':
+      h.str(event.bossId).str(event.name)
+      return
+    case 'boss-phase':
+      h.str(event.bossId).num(event.phaseIndex).str(event.callout)
+      return
+    case 'boss-killed':
+      h.num(event.x).num(event.y).str(event.bossId)
+      return
+    case 'hazard-warning':
+    case 'hazard-fired':
+      h.str(event.hazardId)
+      return
+    case 'stage-cleared':
+      h.num(event.stageIndex)
+      return
+    default: {
+      // Unreachable while the switch covers every variant. When it stops covering
+      // them this line stops compiling, which is the whole point.
+      const unhandled: never = event
+      throw new Error(`unhashed SimEvent: ${JSON.stringify(unhandled)}`)
+    }
   }
 }
 
@@ -353,11 +491,15 @@ export interface WorldDigest {
   readonly enemyBullets: string
   readonly enemies: string
   readonly stats: string
-  /** runState, the incident report, and the hitstop clock. */
+  /**
+   * runState, the incident report, the hitstop clock, the stage, armed hazards, the
+   * hull and inventory, and any card the run is paused on.
+   */
   readonly run: string
   /**
-   * Explosions, hit flashes, telegraph totals, the shake impulse, and this tick's
-   * events. Reported, but not part of `hash`.
+   * Explosions, hit flashes, telegraph and callout countdowns, hazard progress
+   * arcs, the shake impulse, and this tick's events. Reported, but not part of
+   * `hash`.
    */
   readonly cosmetic: string
   readonly counts: EntityCounts
@@ -382,7 +524,7 @@ export function digestWorld(view: WorldView): WorldDigest {
     enemyBullets: hashEnemyBullets(view.enemyBullets),
     enemies: hashEnemies(view.enemies),
     stats: hashStats(view.stats),
-    run: hashRun(view.runState, view.incident, view.freezeTicks),
+    run: hashRun(view),
   }
 
   // The seed is folded in so two runs that happen to reach identical state from
@@ -395,7 +537,7 @@ export function digestWorld(view: WorldView): WorldDigest {
   return {
     hash: combined.digest(),
     ...components,
-    cosmetic: hashCosmetic(view.explosions, view.enemies, view.cosmetic, view.events),
+    cosmetic: hashCosmetic(view),
     counts: {
       playerBullets: view.playerBullets.length,
       enemyBullets: view.enemyBullets.length,

@@ -49,6 +49,14 @@ const HOOKS: readonly HookName[] = [
 const TIERS: readonly ItemTier[] = ['common', 'uncommon', 'rare', 'relic']
 
 /**
+ * The most interactions any single item may appear in.
+ *
+ * A design decision written as a number, not a derived bound. See the test that uses
+ * it for why it does not scale with the edge count.
+ */
+const MAX_ITEM_DEGREE = 3
+
+/**
  * The params each `EffectKind` cannot run without, mirroring the doc comments on
  * `EffectKind` in `src/content/types.ts`.
  *
@@ -115,6 +123,32 @@ const PROMISED_TOTALS: Record<string, Partial<ReturnType<typeof summariseEffects
   'curse-nanites': { repairAmount: 8, repairChance: 0.45 },
   'warhead-fragments': { pierceCount: 1, splitShotCount: 2 },
   'shield-nanites': { repairAmount: 7, repairChance: 0.35 },
+
+  // M5. Interactions whose consequence is entirely `stats` have an empty entry:
+  // there are no effect totals to promise, and the stat side is covered by
+  // `changes the stat further than its own two items already did`. The entry is
+  // still required so that adding an interaction cannot skip this check silently.
+  'lance-focus': { pierceCount: 2 },
+  'hazard-assay': {},
+  'flak-curtain': { splitShotCount: 3, splitShotSpreadDegrees: 34, pierceCount: 2 },
+  'ion-overpressure': { chainCount: 2, chainRadius: 85, chainFraction: 0.5 },
+  'bulkhead-bond': {},
+  'slip-stream': {},
+  'lattice-lance': { pierceCount: 4 },
+  'quota-lien': {},
+  'tithe-magnet': { fireRateWindowBonus: 0.25, fireRateWindowTicks: 600 },
+  'hauler-tithe': { fireRateWindowBonus: 0.22, fireRateWindowTicks: 480 },
+  'twin-lance': { pierceCount: 2 },
+  'exposed-nanites': { repairAmount: 7, repairChance: 0.4 },
+  'liquidation-overkill': { overkillFraction: 1 },
+  'sealed-dispersal': {},
+  'hauler-plating': {},
+  'manifold-curtain': { splitShotCount: 9, splitShotSpreadDegrees: 70, pierceCount: 1 },
+  'bunker-optics': {},
+  'heavy-broadside': { pierceCount: 1 },
+  'vector-magnet': {},
+  'curtain-focus': { splitShotCount: 4, splitShotSpreadDegrees: 34 },
+  'exposed-lien': {},
 }
 
 /**
@@ -176,11 +210,37 @@ function effectsOf(def: ItemDef): readonly EffectDef[] {
 }
 
 describe('item registry', () => {
-  it('is not empty and is roughly the size M3 asked for', () => {
+  it('is not empty and is roughly the size M5 asked for', () => {
     // Guards against the roster being emptied, which would make every other
-    // assertion in this file pass vacuously.
-    expect(itemEntries.length).toBeGreaterThanOrEqual(12)
-    expect(itemEntries.length).toBeLessThanOrEqual(18)
+    // assertion in this file pass vacuously. The band was 12-18 at M3; M5's target
+    // is "~40 well-connected items", so the band moved with the milestone rather
+    // than being widened to whatever happens to be there.
+    expect(itemEntries.length).toBeGreaterThanOrEqual(36)
+    expect(itemEntries.length).toBeLessThanOrEqual(44)
+  })
+
+  it('keeps the tier mix close to the measured M3 shape', () => {
+    // Adding 26 items changes which three options appear, which is safe — but it
+    // also changes the odds of each TIER appearing, which is a balance change
+    // nobody measured. Weight is a single global pool (see `buildOffers`), so tier
+    // share is the sum of weights, not the count of items.
+    //
+    // M3 shares: common 41.2%, uncommon 43.3%, rare 10.3%, relic 5.2%. The bands
+    // below are those numbers with room for the rare tier to grow — it holds nine
+    // items at M5 against two at M3, so its share cannot be held at 10% without
+    // making each individual rare nearly unofferable.
+    const totals = { common: 0, uncommon: 0, rare: 0, relic: 0 }
+    for (const [, def] of itemEntries) totals[def.tier] += def.weight ?? 0
+    const all = totals.common + totals.uncommon + totals.rare + totals.relic
+    const share = (n: number) => n / all
+    expect(share(totals.common), 'common share').toBeGreaterThan(0.33)
+    expect(share(totals.common), 'common share').toBeLessThan(0.45)
+    expect(share(totals.uncommon), 'uncommon share').toBeGreaterThan(0.38)
+    expect(share(totals.uncommon), 'uncommon share').toBeLessThan(0.48)
+    expect(share(totals.rare), 'rare share').toBeGreaterThan(0.08)
+    expect(share(totals.rare), 'rare share').toBeLessThan(0.16)
+    expect(share(totals.relic), 'relic share').toBeGreaterThan(0.03)
+    expect(share(totals.relic), 'relic share').toBeLessThan(0.08)
   })
 
   it('keys match the id on each definition', () => {
@@ -406,6 +466,34 @@ describe('cursed items', () => {
     expect(cursed.length).toBeGreaterThanOrEqual(1)
   })
 
+  it('are a real presence in the pool, not a token relic', () => {
+    // M5 asked for more cursed items specifically. One curse in fourteen is a
+    // curiosity; a curse should be a route the player can be offered repeatedly and
+    // has to decide about each time. Weight rather than count, because an item at
+    // weight 1 is not in the pool in any meaningful sense.
+    const cursedWeight = cursed.reduce((sum, [, def]) => sum + (def.weight ?? 0), 0)
+    const allWeight = itemEntries.reduce((sum, [, def]) => sum + (def.weight ?? 0), 0)
+    expect(cursed.length, 'cursed item count').toBeGreaterThanOrEqual(5)
+    expect(cursedWeight / allWeight, 'cursed share of the offer pool').toBeGreaterThan(0.06)
+  })
+
+  it('spreads curses over more than one thing to lose', () => {
+    // Six items all trading integrity for damage is one item printed six times. The
+    // curse tier is interesting only if the *currency* varies — health, shield,
+    // income, rate of fire — so a player who has already paid in one cannot
+    // reflexively pay in it again.
+    const currencies = new Set<string>()
+    for (const [, def] of cursed) {
+      for (const modifier of statsOf(def)) {
+        const spec = STATS[modifier.stat]
+        const resolved = resolveStat(modifier.stat, [modifier])
+        const improved = spec.lowerIsBetter === true ? resolved < spec.base : resolved > spec.base
+        if (!improved) currencies.add(modifier.stat)
+      }
+    }
+    expect([...currencies].sort(), 'distinct things a curse can cost').toHaveLength(3)
+  })
+
   it('are a real trade, not a strictly worse pick', () => {
     // A curse that only takes is an item nobody ever picks, which makes it content
     // that exists solely to waste one of the three offer slots. Every cursed item
@@ -625,13 +713,38 @@ describe('interaction reachability', () => {
     expect([...standalone].sort()).toEqual([...STANDALONE_ITEM_IDS].sort())
   })
 
-  it('keeps the standalone set to the intended four plain items', () => {
-    // INTENDED NUMBER: 4. Machined Slugs, Thrust Trim, Plating Shim, Feed Relay —
-    // single-stat items whose job is to be the baseline. If this number grows, the
-    // roster is drifting back toward stat sticks, which is the design position
-    // DESIGN.md explicitly rejected.
-    expect(standalone.length).toBe(4)
-    expect(connected.size).toBe(itemEntries.length - 4)
+  it('keeps the standalone set to the intended eight plain items', () => {
+    // INTENDED NUMBER: 8 of 40. Was 4 of 14 at M3. Both the number and the ratio
+    // are asserted: the count catches an item quietly dropping out of the graph,
+    // and the ratio catches the roster drifting back toward stat sticks, which is
+    // the design position DESIGN.md explicitly rejected. A pool where a third of
+    // the items can never combine makes the synergy marker rare enough to ignore.
+    expect(standalone.length).toBe(8)
+    expect(connected.size).toBe(itemEntries.length - 8)
+    expect(standalone.length / itemEntries.length, 'standalone ratio').toBeLessThan(0.25)
+  })
+
+  it('keeps every standalone item a plain, uncursed, effect-free stat item', () => {
+    // The rule the list is chosen by, made mechanical: an item interesting enough
+    // to have a curse or an effect is interesting enough to combine with something.
+    // Without this, "standalone" becomes a place to put an item nobody could think
+    // of a partner for, which is how a roster quietly turns back into stat sticks.
+    for (const id of STANDALONE_ITEM_IDS) {
+      const def = ITEMS[id] as ItemDef
+      expect(effectsOf(def).length, `${id} is standalone but carries an effect`).toBe(0)
+      expect(def.tags.includes('cursed'), `${id} is standalone but cursed`).toBe(false)
+      expect(statsOf(def).length, `${id} is standalone and does nothing`).toBeGreaterThan(0)
+    }
+  })
+
+  it('keeps the standalone list to commons, with Feed Relay the one recorded exception', () => {
+    // Feed Relay is an uncommon and was standalone at M3 for a documented reason:
+    // whole-tick quantisation means it is the smallest permanent fire-rate change
+    // that exists, so it is a "plain" item that could not be priced as a common.
+    // M5 did not retune the M3 fourteen, so the exception carries forward — but it
+    // is asserted BY NAME, so a future rare or relic cannot join it silently.
+    const nonCommon = STANDALONE_ITEM_IDS.filter((id) => ITEMS[id]?.tier !== 'common')
+    expect(nonCommon, 'only Feed Relay may be standalone above common').toEqual(['feed-relay'])
   })
 
   it('gives the standalone items no interaction and everything else at least one', () => {
@@ -655,5 +768,68 @@ describe('interaction reachability', () => {
     }
     const maxDegree = Math.max(...degree.values())
     expect(maxDegree).toBeLessThanOrEqual(Math.ceil(INTERACTIONS.length / 2))
+  })
+
+  it('caps the maximum degree at 3, so no item is the hub the roster runs through', () => {
+    // THE M5 STRUCTURAL ASSERTION, and the one worth understanding. The check above
+    // scales with the edge count, so at 28 interactions it permits an item with 14
+    // of them — which is precisely the failure it was written to prevent, just
+    // deferred. At forty items the risk is not a sparse graph, it is a hub: one item
+    // every synergy runs through, so the roster collapses into "did you find it".
+    //
+    // 3 is a fixed number rather than a formula, because the right ceiling is a
+    // design decision about build variety and not a function of how many pairs
+    // happen to have been written. Raising it should require editing this line.
+    const degree = new Map<string, number>()
+    for (const interaction of INTERACTIONS) {
+      for (const id of interaction.requires) degree.set(id, (degree.get(id) ?? 0) + 1)
+    }
+    const worst = [...degree.entries()].sort((a, b) => b[1] - a[1])[0]
+    expect(worst?.[1], `${worst?.[0]} is a hub with ${worst?.[1]} interactions`).toBeLessThanOrEqual(
+      MAX_ITEM_DEGREE,
+    )
+  })
+
+  it('reports a degree distribution with a long tail, not a plateau', () => {
+    // The cap alone permits the opposite pathology: every connected item at exactly
+    // 3, which is a uniformly dense graph where no pair is special and the marker
+    // fires constantly. A real interaction graph has most items in one or two
+    // combinations and a few that anchor archetypes.
+    const degree = new Map<string, number>()
+    for (const interaction of INTERACTIONS) {
+      for (const id of interaction.requires) degree.set(id, (degree.get(id) ?? 0) + 1)
+    }
+    const atOne = [...degree.values()].filter((d) => d === 1).length
+    const atMax = [...degree.values()].filter((d) => d === MAX_ITEM_DEGREE).length
+    expect(atOne, 'no single-interaction items: the graph is a plateau').toBeGreaterThan(atMax)
+    // Degree sums to twice the edge count. Cheap arithmetic guard that the map was
+    // built from the real `requires` pairs rather than from something else.
+    const sum = [...degree.values()].reduce((a, b) => a + b, 0)
+    expect(sum).toBe(INTERACTIONS.length * 2)
+  })
+
+  it('connects every rare and relic into the graph', () => {
+    // A rare or relic with no partner is the most expensive kind of orphan: it is
+    // the pick a run plans around, and planning around it is the thing the
+    // interaction graph is for. Commons are allowed to be plain and one uncommon
+    // (Feed Relay) is grandfathered; nothing at rare or above is.
+    for (const [key, def] of itemEntries) {
+      if (def.tier !== 'rare' && def.tier !== 'relic') continue
+      expect(connected.has(key), `${key} is a ${def.tier} with no interaction`).toBe(true)
+    }
+  })
+
+  it('never declares an interaction between two standalone items', () => {
+    // Belt and braces on the two lists agreeing: the reachability test compares the
+    // computed set against the named one, but this catches the specific authoring
+    // slip of adding a pair and forgetting to remove both names.
+    for (const interaction of INTERACTIONS) {
+      for (const id of interaction.requires) {
+        expect(
+          STANDALONE_ITEM_IDS.includes(id),
+          `${interaction.id} requires ${id}, which is listed standalone`,
+        ).toBe(false)
+      }
+    }
   })
 })

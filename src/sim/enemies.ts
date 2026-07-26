@@ -84,6 +84,15 @@ export function createEnemy(def: EnemyDef, x: number, y: number, uid: number): E
     telegraphTotal: 0,
     originX: x,
     holdY: holdFraction * PLAYFIELD_H,
+    ...(def.secondaryWeapon
+      ? {
+          secondary: {
+            cooldown: def.secondaryWeapon.firstDelayTicks,
+            windup: 0,
+            windupTotal: 0,
+          },
+        }
+      : {}),
   }
 }
 
@@ -253,38 +262,90 @@ export function updateEnemyWeapon(
   hullY: number,
   out: AttributedEnemyBullet[],
 ): boolean {
-  const w = def.weapon
-  if (w.kind === 'none') return false
   if (!e.alive) return false
+  // Rules 2 and 3: nothing fires, and no windup starts, from above the top edge.
   if (e.y < e.radius) return false
 
-  if (e.fireCooldown > 0) e.fireCooldown--
+  let fired = false
+
+  const primary = stepWeapon(e.fireCooldown, e.telegraphTicks, e.telegraphTotal, def.weapon)
+  e.fireCooldown = primary.cooldown
+  e.telegraphTicks = primary.windup
+  e.telegraphTotal = primary.windupTotal
+  if (primary.fire) {
+    fireVolley(e, def.weapon, hullX, hullY, out)
+    fired = true
+  }
+
+  // Second barrel, for layered patterns. Optional and absent on almost every
+  // enemy; a boss phase that fires two overlapping patterns is what it exists for.
+  const secondDef = def.secondaryWeapon
+  const slot = e.secondary
+  if (secondDef !== undefined && slot !== undefined) {
+    const next = stepWeapon(slot.cooldown, slot.windup, slot.windupTotal, secondDef)
+    slot.cooldown = next.cooldown
+    slot.windup = next.windup
+    slot.windupTotal = next.windupTotal
+    if (next.fire) {
+      fireVolley(e, secondDef, hullX, hullY, out)
+      fired = true
+    }
+    // The instance's telegraph fields are the DISPLAY telegraph: whichever barrel
+    // fires soonest. A second weapon whose windup nothing draws would be an
+    // unannounced attack, which rule 3 exists to prevent — so the visible warning
+    // always tracks the nearest incoming volley rather than always the primary.
+    if (slot.windup > 0 && (e.telegraphTicks === 0 || slot.windup < e.telegraphTicks)) {
+      e.telegraphTicks = slot.windup
+      e.telegraphTotal = slot.windupTotal
+    }
+  }
+
+  return fired
+}
+
+/** One weapon slot's bookkeeping for a tick. Pure, so both barrels share it. */
+interface WeaponStep {
+  cooldown: number
+  windup: number
+  windupTotal: number
+  fire: boolean
+}
+
+/**
+ * Advance one weapon slot by a tick.
+ *
+ * Extracted as a pure function so the primary and secondary barrels cannot drift
+ * apart in behaviour — a second copy of this bookkeeping is exactly where a
+ * telegraph would quietly go missing.
+ */
+function stepWeapon(
+  cooldown: number,
+  windup: number,
+  windupTotal: number,
+  w: EnemyWeaponDef,
+): WeaponStep {
+  if (w.kind === 'none') return { cooldown, windup, windupTotal, fire: false }
+
+  let cd = cooldown > 0 ? cooldown - 1 : cooldown
 
   // Already committed: count the telegraph down and fire when it runs out.
-  if (e.telegraphTicks > 0) {
-    e.telegraphTicks--
-    if (e.telegraphTicks > 0) return false
-    e.telegraphTotal = 0
-    fireVolley(e, w, hullX, hullY, out)
-    return true
+  if (windup > 0) {
+    const next = windup - 1
+    if (next > 0) return { cooldown: cd, windup: next, windupTotal, fire: false }
+    return { cooldown: cd, windup: 0, windupTotal: 0, fire: true }
   }
 
-  if (e.fireCooldown > 0) return false
+  if (cd > 0) return { cooldown: cd, windup: 0, windupTotal: 0, fire: false }
 
   // Guard against a zero interval turning one def into a projectile firehose.
-  e.fireCooldown = Math.max(1, w.intervalTicks)
+  cd = Math.max(1, w.intervalTicks)
 
-  const windup = Number.isFinite(w.windupTicks) ? Math.floor(w.windupTicks) : 0
-  if (windup > 0) {
-    e.telegraphTicks = windup
-    e.telegraphTotal = windup
-    return false
-  }
+  const next = Number.isFinite(w.windupTicks) ? Math.floor(w.windupTicks) : 0
+  if (next > 0) return { cooldown: cd, windup: next, windupTotal: next, fire: false }
 
   // windupTicks 0 means the shot arrives unannounced. content/types.ts says that
   // should be rare and deliberate; the sim still honours it.
-  fireVolley(e, w, hullX, hullY, out)
-  return true
+  return { cooldown: cd, windup: 0, windupTotal: 0, fire: true }
 }
 
 function fireVolley(

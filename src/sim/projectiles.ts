@@ -11,7 +11,7 @@
 
 import { TICK_SECONDS } from '../core/loop'
 import { isOutOfPlay } from '../core/space'
-import type { Bullet, EnemyBullet, EnemyBulletKind } from './entities'
+import type { Bullet, DeathCauseKind, EnemyBullet, EnemyBulletKind } from './entities'
 
 /**
  * Hard ceilings on live projectiles.
@@ -37,6 +37,14 @@ export const MAX_ENEMY_BULLETS = 1024
  */
 export interface AttributedEnemyBullet extends EnemyBullet {
   readonly sourceDefId: string
+  /**
+   * How the incident report should describe a death to this projectile.
+   *
+   * Carried on the bullet rather than inferred at the collision, because by then the
+   * only thing left is a string id and "was `corrosive-fall` an enemy?" is not a
+   * question the damage path should be guessing at.
+   */
+  readonly causeKind: DeathCauseKind
 }
 
 /** The shape both projectile kinds share. Internal to this module. */
@@ -76,8 +84,57 @@ export function spawnEnemyBullet(
   radius: number,
   kind: EnemyBulletKind,
 ): boolean {
+  return pushEnemyBullet(list, sourceDefId, 'enemy-fire', x, y, vx, vy, damage, radius, kind)
+}
+
+/**
+ * A projectile thrown by the environment rather than by a ship.
+ *
+ * Identical in every way a projectile behaves, and different in exactly one way that
+ * matters after the fact: the incident report must say the pilot was killed by a
+ * hazard, not by an enemy that does not exist.
+ */
+export function spawnHazardBullet(
+  list: AttributedEnemyBullet[],
+  hazardId: string,
+  x: number,
+  y: number,
+  vx: number,
+  vy: number,
+  damage: number,
+  radius: number,
+  kind: EnemyBulletKind,
+): boolean {
+  return pushEnemyBullet(list, hazardId, 'hazard', x, y, vx, vy, damage, radius, kind)
+}
+
+function pushEnemyBullet(
+  list: AttributedEnemyBullet[],
+  sourceDefId: string,
+  causeKind: DeathCauseKind,
+  x: number,
+  y: number,
+  vx: number,
+  vy: number,
+  damage: number,
+  radius: number,
+  kind: EnemyBulletKind,
+): boolean {
   if (list.length >= MAX_ENEMY_BULLETS) return false
-  list.push({ x, y, prevX: x, prevY: y, vx, vy, damage, radius, alive: true, kind, sourceDefId })
+  list.push({
+    x,
+    y,
+    prevX: x,
+    prevY: y,
+    vx,
+    vy,
+    damage,
+    radius,
+    alive: true,
+    kind,
+    sourceDefId,
+    causeKind,
+  })
   return true
 }
 

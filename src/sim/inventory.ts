@@ -28,6 +28,20 @@ export interface BoundEffect {
   fromInteraction: boolean
 }
 
+/**
+ * The hull's contribution to a build.
+ *
+ * Structurally a subset of `HullDef`, declared narrowly so this module cannot start
+ * depending on a hull's name or flavour text. A hull modifies exactly the same
+ * `StatKey` space and effect vocabulary an item does — that is what lets the two
+ * compose without either knowing the other exists.
+ */
+export interface HullSource {
+  id: string
+  stats?: readonly StatModifier[]
+  effects?: readonly EffectDef[]
+}
+
 export interface InventoryResolution {
   stats: Readonly<Record<StatKey, number>>
   effects: readonly BoundEffect[]
@@ -43,11 +57,27 @@ export function resolveInventory(
   held: readonly HeldItem[],
   itemsById: Readonly<Record<string, ItemDef>>,
   interactions: readonly InteractionDef[],
+  hull?: HullSource,
 ): InventoryResolution {
   const modifiers: StatModifier[] = []
   const effects: BoundEffect[] = []
 
-  // Items first, in acquisition order.
+  // The hull first, because it is the thing the items are bolted to.
+  //
+  // Order is not cosmetic here even though the *stat* fold is order-independent by
+  // construction (all adds, then all muls — see stats.ts): effect dispatch follows
+  // this array, so a hull's innate behaviour must be established before anything the
+  // pilot picked up modifies the situation.
+  if (hull) {
+    if (hull.stats) modifiers.push(...hull.stats)
+    if (hull.effects) {
+      for (const effect of hull.effects) {
+        effects.push({ effect, sourceId: hull.id, fromInteraction: false })
+      }
+    }
+  }
+
+  // Items next, in acquisition order.
   for (const entry of held) {
     const def = itemsById[entry.defId]
     if (!def) continue

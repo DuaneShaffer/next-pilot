@@ -253,10 +253,52 @@ certifies which pool a run drew from and must not be described as an anti-TAS me
 - All 8 hulls
 - ~40 items with a documented interaction graph
 - Elites, hazards, vaults, curses
+- World map + between-sector shops (folded in from "Proposed, unscheduled")
 
 **Exit:** bot sweeps show a 20–40% clear rate for a competent policy and every hull within 15
 percentage points of the mean; no sector is a difficulty cliff (death distribution has no single
 spike above 35%).
+
+### What shipped
+
+| Item | Status |
+| --- | --- |
+| 5 sectors, distinct grammars | **Done.** Structurally enforced: `tests/sectors.test.ts` asserts no two sectors draw from the same enemy set and each has an exclusive type, because a sector built by copying the previous one and editing counts looks fine in a diff. |
+| Boss per sector, seeded variants | **Done.** 5 bosses, 4 variants across the last three. A boss is an enemy with phases, so no simulation code exists per boss. |
+| All 8 hulls | **5 of 8.** Escrow, Indemnity and Writ are omitted rather than faked; each is recorded in `HULLS_AWAITING_MECHANICS` with the mechanic it needs. Three more shipped with part of their upside missing, stated in code and never on the player's card. See `docs/DESIGN.md`. |
+| ~40 items | **Done.** 40 items, 28 interactions, max node degree 3 — a hub item every synergy runs through would collapse build variety into "did you find the hub". |
+| Hazards | **Done.** 5, four kinds. Every one warns a full second before it acts. |
+| Elites | **Done**, expanded through sectors 2–5. |
+| Vaults, curses | **Curses done** (6 cursed items across three cost currencies). **Vaults not done** — a vault is a relic with a curse attached, and it needs curses that attach to a *pickup*, not curses that are pickups. |
+| World map + shops | **Done.** Route choice between sectors, then a between-sector shop on its own price curve. |
+
+### Bugs this milestone found in shipped code
+
+Worth recording, because every one of these had been passing tests and none was visible
+from a diff:
+
+- **Enemy fire was 3.5 LU quieter than the player's own gun**, and three other cues were
+  effectively inaudible on a laptop (up to 99% of their energy below 150 Hz). That is a
+  legibility failure, not a mix preference — the sound telling you that you are being shot
+  at was losing to the sound of you shooting. Found the first time anyone measured the
+  audio, which had never been heard by anybody. See `docs/VERIFICATION.md` §5.
+- **A second soft freeze, hiding inside the fix for the first.** `HELD_CONFIRM_DWELL_TICKS`
+  confirms option 0 for a player holding the trigger, so a card can never go unresponsive.
+  But a between-sector shop can price option 0 above what the pilot is carrying: the world
+  refuses, the card stays open, and the next tick tries the same thing — for the full
+  20-second timeout. A rescue that cannot complete now declines instead of looping.
+  Found by reading the transition machine, not by a test.
+
+- **`retaliation-coil` lied.** The card said "fires only on integrity loss" and `docs/DESIGN.md`
+  reasoned a whole anti-synergy from that, but the sim fired it on shield-absorbed hits too.
+  Found by a content author trying to write a *second* retaliation item and realising one of the
+  two would have to be wrong on screen.
+- **`grid-swep`.** A hazard id typo in the run's stage list, caught the first time
+  `src/content/runs.ts` — which pairs sectors with bosses where both tables are in scope —
+  was loaded.
+- **A test that stopped measuring.** The build-focused bot probe expects to assemble two named
+  items; at 14 items it did so often, at 40 it never does. The probe was silently no longer an
+  instrument.
 
 ## M6 — Polish and balance
 
@@ -273,9 +315,7 @@ that explains itself.
 
 See **Proposals not yet decided** in `docs/DESIGN.md` for the reasoning. Summary:
 
-- **World map + between-sector shops** — not new systems, just the existing work-order
-  design getting somewhere to live. Fold into **M5**, which is when sectors exist to
-  route between.
+- ~~**World map + between-sector shops**~~ — **built in M5**, as folded in. See above.
 - **Experience / levels** — a real addition, but only if its rhythm is distinct from
   items (high frequency, low deliberation). Otherwise it is a second power curve doing
   the same job.
@@ -303,6 +343,24 @@ particular the frozen playfield-aspect constraint.
 **Exit:** a real run completes on a phone in portrait at 60fps within the frame-time budget; a
 replay recorded on mobile reproduces bit-exactly on desktop; the frozen-aspect constraint is
 asserted by a test.
+
+### Groundwork done early (during M5)
+
+`src/core/touch.ts`, `src/core/viewport.ts` and `docs/MOBILE.md` exist, tested and **deliberately
+not wired in**. Read MOBILE.md before starting M7; three findings change the plan above:
+
+- **"Auto-fire always on" is wrong as written, and would have shipped a bug.** A trigger that
+  never releases interacts with `HELD_CONFIRM_DWELL_TICKS` — the keyboard soft-freeze rescue — in
+  two ways, both bad: an untouched card auto-confirms option 0 after 0.8s *every time*, making
+  mobile pick rates a constant; and a card the player *does* touch can never be confirmed at all,
+  because a rising fire edge requires a fall that never comes. Auto-fire must be **contextual**:
+  on in the sortie, off on a card. Solved in the touch layer with no change to the simulation.
+- **`index.html` needs `touch-action: none`**, not `manipulation`. The current value permits
+  pinch, so Safari eats the two-finger focus gesture.
+- **The portrait bar has 39% of the landscape column's area.** Decoupling `panel.ts` from
+  `PLAYFIELD_W` is necessary but nowhere near sufficient — portrait needs a different
+  *composition*, and UI rule 7's 11px floor rules out shrinking text to fit. This is the largest
+  remaining piece.
 
 ---
 

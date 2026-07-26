@@ -7,3 +7,7 @@ coverage/
 test-results/
 playwright-report/
 screenshots/
+# Rendered WAVs from `npm run audio`. Anchored with a leading slash: an unanchored
+# `audio/` matches any directory of that name at any depth, which silently ignored
+# the whole of src/audio/ — including four new source files — and git said nothing.
+/audio/

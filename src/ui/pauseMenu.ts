@@ -1,15 +1,26 @@
 /**
  * Pause menu.
  *
- * Also the settings screen, deliberately. Two reasons:
+ * Still the place the accessibility controls live, and deliberately so:
  *
  * 1. Shake and flash reduction are accessibility controls (docs/UI.md rule 10),
  *    and a control a player cannot reach does not exist. Pause is where someone
  *    goes when the game is making them uncomfortable, so it is where the remedy
  *    belongs — not behind a title-screen submenu they would have to quit a run
  *    to reach.
- * 2. It keeps the game at one menu. Rule 6's spirit is that navigation is not
- *    content; a settings tree would be a second thing to learn.
+ * 2. It keeps the game at one menu for everything a player needs *during* a run.
+ *
+ * WHAT CHANGED IN M6. There is now a full settings screen as well
+ * (`src/ui/settings.ts`), because key rebinding has to be reachable *before* a
+ * sortie — otherwise configuring your controls means launching a permadeath run
+ * with the controls you were trying to change — and because seven rebindable
+ * actions plus a capture state does not fit on this card. The reasoning is written
+ * out in that file's header.
+ *
+ * The two screens share one source of truth. Every label, hint, adjustment and
+ * formatter for a setting that appears in both comes from `src/ui/settings.ts`, so
+ * "Screen shake" cannot be described one way here and another way there. This file
+ * chooses *which* rows to show and lays them out; it does not author their copy.
  *
  * Pause is an APP-LAYER concept, not simulation state. While paused the loop
  * simply does not advance the sim, so no ticks happen and nothing is recorded.
@@ -23,11 +34,24 @@
 
 import { formatSeed } from '../core/seed'
 import { VIRTUAL_H, VIRTUAL_W } from '../core/space'
-import type { Settings } from '../meta/save'
 import { Palette } from '../render/palette'
 import { canvasMeasure, drawLabel, drawText, wrapText } from '../render/text'
+import {
+  SETTING_COPY,
+  adjustSettingValue,
+  formatSettingDisplay,
+  type SharedSettingId,
+  type UiSettings,
+} from './settings'
 
-export type PauseItemId = 'resume' | 'shake' | 'volume' | 'mute' | 'abandon'
+export type PauseItemId =
+  | 'resume'
+  | 'shake'
+  | 'flashes'
+  | 'volume'
+  | 'mute'
+  | 'settings'
+  | 'abandon'
 
 interface PauseItem {
   id: PauseItemId
@@ -38,22 +62,29 @@ interface PauseItem {
   hint: string
 }
 
+/** Rows whose copy and behaviour are owned by the settings screen. */
+function shared(id: SharedSettingId & PauseItemId, kind: 'scale' | 'toggle'): PauseItem {
+  return { id, label: SETTING_COPY[id].label, kind, hint: SETTING_COPY[id].hint }
+}
+
 export const PAUSE_ITEMS: readonly PauseItem[] = [
   { id: 'resume', label: 'Resume sortie', kind: 'action', hint: 'Return to the run in progress.' },
+  shared('shake', 'scale'),
+  // `reduceFlashes` is offered here now because the renderer genuinely honours it:
+  // `flashScale()` in src/render/intensity.ts attenuates every bright transient,
+  // and src/main.ts threads the setting into drawScene and drawPanel. That
+  // sequencing was the condition the old note in this file set, and it is met — a
+  // row that silently did nothing would tell a photosensitive player they were
+  // protected when they were not.
+  shared('flashes', 'toggle'),
+  shared('volume', 'scale'),
+  shared('mute', 'toggle'),
   {
-    id: 'shake',
-    label: 'Screen shake',
-    kind: 'scale',
-    hint: 'Impact camera movement. Set to 0% to disable entirely.',
+    id: 'settings',
+    label: 'All settings',
+    kind: 'action',
+    hint: 'Opens the full screen, including which keys do what.',
   },
-  // NOTE: `Settings.reduceFlashes` exists in the save schema but is deliberately
-  // NOT offered here yet, because the renderer does not consume it — the scene
-  // takes a shake multiplier and no flash scale. A menu row that silently does
-  // nothing is worse than a missing one: it tells a photosensitive player they
-  // have been protected when they have not. Add the row in the same change that
-  // makes the renderer honour it.
-  { id: 'volume', label: 'Volume', kind: 'scale', hint: 'Master output level.' },
-  { id: 'mute', label: 'Mute', kind: 'toggle', hint: 'Silences all audio.' },
   {
     id: 'abandon',
     label: 'Abandon sortie',
@@ -62,62 +93,44 @@ export const PAUSE_ITEMS: readonly PauseItem[] = [
   },
 ]
 
-/** Step size for scale settings. Five stops is enough granularity to be useful. */
-const SCALE_STEP = 0.25
-
 export function movePauseSelection(index: number, delta: number): number {
   const count = PAUSE_ITEMS.length
-  // Wrap rather than clamp: a six-item list is faster to traverse circularly, and
+  // Wrap rather than clamp: a short list is faster to traverse circularly, and
   // hitting an invisible wall reads as an unresponsive menu.
   return (((index + delta) % count) + count) % count
 }
 
-function clamp01(value: number): number {
-  return Math.max(0, Math.min(1, value))
+function asShared(id: PauseItemId): SharedSettingId | null {
+  return id === 'shake' || id === 'flashes' || id === 'volume' || id === 'mute' ? id : null
 }
 
-/** Apply a left/right adjustment to the selected setting. Pure. */
-export function adjustSetting(settings: Settings, id: PauseItemId, delta: number): Settings {
-  switch (id) {
-    case 'shake':
-      return { ...settings, shake: clamp01(settings.shake + delta * SCALE_STEP) }
-    case 'volume':
-      return { ...settings, masterVolume: clamp01(settings.masterVolume + delta * SCALE_STEP) }
-    case 'mute':
-      // Toggles ignore direction: any horizontal press flips them, which is what
-      // players actually expect from a two-state row.
-      return delta === 0 ? settings : { ...settings, muted: !settings.muted }
-    default:
-      return settings
-  }
+/**
+ * Apply a left/right adjustment to the selected setting. Pure.
+ *
+ * Delegates to the settings screen's reducer so the two screens cannot drift on
+ * step size, clamping, or which direction flips a toggle.
+ */
+export function adjustSetting(
+  settings: UiSettings,
+  id: PauseItemId,
+  delta: number,
+): UiSettings {
+  const shared = asShared(id)
+  return shared === null ? settings : adjustSettingValue(settings, shared, delta)
 }
 
 /** Display value for a row. Percentages carry their unit; toggles read as words. */
 export function formatSettingValue(
-  settings: Settings,
+  settings: UiSettings,
   id: PauseItemId,
 ): { value: string; unit: string } {
-  switch (id) {
-    case 'shake':
-      // "Off" rather than "0 %", because 0% of a camera effect is a state, not a
-      // quantity — and a player scanning for "off" should find that word.
-      return settings.shake === 0
-        ? { value: 'Off', unit: '' }
-        : { value: String(Math.round(settings.shake * 100)), unit: '%' }
-    case 'volume':
-      return settings.muted
-        ? { value: 'Muted', unit: '' }
-        : { value: String(Math.round(settings.masterVolume * 100)), unit: '%' }
-    case 'mute':
-      return { value: settings.muted ? 'On' : 'Off', unit: '' }
-    default:
-      return { value: '', unit: '' }
-  }
+  const shared = asShared(id)
+  return shared === null ? { value: '', unit: '' } : formatSettingDisplay(settings, shared)
 }
 
 export interface PauseMenuState {
   selected: number
-  settings: Settings
+  settings: UiSettings
   /** Ticks the menu has been open, for the selection pulse. */
   tick: number
   /** Shown as context so pausing does not hide the run's state. */
@@ -134,7 +147,15 @@ export interface PauseMenuState {
  * one unmeasured line, and nothing checked.
  */
 const CARD_W = 420
-const CARD_H = 392
+/**
+ * Grown from 392 for the two rows M6 added (reduce flashes, all settings).
+ *
+ * Derived rather than nudged until it looked right: PAD*2 + header 94 + rows +
+ * rule 21 + two hint lines 30 + footer 18. At seven rows that is 460, and
+ * `tests/settings.test.ts` asserts the arithmetic so a row added later without
+ * growing the card is a test failure rather than a hint drawn over the footer.
+ */
+const CARD_H = 460
 const CARD_X = (VIRTUAL_W - CARD_W) / 2
 const CARD_Y = (VIRTUAL_H - CARD_H) / 2
 const PAD = 26
@@ -207,12 +228,27 @@ export function drawPauseMenu(ctx: CanvasRenderingContext2D, state: PauseMenuSta
       })
     }
 
+    /**
+     * Destructive rows are marked by a danger-coloured RULE, not by danger-coloured
+     * text.
+     *
+     * `Palette.danger` (#FF4A38) measures 3.78:1 against `Palette.panel`, which is
+     * below WCAG AA's 4.5:1 for 14px text and therefore a rule 7 violation — the
+     * one row on this card a player must not misread was the least legible thing on
+     * it. A 2px bar carries the same information at full saturation without being
+     * text, and it is a second channel besides colour, which rule 3 asks for
+     * anyway. See tests/palette.test.ts for the measurement.
+     */
     const isDestructive = item.id === 'abandon'
+    if (isDestructive) {
+      ctx.fillStyle = Palette.danger
+      ctx.fillRect(contentX - 8, rowY - 2, 2, ROW_H - 10)
+    }
     drawText(ctx, item.label, contentX, rowY, {
       size: 14,
-      weight: isSelected ? 600 : 400,
+      weight: isSelected || isDestructive ? 600 : 400,
       baseline: 'top',
-      color: isDestructive ? Palette.danger : isSelected ? Palette.text : Palette.textDim,
+      color: isSelected || isDestructive ? Palette.text : Palette.textDim,
     })
 
     const { value, unit } = formatSettingValue(state.settings, item.id)

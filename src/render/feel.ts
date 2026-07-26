@@ -31,6 +31,7 @@
 import { PLAYFIELD_H, PLAYFIELD_W } from '../core/space'
 import type { SimEvent } from '../sim/entities'
 import { blitGlow, drawHitSpark, hash01 } from './effects'
+import { flashScale } from './intensity'
 import { Palette } from './palette'
 import { drawText, measureText } from './text'
 
@@ -193,10 +194,50 @@ export const MAX_SPARKS = 28
 /** Ticks a spark lives. ~120ms: an impact, not an event. */
 export const SPARK_LIFETIME = 7
 
+/**
+ * One ejected case.
+ *
+ * Purely cosmetic, and deliberately built so it *cannot* be anything else: it is
+ * spawned from the `player-shot` event, lives in render state, and the simulation
+ * neither knows nor can be affected by it. That is the whole reason it was deferred
+ * from M2 — an eject effect that reached into the sim would be a decoration with the
+ * power to desynchronise a replay.
+ *
+ * Pooled like sparks, and for the same reason: at 20 shots/second an allocating
+ * effect is 1,200 objects a minute.
+ */
+export interface Shell {
+  x: number
+  y: number
+  /** Per-TICK velocity, never per second. The sim's timestep is the only clock here. */
+  vx: number
+  vy: number
+  age: number
+  /** Radians, advanced per tick. Rotation is what makes a 2-unit chip read as brass. */
+  spin: number
+  spinRate: number
+}
+
+export const MAX_SHELLS = 18
+/** Ticks a case is visible. ~0.4s: long enough to see leave, short enough not to litter. */
+export const SHELL_LIFETIME = 26
+/** Per-tick downward acceleration. */
+const SHELL_GRAVITY = 0.055
+/** Sideways speed out of the muzzle, in units per tick. */
+const SHELL_EJECT_VX = 0.5
+/** Initial upward drift, so a case arcs rather than dropping. */
+const SHELL_EJECT_VY = -0.22
+
 export interface FeelState {
   labels: FloatingLabel[]
   /** Fixed-size pool; a slot with `age >= SPARK_LIFETIME` is free. */
   readonly sparks: HitSpark[]
+  /** Fixed-size pool; a slot with `age >= SHELL_LIFETIME` is free. */
+  readonly shells: Shell[]
+  /** Which side the next case ejects from. Alternates, matching the alternating muzzles. */
+  shellSide: number
+  /** Rotating cursor into the shell pool. */
+  shellCursor: number
   /**
    * Smoothed 0..1 firing level for the muzzle glow.
    *
@@ -224,13 +265,28 @@ export function createFeelState(): FeelState {
   for (let i = 0; i < MAX_SPARKS; i++) {
     sparks.push({ x: 0, y: 0, age: SPARK_LIFETIME, power: 0, seed: i })
   }
-  return { labels: [], sparks, muzzleHeat: 0, shotHold: 0, sparkCursor: 0 }
+  const shells: Shell[] = []
+  for (let i = 0; i < MAX_SHELLS; i++) {
+    shells.push({ x: 0, y: 0, vx: 0, vy: 0, age: SHELL_LIFETIME, spin: 0, spinRate: 0 })
+  }
+  return {
+    labels: [],
+    sparks,
+    shells,
+    shellSide: 1,
+    shellCursor: 0,
+    muzzleHeat: 0,
+    shotHold: 0,
+    sparkCursor: 0,
+  }
 }
 
 /** Drop everything. Called when a new sortie starts, so the last death's numbers don't survive it. */
 export function resetFeelState(state: FeelState): void {
   state.labels.length = 0
   for (const spark of state.sparks) spark.age = SPARK_LIFETIME
+  for (const shell of state.shells) shell.age = SHELL_LIFETIME
+  state.shellSide = 1
   state.muzzleHeat = 0
   state.shotHold = 0
 }
@@ -368,6 +424,42 @@ function pushLabel(
   })
 }
 
+/**
+ * Eject one case from the muzzle.
+ *
+ * Everything about it is derived from `(x, y, side)` through `hash01`, so two renders
+ * of the same tick throw the same brass and a screenshot of tick N is reproducible —
+ * the same property every other effect in this file holds, and the reason none of them
+ * calls `Math.random()`.
+ */
+function spawnShell(state: FeelState, x: number, y: number): void {
+  const side = state.shellSide
+  state.shellSide = -side
+
+  let slot = -1
+  for (let i = 0; i < MAX_SHELLS; i++) {
+    const index = (state.shellCursor + i) % MAX_SHELLS
+    const shell = state.shells[index]
+    if (shell && shell.age >= SHELL_LIFETIME) {
+      slot = index
+      break
+    }
+  }
+  if (slot < 0) slot = state.shellCursor
+  state.shellCursor = (slot + 1) % MAX_SHELLS
+
+  const shell = state.shells[slot]
+  if (!shell) return
+  const scatter = hash01(x + side * 3.1, y - side * 7.7)
+  shell.x = finite(x) + side * 5
+  shell.y = finite(y)
+  shell.vx = side * SHELL_EJECT_VX * (0.7 + 0.6 * scatter)
+  shell.vy = SHELL_EJECT_VY * (0.6 + 0.8 * scatter)
+  shell.spin = scatter * Math.PI
+  shell.spinRate = (side < 0 ? -1 : 1) * (0.12 + 0.1 * scatter)
+  shell.age = 0
+}
+
 function spawnSpark(state: FeelState, x: number, y: number, power: number): void {
   // Merge nearby fresh sparks instead of stacking them. A stream of hits on one
   // target then reads as a continuous shimmer at the impact point rather than a
@@ -416,6 +508,9 @@ export function feelTick(state: FeelState, events: readonly SimEvent[], tick: nu
     switch (event.kind) {
       case 'player-shot':
         state.shotHold = SHOT_HOLD_TICKS
+        // Brass. Cosmetic only, and driven off the event rather than off the weapon
+        // state so it cannot get out of step with what the sim actually fired.
+        spawnShell(state, event.x, event.y)
         break
 
       case 'enemy-hit': {
@@ -487,6 +582,17 @@ export function feelTick(state: FeelState, events: readonly SimEvent[], tick: nu
 
   for (const spark of state.sparks) {
     if (spark.age < SPARK_LIFETIME) spark.age++
+  }
+
+  // Cases integrate per tick, like everything else here, so they fall at the same
+  // speed at 60fps, at 144fps, and under ?ff=32.
+  for (const shell of state.shells) {
+    if (shell.age >= SHELL_LIFETIME) continue
+    shell.age++
+    shell.x += shell.vx
+    shell.y += shell.vy
+    shell.vy += SHELL_GRAVITY
+    shell.spin += shell.spinRate
   }
 
   if (state.shotHold > 0) state.shotHold--
@@ -606,15 +712,55 @@ export function drawFeelSparks(
   ctx: CanvasRenderingContext2D,
   state: FeelState,
   alpha: number,
+  reduceFlashes = false,
 ): void {
   const a = Number.isFinite(alpha) ? alpha : 0
   ctx.globalCompositeOperation = 'lighter'
   for (const spark of state.sparks) {
     if (spark.age >= SPARK_LIFETIME) continue
     const t = clamp01((spark.age + a) / SPARK_LIFETIME)
-    drawHitSpark(ctx, spark.x, spark.y, t, spark.power, spark.seed)
+    drawHitSpark(ctx, spark.x, spark.y, t, spark.power, spark.seed, reduceFlashes)
   }
   ctx.globalCompositeOperation = 'source-over'
+}
+
+/**
+ * Ejected cases.
+ *
+ * Deliberately quiet. A dull warm grey rather than a saturated brass, never above half
+ * alpha, two units across, and drawn *under* the hull so the ship is never obscured by
+ * its own litter. UI.md rule 3 says colour is information: a bright amber chip would
+ * read as `caution`, and twenty of them a second would be the loudest thing on a screen
+ * whose loudest thing must always be the bullets.
+ *
+ * Not additive. Brass is not light.
+ */
+const SHELL_COLOR = '154, 138, 110'
+
+export function drawFeelShells(
+  ctx: CanvasRenderingContext2D,
+  state: FeelState,
+  alpha: number,
+): void {
+  const a = Number.isFinite(alpha) ? alpha : 0
+  for (const shell of state.shells) {
+    if (shell.age >= SHELL_LIFETIME) continue
+    const t = clamp01((shell.age + a) / SHELL_LIFETIME)
+    const fade = (1 - t) * (1 - t)
+    if (fade <= 0.02) continue
+
+    // Extrapolated by the render alpha rather than snapped to the tick, so a case
+    // arcs smoothly on a 144Hz display like every other moving thing.
+    const x = clampX(finite(shell.x) + finite(shell.vx) * a)
+    const y = clampY(finite(shell.y) + finite(shell.vy) * a)
+
+    ctx.save()
+    ctx.translate(x, y)
+    ctx.rotate(finite(shell.spin) + finite(shell.spinRate) * a)
+    ctx.fillStyle = `rgba(${SHELL_COLOR}, ${(0.5 * fade).toFixed(3)})`
+    ctx.fillRect(-1, -1.9, 2, 3.8)
+    ctx.restore()
+  }
 }
 
 /**
@@ -628,15 +774,17 @@ export function drawMuzzleGlow(
   x: number,
   y: number,
   heat: number,
+  reduceFlashes = false,
 ): void {
   const h = clamp01(heat)
   if (h <= 0.01) return
+  const glare = flashScale(reduceFlashes)
   ctx.globalCompositeOperation = 'lighter'
   for (const side of [-4.5, 4.5]) {
-    blitGlow(ctx, 'self', x + side, y, 4 + 5 * h, 0.1 + 0.3 * h)
+    blitGlow(ctx, 'self', x + side, y, 4 + 5 * h, (0.1 + 0.3 * h) * glare)
   }
   // A single small hot bar across both muzzles reads as a barrel glowing under
   // sustained fire, which is the thing 20 shots/second should look like.
-  blitGlow(ctx, 'hot', x, y + 1, 3 + 3 * h, 0.06 + 0.18 * h)
+  blitGlow(ctx, 'hot', x, y + 1, 3 + 3 * h, (0.06 + 0.18 * h) * glare)
   ctx.globalCompositeOperation = 'source-over'
 }

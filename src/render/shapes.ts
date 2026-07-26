@@ -289,6 +289,27 @@ export function enemyTopOffset(shape: EnemyShape, radius: number): number {
 }
 
 /**
+ * Trace a silhouette as a path at the origin, without filling or stroking it.
+ *
+ * Exists so a boss can build armour plating out of the *same* geometry as its hull
+ * (see render/boss.ts) instead of inventing a second outline that would drift from
+ * this one the moment a shape is retuned. The caller owns the transform and the
+ * paint; this only lays down the path.
+ */
+export function traceEnemyOutline(
+  ctx: CanvasRenderingContext2D,
+  shape: EnemyShape,
+  radius: number,
+): void {
+  SHAPES[shape].outline(ctx, radius)
+}
+
+/** Radians per tick a shape idles at. Zero for everything that is not a mine. */
+export function enemySpinPerTick(shape: EnemyShape): number {
+  return SHAPES[shape].spinPerTick
+}
+
+/**
  * Draw one enemy silhouette.
  *
  * Position is already interpolated by the caller; this function is pure

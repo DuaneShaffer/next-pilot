@@ -116,6 +116,30 @@ export function cueForEvent(event: SimEvent): SoundCue {
     case 'wave-released':
       return cue('ui.waveRelease')
 
+    case 'boss-spawned':
+      // Centred, like `hull-lost`: a boss arriving is not an event at a place on
+      // the playfield, it is an event happening to the run.
+      return cue('threat.bossSpawn')
+
+    case 'boss-phase':
+      return cue('threat.bossPhase')
+
+    case 'boss-killed':
+      return cue('impact.bossKilled', 1, 1, panForX(event.x))
+
+    case 'hazard-warning':
+      // Deliberately NOT panned, and the hazard's id is deliberately ignored.
+      // A hazard covers the playfield, so panning it would tell the player to
+      // look in a direction that means nothing — and one unvarying warning is
+      // recognised faster than a family of related ones. See the recipe.
+      return cue('alarm.hazardWarning')
+
+    case 'hazard-fired':
+      return cue('threat.hazardFired')
+
+    case 'stage-cleared':
+      return cue('ui.stageCleared')
+
     default: {
       // Exhaustiveness: if `SimEvent` grows a variant, this stops compiling.
       const unreachable: never = event
@@ -141,6 +165,12 @@ const EVENT_KINDS: Record<SimEvent['kind'], true> = {
   'hull-lost': true,
   'scrap-collected': true,
   'wave-released': true,
+  'boss-spawned': true,
+  'boss-phase': true,
+  'boss-killed': true,
+  'hazard-warning': true,
+  'hazard-fired': true,
+  'stage-cleared': true,
 }
 
 export const SIM_EVENT_KINDS = Object.keys(EVENT_KINDS) as readonly SimEvent['kind'][]

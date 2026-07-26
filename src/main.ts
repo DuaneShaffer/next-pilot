@@ -12,9 +12,13 @@ import { Keyboard, NEUTRAL_INPUT, unpackInput, type InputSnapshot } from './core
 import { generateSeed, isValidSeed, normalizeSeed } from './core/seed'
 import { VIRTUAL_H, VIRTUAL_W } from './core/space'
 import { ENEMIES } from './content/enemies'
-import { SECTOR_ONE, SECTORS } from './content/sectors'
+import { SECTORS, getSector } from './content/sectors'
 import { ITEMS } from './content/items'
 import { INTERACTIONS } from './content/interactions'
+import { BOSSES } from './content/bosses'
+import { HAZARDS } from './content/hazards'
+import { HULLS, LIEN_ID } from './content/hulls'
+import { STANDARD_RUN } from './content/runs'
 import { createAudioDirector } from './audio'
 import { adoptLegacySave, loadSave, persistSave, type Save, type Settings } from './meta/save'
 import { Viewport } from './render/layout'
@@ -170,8 +174,26 @@ function main(): void {
   let seed = options.seed
   // The real content tables. World defaults to empty so sim tests can fabricate
   // items; the app is what supplies the shipping set.
-  const content: RunContent = { items: ITEMS, interactions: INTERACTIONS }
+  const content: RunContent = {
+    items: ITEMS,
+    interactions: INTERACTIONS,
+    run: STANDARD_RUN,
+    sectors: Object.fromEntries(SECTORS.map((sector) => [sector.id, sector])),
+    bosses: BOSSES,
+    hazards: HAZARDS,
+  }
   let world = new World(seed, content)
+
+  /**
+   * Waves in a given sector, for the progress readouts.
+   *
+   * A function rather than a constant because the denominator is now per-sector: a
+   * panel reading "WAVE 4 / 30" against sector one's count while flying sector four
+   * is the same class of bug as the "SECTOR 1 / 5" a tester reported.
+   */
+  function waveCountFor(sectorId: string): number {
+    return getSector(sectorId).waves.length
+  }
   let sceneStars = new Starfield(seed)
   const titleStars = new Starfield(`${seed}:title`, VIRTUAL_W, VIRTUAL_H)
   let menuTick = 0
@@ -228,15 +250,16 @@ function main(): void {
 
   const panelState: PanelState = {
     pilotNumber: save.pilotNumber,
-    hullName: 'Lien',
+    // Every one of these comes off the live run rather than being hand-written.
+    // The panel has twice shipped a number the simulation disagreed with — a fire
+    // rate off by 2x, and "SECTOR 1 / 5" for the whole game — and both times the
+    // cause was the same: the panel describing the plan instead of the run.
+    hullName: world.hullName,
     weaponName: 'Twin Pulse',
-    // Read from the run, never hand-written: items change this constantly and the
-    // HUD advertising a rate the weapon does not have has already shipped once.
     fireRate: world.shotsPerSecond,
-    sector: 1,
-    // Sectors that exist, not sectors that are planned. See SECTORS.
-    sectorCount: SECTORS.length,
-    waveCount: SECTOR_ONE.waves.length,
+    sector: world.stage.index + 1,
+    sectorCount: world.stage.count,
+    waveCount: waveCountFor(world.sectorId),
     // Without the table the build readout formats ids instead of authored names.
     items: ITEMS,
   }
@@ -286,7 +309,7 @@ function main(): void {
     if (filed) return
     filed = true
 
-    const summary = summariseRun(world, SECTOR_ONE.waves.length)
+    const summary = summariseRun(world, waveCountFor(world.sectorId))
     const result = fileRun(summary, save.certifications)
     save.certifications = result.state
     newlyCertified = result.newlyUnlocked.map((id) => getCertification(id)?.name ?? id)
@@ -296,7 +319,7 @@ function main(): void {
       buildPersonnelRecord(world, {
         pilotNumber: save.pilotNumber,
         hullId: panelState.hullName.toLowerCase(),
-        sectorId: SECTOR_ONE.id,
+        sectorId: world.sectorId,
         poolFingerprint: fingerprintPool(runPool),
       }),
     )
@@ -330,7 +353,28 @@ function main(): void {
 
     seed = withSeed ?? generateSeed()
     runPool = poolFor(unlockedSet(save.certifications.unlocked))
-    world = new World(seed, { ...content, workOrders: runPool.workOrders })
+    /**
+     * KNOWN DEFECT, being fixed by a hull-selection screen. Left visible rather than
+     * papered over.
+     *
+     * The comment that used to sit here claimed this "at least means a certification
+     * that grants a hull changes what is flown". It does not, and the claim was wrong
+     * the moment it was written: `BASE_POOL.hulls` is `['lien']` and `poolFor` appends
+     * grants after the base, so index 0 is ALWAYS the Lien. Every hull grant is
+     * therefore inert and four shipped hulls are unreachable.
+     *
+     * docs/DESIGN.md specifies the real answer — three hulls offered per run, drawn
+     * from what has been certified, Lien always among them — and that is a screen, not
+     * an index. Rolling one at random here would be worse than the bug: it would take
+     * a decision the design gives to the player and hide it in a seed.
+     */
+    const hullId = runPool.hulls?.[0] ?? LIEN_ID
+    world = new World(seed, {
+      ...content,
+      workOrders: runPool.workOrders,
+      ...(HULLS[hullId] ? { hull: HULLS[hullId] } : {}),
+    })
+    panelState.hullName = world.hullName
     sceneStars = new Starfield(seed)
     resetFeelState(feel)
     recorder = new ReplayRecorder(seed)
@@ -632,7 +676,7 @@ function main(): void {
         drawHangar(ctx, {
           unlocked: unlockedSet(save.certifications.unlocked),
           progress: save.certifications.progress,
-          waveCount: SECTOR_ONE.waves.length,
+          waveCount: waveCountFor(world.sectorId),
           selected: hangarSelection,
           tick: menuTick,
         })
@@ -651,7 +695,7 @@ function main(): void {
           names: {
             items: Object.fromEntries(Object.values(ITEMS).map((i) => [i.id, i.name])),
             enemies: Object.fromEntries(Object.values(ENEMIES).map((e) => [e.id, e.name])),
-            sectors: { [SECTOR_ONE.id]: SECTOR_ONE.name },
+            sectors: Object.fromEntries(SECTORS.map((s) => [s.id, s.name])),
           },
           skipped: 0,
           dropped: 0,
@@ -665,9 +709,21 @@ function main(): void {
       // Refreshed every frame from the run: an item taken mid-sortie changes this,
       // and a stale copy is precisely the HUD-lies-about-the-weapon bug again.
       panelState.fireRate = world.shotsPerSecond
+      panelState.reduceFlashes = save.settings.reduceFlashes
+      // Stage identity is refreshed here too, for exactly the same reason. It changes
+      // mid-run now, and a copy taken at launch would tell a pilot in sector four
+      // that they are in sector one — which is the bug a tester already reported.
+      panelState.sector = world.stage.index + 1
+      panelState.sectorCount = world.stage.count
+      panelState.waveCount = waveCountFor(world.sectorId)
       drawScene(ctx, world, sceneStars, frozen ? 0 : alpha, {
         feel,
         shakeScale: save.settings.shake,
+        // `reduceFlashes` shipped in the save schema at v3 and NOTHING consumed it
+        // for two milestones: the menu offered it, the save stored it, and it did
+        // nothing. A setting that does nothing is worse than a missing one, because
+        // a player who needs it believes they have turned it on.
+        reduceFlashes: save.settings.reduceFlashes,
       })
 
       // Not drawn under a choice card either: the card spans nearly the full width
@@ -713,7 +769,7 @@ function main(): void {
           settings: save.settings,
           tick: menuTick,
           waveIndex: world.stats.waveIndex,
-          waveCount: SECTOR_ONE.waves.length,
+          waveCount: waveCountFor(world.sectorId),
           seed,
         })
         return
@@ -729,10 +785,10 @@ function main(): void {
           hullName: panelState.hullName,
           tick: menuTick,
           ...(causeName ? { causeName } : {}),
-          sectorName: SECTOR_ONE.name,
+          sectorName: world.stage.sectorName,
           sector: panelState.sector,
           sectorCount: panelState.sectorCount,
-          waveCount: SECTOR_ONE.waves.length,
+          waveCount: waveCountFor(world.sectorId),
           ...(newlyCertified.length > 0 ? { certifications: newlyCertified } : {}),
         })
       }
@@ -811,6 +867,42 @@ function main(): void {
       },
       get filedRuns() {
         return save.personnel.length
+      },
+      /**
+       * Which leg of the run is being flown, 0-based.
+       *
+       * Every M5 capture waits on this rather than on elapsed time. A sector takes
+       * three minutes and a whole run takes fifteen, so "wait 400 seconds and hope"
+       * is exactly the time-driven capture that once photographed a healthy ship and
+       * filed it as the death screen.
+       */
+      get stageIndex() {
+        return world.stage.index
+      },
+      get stageCount() {
+        return world.stage.count
+      },
+      /** Boss name while one is alive, else null. */
+      get bossName() {
+        return world.boss?.boss?.name ?? null
+      },
+      get bossPhase() {
+        return world.boss?.boss?.phaseIndex ?? -1
+      },
+      /** Boss health as a fraction, for waiting on a late phase. */
+      get bossHealth() {
+        const boss = world.boss
+        return boss && boss.maxHp > 0 ? boss.hp / boss.maxHp : -1
+      },
+      /** The phase of the most urgent hazard: 'active' beats 'warning' beats 'idle'. */
+      get hazardPhase() {
+        const phases = world.hazards.map((h) => h.phase)
+        if (phases.includes('active')) return 'active'
+        if (phases.includes('warning')) return 'warning'
+        return phases.length > 0 ? 'idle' : null
+      },
+      get hazardCount() {
+        return world.hazards.length
       },
       get stats() {
         return { ...world.stats, ...loop.getStats() }

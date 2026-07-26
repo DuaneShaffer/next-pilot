@@ -15,7 +15,8 @@
     "screenshot": "npm run build && node tools/screenshot.mjs",
     "contracts": "node tools/check-contracts.mjs",
     "playtest": "tsx tools/playtest.ts",
-    "perf": "npm run build && node tools/perf.mjs"
+    "perf": "npm run build && node tools/perf.mjs",
+    "audio": "tsx tools/audio.ts"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

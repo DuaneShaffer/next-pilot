@@ -9,7 +9,7 @@
  * No behaviour lives here — types only.
  */
 
-import type { EnemyShape, ItemTier, MovementKind } from '../content/types'
+import type { EnemyShape, HazardKind, ItemTier, MovementKind } from '../content/types'
 
 /**
  * Anything drawn between ticks keeps its previous position so the renderer can
@@ -75,6 +75,14 @@ export interface EnemyBullet extends Interpolated {
 /** Where an enemy is in its movement script. */
 export type EnemyPhase = 'entering' | 'holding' | 'committed' | 'leaving'
 
+/** Firing cadence for one weapon barrel. */
+export interface WeaponSlotState {
+  cooldown: number
+  /** Ticks of telegraph remaining. 0 means not currently winding up. */
+  windup: number
+  windupTotal: number
+}
+
 export interface EnemyInstance extends Interpolated {
   /**
    * Unique instance identity, monotonic within a run.
@@ -117,11 +125,55 @@ export interface EnemyInstance extends Interpolated {
    * 0 means not currently winding up.
    */
   telegraphTicks: number
-  /** Total windup for the current volley, so render can show progress. */
+  /**
+   * Total windup for the current volley, so render can show progress.
+   *
+   * With a second barrel these two fields become the *display* telegraph — whichever
+   * barrel fires soonest — rather than strictly the primary's. See updateEnemyWeapon.
+   */
   telegraphTotal: number
+  /** Cadence state for `EnemyDef.secondaryWeapon`. Absent when there is no second barrel. */
+  secondary?: WeaponSlotState
   /** Anchor values a movement script needs (sine origin, hover target, ...). */
   originX: number
   holdY: number
+  /**
+   * Phase script, present only on a boss.
+   *
+   * A boss is an ordinary enemy carrying this. Everything else about it — movement,
+   * weapons, collision, death — runs through exactly the same code paths, which is
+   * why authoring a boss adds no simulation code. See sim/bosses.ts.
+   */
+  boss?: BossRuntime
+}
+
+/**
+ * A boss fight's progress through its phases.
+ *
+ * Each phase is a *derived* `EnemyDef` registered under a synthetic id, so advancing
+ * a phase is a one-field swap of `defId` and the existing movement and weapon
+ * interpreters pick the new behaviour up on the next tick. The alternative — a
+ * `BossInstance` with its own update path — would mean every future movement kind
+ * had to be implemented twice.
+ */
+export interface BossRuntime {
+  bossId: string
+  name: string
+  /** Which seeded variant is being fought, or null for the base form. */
+  variantId: string | null
+  phaseIndex: number
+  /** Derived def id per phase, parallel to `thresholds`. */
+  phaseDefIds: readonly string[]
+  /** `fromHealthFraction` per phase, descending. */
+  thresholds: readonly number[]
+  callouts: readonly string[]
+  /**
+   * Ticks the current phase callout stays on screen.
+   *
+   * Sim state rather than a render animation because the callout is the *warning*,
+   * and a warning whose duration depends on framerate is not a warning.
+   */
+  calloutTicks: number
 }
 
 export type ExplosionKind = 'enemy' | 'hull' | 'mine'
@@ -180,6 +232,17 @@ export type SimEvent =
   | { kind: 'hull-lost'; x: number; y: number }
   | { kind: 'scrap-collected'; x: number; y: number; amount: number }
   | { kind: 'wave-released'; index: number }
+  | { kind: 'boss-spawned'; bossId: string; name: string }
+  | { kind: 'boss-phase'; bossId: string; phaseIndex: number; callout: string }
+  | { kind: 'boss-killed'; x: number; y: number; bossId: string }
+  /**
+   * A hazard is about to fire. This is the telegraph, and it is a real event rather
+   * than a render cue for the same reason `telegraphTicks` is: the warning window is
+   * the time the player is given to react, so it has to be simulation state.
+   */
+  | { kind: 'hazard-warning'; hazardId: string }
+  | { kind: 'hazard-fired'; hazardId: string }
+  | { kind: 'stage-cleared'; stageIndex: number }
 
 /**
  * Cosmetic state the simulation owns.
@@ -271,6 +334,54 @@ export interface WorldView {
    * invalidate every recorded replay.
    */
   readonly freezeTicks: number
+
+  /** Which leg of the run is being flown. Never a planned figure — see StageView. */
+  readonly stage: StageView
+
+  /** The hull this run was issued, by name. */
+  readonly hullName: string
+
+  /**
+   * The live boss, or null.
+   *
+   * Exposed separately from `enemies` (where it also appears) because the boss needs
+   * a health bar and a phase callout of its own, and finding it by scanning for a
+   * `boss` field every frame would make presentation responsible for a fact the sim
+   * already knows.
+   */
+  readonly boss: EnemyInstance | null
+
+  /** Hazards active in this stage, with their countdowns. */
+  readonly hazards: readonly HazardView[]
+
+  /**
+   * How an open choice will resolve itself if the player does nothing, and when.
+   *
+   * Null when no choice is open. Every card in this game resolves without input
+   * eventually — a held trigger confirms the highlighted option after a dwell, and an
+   * untouched card times out — and until this existed, NOTHING on screen said so.
+   *
+   * Both mechanisms are good and both were added for good reasons (see
+   * HELD_CONFIRM_DWELL_TICKS, which fixed a soft freeze a tester actually hit). The
+   * defect was that they were invisible: a card that decides for you while you are
+   * still reading it is the interface making a permadeath choice on your behalf
+   * without warning. Surfaced on the view rather than recomputed per screen so all
+   * four card kinds say the same thing — four screens each inventing their own
+   * countdown is how they end up disagreeing.
+   */
+  readonly choiceResolve: ChoiceResolveView | null
+}
+
+/** What an open choice will do on its own, and how long is left. */
+export interface ChoiceResolveView {
+  /**
+   * `confirm` — the trigger is held and the dwell will take the highlighted option.
+   * `skip` — nobody has touched anything and the card will decline itself.
+   */
+  action: 'confirm' | 'skip'
+  ticksRemaining: number
+  /** Length of the window this is counting down, so a bar can show progress. */
+  totalTicks: number
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +433,7 @@ export interface ItemOffer {
 }
 
 /** Why the run is currently paused for a decision. */
-export type PendingChoiceKind = 'item' | 'shop' | 'work-order'
+export type PendingChoiceKind = 'item' | 'shop' | 'work-order' | 'route'
 
 export interface PendingChoice {
   kind: PendingChoiceKind
@@ -331,6 +442,100 @@ export interface PendingChoice {
   costs: readonly number[]
   /** Work-order options, when kind is 'work-order'. */
   workOrders: readonly string[]
+  /** Approach options into the next sector, when kind is 'route'. */
+  routes: readonly RouteOption[]
+}
+
+/**
+ * What taking a route grants on arrival.
+ *
+ * A discriminated union rather than a number and a label, so the screen cannot
+ * describe a reward the sim will not actually pay.
+ */
+export type RouteReward =
+  | { kind: 'none' }
+  | { kind: 'item' }
+  | { kind: 'scrap'; amount: number }
+  | { kind: 'repair'; amount: number }
+
+/**
+ * One approach into the next sector — the world map's nodes.
+ *
+ * The sector order is authored and fixed (sector 2 is always The Tally), so what a
+ * route varies is *how* you arrive: which hazard you accept for which reward. That
+ * is the risk/reward decision docs/DESIGN.md asks work orders to be, and it keeps
+ * the authored difficulty curve intact instead of letting a route skip it.
+ *
+ * Everything shown on the map is stated here in plain language. Nothing about a
+ * route may be discoverable only by taking it — see UI.md rule 4.
+ */
+export interface RouteOption {
+  /** Stage this leads to. Always the next one; routes differ in approach, not order. */
+  stageIndex: number
+  /**
+   * The route's own name, authored here rather than derived by the screen.
+   *
+   * A screen inferring a title from `reward.kind` gives two routes with the same
+   * reward the same title, and they are then distinguishable only by their hazard
+   * lists. That cannot happen with today's route builder — but a title that is
+   * correct by coincidence is a title that breaks the next time the builder changes,
+   * and this is the label the player uses to talk about their choice.
+   */
+  name: string
+  sectorName: string
+  /** Named so the map can say what is waiting at the end of the leg. */
+  bossName: string | null
+  /** Hazards accepted by taking this route. Empty for the direct approach. */
+  hazards: readonly { name: string; description: string }[]
+  /**
+   * Ids of the same hazards, for the simulation to arm on arrival.
+   *
+   * Parallel to `hazards` and carried on the same object deliberately: a side table
+   * keyed by route index is exactly the kind of parallel array that desynchronises
+   * and arms a hazard the player was never shown.
+   */
+  hazardIds: readonly string[]
+  reward: RouteReward
+  /** The trade-off in one sentence, with numbers. Rendered verbatim. */
+  rewardText: string
+}
+
+/** Where a hazard is in its cycle. */
+export type HazardPhase = 'idle' | 'warning' | 'active'
+
+/**
+ * A hazard as an observer sees it.
+ *
+ * `phase` and `ticksToChange` exist so the panel can count a hazard down. A hazard
+ * that arrives with no visible warning is indistinguishable from an unexplained loss
+ * of integrity, which is the single worst thing a roguelike can do to a player
+ * trying to learn it.
+ */
+export interface HazardView {
+  id: string
+  name: string
+  hazardKind: HazardKind
+  description: string
+  phase: HazardPhase
+  ticksToChange: number
+  /** 0..1 through the current phase, for a progress arc. */
+  progress: number
+}
+
+/**
+ * Which leg of the run is being flown.
+ *
+ * Sourced from the live run rather than from a planned count. The panel once read
+ * "SECTOR 1 / 5" for the whole game because it displayed the roadmap instead of the
+ * simulation; a view field is what stops that recurring.
+ */
+export interface StageView {
+  /** 0-based. */
+  index: number
+  count: number
+  sectorId: string
+  sectorName: string
+  bossName: string | null
 }
 
 /**

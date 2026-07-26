@@ -81,6 +81,22 @@ export const FORWARD_PLAY_Y_FRACTION = 0.32
  */
 export const PARKED_CLEARANCE = 50
 
+/**
+ * The fastest a projectile may ever travel, in virtual units per second.
+ *
+ * 168 is 80% of the hull's 210. Sector 1 caps itself far lower (130) because
+ * "dodgeable on sight" is that sector's thesis, but later sectors need faster
+ * fire to feel different, and the question is how much faster is still fair.
+ *
+ * The margin, not the ratio, is what matters: at 168 a pilot moving directly
+ * away gains 42 units per second on the shot, so a bullet fired from the top of
+ * the playfield is escapable for its whole flight. Above about 190 that margin
+ * stops covering reaction time and the projectile becomes a hit that has already
+ * happened. `tests/sectors.test.ts` enforces this for every sector, including
+ * death bursts, which is the case an eyeball check misses.
+ */
+export const DODGEABLE_BULLET_SPEED = 168
+
 /** The y a parked enemy of the given radius must stay above. */
 export function maxParkedY(radius: number): number {
   return FORWARD_PLAY_Y_FRACTION * PLAYFIELD_H - PARKED_CLEARANCE - radius
@@ -411,6 +427,732 @@ export const ENEMIES: Record<string, EnemyDef> = {
       windupTicks: 38,
     },
     shape: 'turret',
+    elite: true,
+  },
+
+  // ===========================================================================
+  // SECTORS 2-5
+  //
+  // Everything above this line is sector 1 and is tuned against measured bot
+  // sweeps. Nothing below it may change a number above it.
+  //
+  // ## The output assumption these are tuned against
+  //
+  // Sector 1's roster is priced in seconds of an 80 dps gun. Later sectors are
+  // priced against a pilot who has been picking items up, and the assumed curve
+  // is deliberately conservative:
+  //
+  //   sector 2  ~1.2x  ->  96 dps
+  //   sector 3  ~1.5x  -> 120 dps
+  //   sector 4  ~1.75x -> 140 dps
+  //   sector 5  ~2.0x  -> 160 dps
+  //
+  // Every "TTK" in the comments below is against its own sector's figure, so an
+  // enemy that reads as "2.5 seconds of fire" costs the same *attention* in
+  // sector 4 as a 200 HP enemy would have cost in sector 1. THIS ASSUMPTION IS
+  // THE LARGEST UNMEASURED INPUT IN THIS FILE. If a sweep shows real output
+  // landing nearer 1.6x by sector 5, sector 5's HP is ~20% too high and the fix
+  // is its wave counts, not these stat lines.
+  //
+  // ## Projectile speed
+  //
+  // Sector 1 caps bullets at 130 against a 210 u/s hull. Later sectors raise
+  // that, but never past `DODGEABLE_BULLET_SPEED` — the hull must out-run every
+  // bullet in the game by a clear margin, not by a rounding error. Bloomfield
+  // (sector 3) deliberately goes the *other* way: its projectiles are the
+  // slowest after sector 1's, because its difficulty is how much of the screen
+  // is occupied rather than how fast anything crosses it.
+  //
+  // ## Parking
+  //
+  // `maxParkedY` is a sector-1 constant that applies to the whole game: anything
+  // that stops moving is an obstacle, and an obstacle where the pilot flies is a
+  // hit rather than a lesson. Every `hover`, `swoop`, and `strafe` below is
+  // inside it, which is why later sectors' emplacements all sit in the top
+  // quarter of the playfield however big they get.
+  // ===========================================================================
+
+  // ---------------------------------------------------------------------------
+  // Sector 2 — The Tally. Convoy lanes: greed against safety.
+  //
+  // The grammar is that MOST OF THE SCREEN IS NOT SHOOTING AT YOU. Freight is
+  // inert, valuable, and slow; the threat is a small number of guards who keep
+  // firing while you decide how much of the convoy to bill. Every wave is the
+  // same question at a different price.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The payday. Unarmed, so the only thing it costs is time — which is the
+   * entire point, because time is what the escorts are charging for.
+   *
+   * 240 HP is 2.5 seconds at sector 2's assumed 96 dps: long enough that you
+   * cannot kill one *while* dodging a tollgate volley, short enough that
+   * committing is a real option rather than a fantasy. 52 scrap at 240 HP is
+   * 4.6 HP per scrap, the best rate in the game (sector 1's best is the lancer
+   * at 3.5, and it is worth 8). Bulk value at a bulk price.
+   *
+   * Radius 26 makes it the biggest common enemy: a freighter physically blocks
+   * the lane it is in, so ignoring one is also a positioning decision.
+   */
+  freighter: {
+    id: 'freighter',
+    name: 'Bonded Freighter',
+    hp: 240,
+    radius: 26,
+    contactDamage: 26,
+    scrap: 52,
+    movement: 'drift',
+    movementParams: { speed: 34 },
+    weapon: { kind: 'none', intervalTicks: 0, bulletSpeed: 0, damage: 0, firstDelayTicks: 0, windupTicks: 0 },
+    shape: 'hauler',
+  },
+
+  /**
+   * The greed trap, stated in numbers: 45 HP for 26 scrap is 1.7 HP per scrap,
+   * five times better than anything else in the sector — and it vents twelve
+   * shards when it opens.
+   *
+   * This is the mine's lesson re-asked as an economic one. The mine is a thing
+   * you kill by accident and regret; the strongbox is a thing you kill on
+   * purpose and must set up for. Killing one from across the playfield is free
+   * money; killing one at point blank because it was in the way costs about half
+   * a shield. The burst at 116 u/s is comfortably out-run at 210.
+   *
+   * Speed 26 (barely above the mine's 22) so the decision can always be
+   * deferred — a strongbox you are not ready for is still there in ten seconds.
+   */
+  strongbox: {
+    id: 'strongbox',
+    name: 'Sealed Strongbox',
+    hp: 45,
+    radius: 14,
+    contactDamage: 20,
+    scrap: 26,
+    movement: 'drift',
+    movementParams: { speed: 26 },
+    weapon: { kind: 'none', intervalTicks: 0, bulletSpeed: 0, damage: 0, firstDelayTicks: 0, windupTicks: 0 },
+    shape: 'mine',
+    deathBurst: { count: 12, bulletSpeed: 116, damage: 6 },
+  },
+
+  /**
+   * The first horizontally-moving shooter in the game, and the reason `strafe`
+   * exists in the sector-2 vocabulary at all.
+   *
+   * Sector 1's threats all descend, so the pilot's model of danger is "top to
+   * bottom". An interceptor crosses the top band at 118 u/s firing aimed shots
+   * downward, which means the safe column keeps moving sideways and the old
+   * habit of picking a lane and holding it stops working. That is a rule change
+   * of the same class as sector 1's turret, delivered by movement instead of by
+   * a stat.
+   *
+   * 70 HP is 0.73s — cheap, because its threat is where it is rather than how
+   * long it lives, and a tanky crosser would just be a moving wall. Its aimed
+   * shot at 142 u/s is faster than anything in sector 1 (130) but still 68 u/s
+   * slower than the hull.
+   */
+  interceptor: {
+    id: 'interceptor',
+    name: 'Lane Interceptor',
+    hp: 70,
+    radius: 12,
+    contactDamage: 18,
+    scrap: 12,
+    movement: 'strafe',
+    movementParams: { speed: 118, holdYFraction: 0.19 },
+    weapon: {
+      kind: 'aimed',
+      intervalTicks: 60, // 1s. It is only on screen for ~4s, so this is ~4 shots.
+      bulletSpeed: 142,
+      damage: 7,
+      firstDelayTicks: 42, // 0.7s — it has crossed a visible distance before firing.
+      windupTicks: 24,
+    },
+    shape: 'escort',
+  },
+
+  /**
+   * The lane toll: a turret that covers one column precisely rather than fanning
+   * across three.
+   *
+   * The deliberate inversion of sector 1's turret. That one fires 3 shots over
+   * 30 degrees at 120 u/s, and the answer is to step *between* the pellets. This
+   * one fires 3 shots over 14 degrees at 146 u/s, and there is no gap to step
+   * into — the answer is to not be in the column at all. Same weapon kind, same
+   * shot count, opposite question, which is the cheapest way to make a familiar
+   * silhouette teach something new.
+   *
+   * 240 HP is 2.5s at 96 dps. holdTicks 540 (9s) so a tollgate the pilot decides
+   * to run past eventually leaves, exactly as sector 1's does.
+   */
+  tollgate: {
+    id: 'tollgate',
+    name: 'Tollgate Turret',
+    hp: 240,
+    radius: 16,
+    contactDamage: 18,
+    scrap: 24,
+    movement: 'hover',
+    movementParams: { speed: 60, holdYFraction: 0.22, holdTicks: 540 },
+    weapon: {
+      kind: 'spread',
+      intervalTicks: 84, // 1.4s
+      bulletSpeed: 146,
+      damage: 8,
+      count: 3,
+      spreadDegrees: 14,
+      firstDelayTicks: 72,
+      // 34 ticks (0.57s). Slightly longer than sector 1's turret because leaving
+      // a column is a bigger move than sidestepping inside one.
+      windupTicks: 34,
+    },
+    shape: 'turret',
+  },
+
+  /**
+   * Sector 2's elite, and the sector's thesis in one object: 620 HP for 120
+   * scrap — six and a half seconds of your gun for a shop tier and a half.
+   *
+   * Armed with a tracker rather than a fan on purpose. A tracker is the weapon
+   * that punishes standing still, and killing a 620 HP target is the single
+   * longest period in the sector during which the pilot wants to stand still.
+   * The elite therefore attacks the exact behaviour that greed produces, which
+   * is a better fight than one that simply does more damage.
+   *
+   * It drifts rather than parking: the barge is *leaving*, so the offer expires.
+   * At speed 30 it is on screen for ~24s, which is generous — the pressure comes
+   * from what else arrives during those 24 seconds, not from the clock.
+   */
+  comptroller: {
+    id: 'comptroller',
+    name: 'Comptroller Barge',
+    hp: 620,
+    radius: 28,
+    contactDamage: 30,
+    scrap: 120,
+    movement: 'drift',
+    movementParams: { speed: 30 },
+    weapon: {
+      kind: 'tracker',
+      intervalTicks: 78, // 1.3s — nearly twice the escort's rate, from one body.
+      bulletSpeed: 122,
+      damage: 9,
+      firstDelayTicks: 90,
+      windupTicks: 30,
+    },
+    shape: 'hauler',
+    elite: true,
+  },
+
+  // ---------------------------------------------------------------------------
+  // Sector 3 — Bloomfield. Something organic has taken a dead station.
+  //
+  // The grammar is that NOTHING IS AIMED AT YOU. Sectors 1 and 2 are read by
+  // asking "where is that shot going?"; Bloomfield is read by asking "where is
+  // there still room?". Its weapons are rings and death bursts, so the field
+  // fills from wherever things happen to be rather than from wherever you are —
+  // and because almost everything here bursts when it dies, THE SECTOR GETS MORE
+  // DANGEROUS THE FASTER YOU KILL. That inversion is the sector, and it is why
+  // its projectiles are slow: the threat is occupancy, not velocity.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The spreading unit. Cheap, erratic, and it seeds when it dies.
+   *
+   * 18 HP is a quarter-second of fire, so spores die essentially on contact with
+   * the crosshair — and each one pays six shards for the privilege. A screen of
+   * twelve spores is 216 HP and 72 outgoing projectiles if you clear all of it,
+   * which is the sector teaching its own core lesson without a single aimed
+   * shot: clearing indiscriminately is how you die here.
+   *
+   * The sine is faster and wider than the skiff's (96 u/s, 72 amplitude, 0.65 Hz
+   * against 78/62/0.4) so a spore's path is a wander rather than a readable
+   * curve. Amplitude is held under the 112 the playfield allows so a swarm still
+   * reads as a swarm rather than as screen-wide sweeps.
+   */
+  spore: {
+    id: 'spore',
+    name: 'Drift Spore',
+    hp: 18,
+    radius: 9,
+    contactDamage: 12,
+    scrap: 4,
+    movement: 'sine',
+    movementParams: { speed: 96, amplitude: 72, frequency: 0.65 },
+    weapon: { kind: 'none', intervalTicks: 0, bulletSpeed: 0, damage: 0, firstDelayTicks: 0, windupTicks: 0 },
+    shape: 'mine',
+    deathBurst: { count: 6, bulletSpeed: 96, damage: 5 },
+  },
+
+  /**
+   * The area-denial unit, and the first `ring` weapon in the game.
+   *
+   * A ring is aimed at nothing. It is the pod's *position* that threatens, which
+   * makes it the exact opposite of every sector-1 and sector-2 shooter: you
+   * cannot dodge it by moving out of a line, only by being somewhere the
+   * expanding circle is not. Ten shots at 104 u/s from a parked source is a
+   * slowly closing net, and the counterplay is to be moving through the gaps
+   * before it fires rather than reacting after it does — hence the long 40-tick
+   * telegraph, which is a "the field is about to fill" warning rather than a
+   * "this shot is coming at you" one.
+   *
+   * 150 HP is 1.25s at 120 dps. Cheap for something that parks, because a tanky
+   * ring source turns the sector into a stalemate. It bursts when killed, so
+   * removing a pod is itself a positioning problem.
+   */
+  'bloom-pod': {
+    id: 'bloom-pod',
+    name: 'Bloom Pod',
+    hp: 150,
+    radius: 17,
+    contactDamage: 20,
+    scrap: 16,
+    movement: 'hover',
+    movementParams: { speed: 44, holdYFraction: 0.2, holdTicks: 420 },
+    weapon: {
+      kind: 'ring',
+      intervalTicks: 108, // 1.8s
+      bulletSpeed: 104,
+      damage: 6,
+      count: 10,
+      firstDelayTicks: 84,
+      windupTicks: 40,
+    },
+    shape: 'mine',
+    deathBurst: { count: 8, bulletSpeed: 88, damage: 5 },
+  },
+
+  /**
+   * The thing that makes standing still impossible.
+   *
+   * A tracker on a body that crosses laterally. Sector 1's escort fires trackers
+   * while drifting down, so its shots all come from roughly the same bearing and
+   * a pilot can hold a horizontal band and be broadly safe. A creeper's shots
+   * arrive from a bearing that is *changing*, so the band that was safe two
+   * seconds ago is the one being fired into now.
+   *
+   * 9 damage at 118 u/s is the hardest-hitting tracker in the game and the
+   * fattest, slowest projectile in the sector — legible, unhurried, and
+   * unforgiving of a pilot who has stopped to shoot a husk.
+   */
+  creeper: {
+    id: 'creeper',
+    name: 'Crawling Growth',
+    hp: 160,
+    radius: 15,
+    contactDamage: 22,
+    scrap: 14,
+    movement: 'strafe',
+    movementParams: { speed: 74, holdYFraction: 0.21 },
+    weapon: {
+      kind: 'tracker',
+      intervalTicks: 78, // 1.3s, against the escort's 2s. It crosses in ~6s: ~4 shots.
+      bulletSpeed: 118,
+      damage: 9,
+      firstDelayTicks: 54,
+      windupTicks: 30,
+    },
+    shape: 'escort',
+  },
+
+  /**
+   * Infected plating off the station itself. Unarmed, 300 HP, and it vents
+   * fourteen shards when it finally goes.
+   *
+   * The husk is the sector's HP tonnage and its cruellest joke: 2.5 seconds of
+   * committed fire, paid off with the largest death burst in the game. It is the
+   * one enemy here that *must* be dealt with at range, and a wave that pairs a
+   * husk with a creeper is asking the pilot to hold a firing line while
+   * something is actively taxing them for holding one.
+   *
+   * 12 scrap for 300 HP (25 HP per scrap) is deliberately terrible. Bloomfield
+   * is the poorest sector in the run, which is what makes The Tally's route
+   * choice mean something.
+   */
+  husk: {
+    id: 'husk',
+    name: 'Station Husk',
+    hp: 300,
+    radius: 24,
+    contactDamage: 24,
+    scrap: 12,
+    movement: 'drift',
+    movementParams: { speed: 38 },
+    weapon: { kind: 'none', intervalTicks: 0, bulletSpeed: 0, damage: 0, firstDelayTicks: 0, windupTicks: 0 },
+    shape: 'hauler',
+    deathBurst: { count: 14, bulletSpeed: 100, damage: 6 },
+  },
+
+  /**
+   * Sector 3's elite. 700 HP of parked ring source with an eighteen-shot burst
+   * on death — the only enemy in the game whose most dangerous moment is the one
+   * after you win.
+   *
+   * That is the sector's inversion taken to its conclusion. Everywhere else,
+   * killing the elite ends the problem; here the kill *is* the problem, and a
+   * pilot who dumps the last 200 HP into it from close range while celebrating
+   * eats most of a shield. The burst is 110 u/s, so it is escapable from any
+   * distance and near-unavoidable in contact, exactly like the mine's — the
+   * lesson sector 1 taught with 12 HP, re-asked with 700.
+   */
+  bloomheart: {
+    id: 'bloomheart',
+    name: 'Bloom Heart',
+    hp: 700,
+    radius: 26,
+    contactDamage: 28,
+    scrap: 70,
+    movement: 'hover',
+    movementParams: { speed: 40, holdYFraction: 0.18, holdTicks: 900 },
+    weapon: {
+      kind: 'ring',
+      intervalTicks: 114, // 1.9s
+      bulletSpeed: 98,
+      damage: 7,
+      count: 14,
+      firstDelayTicks: 96, // 1.6s
+      windupTicks: 46,
+    },
+    shape: 'turret',
+    elite: true,
+    deathBurst: { count: 18, bulletSpeed: 110, damage: 7 },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Sector 4 — Kill Grid. An automated defence net.
+  //
+  // The grammar is that THE GRID IS IN THE SAME PLACE EVERY RUN. Every formation
+  // in the sector script sets `atXFraction`, so nothing here is seeded — which
+  // is what makes it a puzzle rather than a reflex test, and is the sharpest
+  // structural break from Bloomfield, where almost nothing is placed.
+  //
+  // Its weapons are precise rather than dense: tight fans at high speed with the
+  // longest telegraphs in the game. Nothing in this sector has a death burst.
+  // The grid is clean; it does not leave residue, and after Bloomfield that
+  // absence is itself information.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The grid's basic emplacement: a five-shot rake over 18 degrees at 164 u/s.
+   *
+   * At that arc the pellets are ~0.3 hull-widths apart by the time they arrive,
+   * so unlike every earlier fan there is nothing to step between. The cone is
+   * simply forbidden, and the 44-tick (0.73s) telegraph is long enough to leave
+   * it entirely. That is the sector's whole design contract: you are always told,
+   * and being told is not the same as being safe.
+   *
+   * 200 HP is 1.43s at 140 dps — deliberately cheaper than sector 1's turret in
+   * *time* despite being a worse threat, because the sector wants three or four
+   * nodes alive at once forming a shape, not one node soaking the clip.
+   */
+  node: {
+    id: 'node',
+    name: 'Grid Node',
+    hp: 200,
+    radius: 14,
+    contactDamage: 20,
+    scrap: 16,
+    movement: 'hover',
+    movementParams: { speed: 70, holdYFraction: 0.21, holdTicks: 480 },
+    weapon: {
+      kind: 'spread',
+      intervalTicks: 90, // 1.5s
+      bulletSpeed: 164,
+      damage: 8,
+      count: 5,
+      spreadDegrees: 18,
+      firstDelayTicks: 66,
+      windupTicks: 44,
+    },
+    shape: 'turret',
+  },
+
+  /**
+   * The lattice piece. A twelve-shot ring at 128 u/s every 2.2 seconds.
+   *
+   * Bloomfield's pod fires a slow, frequent, messy ring; the pylon fires a fast,
+   * rare, geometrically clean one, and pylons are always placed in symmetric
+   * pairs. Two shells expanding from known positions intersect in a pattern the
+   * pilot can learn and stand inside — the difference between the two sectors'
+   * rings is not the number but that ONE OF THEM IS SOLVABLE IN ADVANCE.
+   *
+   * The 50-tick (0.83s) telegraph is the second-longest in the game. A shell you
+   * cannot dodge sideways has to be dodged by being in the right place before it
+   * exists.
+   */
+  pylon: {
+    id: 'pylon',
+    name: 'Interdiction Pylon',
+    hp: 150,
+    radius: 13,
+    contactDamage: 20,
+    scrap: 12,
+    movement: 'hover',
+    movementParams: { speed: 66, holdYFraction: 0.19, holdTicks: 600 },
+    weapon: {
+      kind: 'ring',
+      intervalTicks: 132, // 2.2s
+      bulletSpeed: 128,
+      damage: 7,
+      count: 12,
+      firstDelayTicks: 90,
+      windupTicks: 50,
+    },
+    shape: 'turret',
+  },
+
+  /**
+   * The moving constraint. Crosses at 132 u/s firing a 10-degree three-shot
+   * burst every 0.8 seconds, so it drags a forbidden column across the field.
+   *
+   * Where a node says "not here", a sweeper says "not here, and in one second
+   * not there either". Between two sweepers moving opposite ways the safe space
+   * is a shrinking wedge, which is the most puzzle-like thing the current
+   * movement vocabulary can express.
+   *
+   * 120 HP (0.86s) because it must be killable *during* its pass. A sweeper that
+   * survives its crossing has already done its job; one that survives two would
+   * simply be a wall.
+   */
+  sweeper: {
+    id: 'sweeper',
+    name: 'Grid Sweeper',
+    hp: 120,
+    radius: 13,
+    contactDamage: 22,
+    scrap: 12,
+    movement: 'strafe',
+    movementParams: { speed: 132, holdYFraction: 0.17 },
+    weapon: {
+      kind: 'spread',
+      intervalTicks: 48, // 0.8s — the fastest cadence in the game.
+      bulletSpeed: 158,
+      damage: 8,
+      count: 3,
+      spreadDegrees: 10,
+      firstDelayTicks: 36,
+      // 22 ticks (0.37s), the shortest telegraph outside sector 1's skiff. It has
+      // to be: at 0.8s between volleys, anything longer is a tell that never
+      // stops, and the windup budget caps it at 24 anyway.
+      windupTicks: 22,
+    },
+    shape: 'lancer',
+  },
+
+  /**
+   * The anti-camping measure, and the lancer's lesson made unforgiving.
+   *
+   * Identical in structure to sector 1's lancer — unarmed, parks, telegraphs,
+   * dives — with every number moved against the pilot: 0.6s of warning instead
+   * of 0.8, 510 u/s on the dive instead of 378, and 30 contact damage instead of
+   * 24. Reusing the shape deliberately: the pilot already knows what a parked
+   * diver means, and the sector's job is to punish assuming it means the same
+   * thing it did an hour ago.
+   *
+   * It is unarmed for the same reason the lancer is. A snare that also shot
+   * would make the telegraph one input among several instead of the only one
+   * that matters, and this enemy is the sector's argument that reading a tell
+   * correctly is a skill with a ceiling.
+   */
+  snare: {
+    id: 'snare',
+    name: 'Snare Drone',
+    hp: 70,
+    radius: 12,
+    contactDamage: 30,
+    scrap: 10,
+    movement: 'swoop',
+    movementParams: { speed: 150, holdYFraction: 0.18, holdTicks: 36, diveMultiplier: 3.4 },
+    weapon: { kind: 'none', intervalTicks: 0, bulletSpeed: 0, damage: 0, firstDelayTicks: 0, windupTicks: 0 },
+    shape: 'lancer',
+  },
+
+  /**
+   * Sector 4's elite: 900 HP and a seven-shot 52-degree fan at 166 u/s, the
+   * fastest projectile in the game.
+   *
+   * 6.4 seconds of committed fire at 140 dps — the longest single fight before
+   * the boss, and it is placed where two pylons are already alive so that
+   * committing to it means committing inside a known lattice. The fan is wide
+   * *and* fast, which sector 1 explicitly refused to do (the heavy turret widens
+   * without speeding up "so the answer is still footwork"). Here the answer is
+   * footwork planned a second ahead, which is what the 52-tick telegraph is for.
+   */
+  arbiter: {
+    id: 'arbiter',
+    name: 'Arbiter Emplacement',
+    hp: 900,
+    radius: 27,
+    contactDamage: 30,
+    scrap: 90,
+    movement: 'hover',
+    movementParams: { speed: 40, holdYFraction: 0.18, holdTicks: 960 },
+    weapon: {
+      kind: 'spread',
+      intervalTicks: 108, // 1.8s
+      bulletSpeed: 166,
+      damage: 9,
+      count: 7,
+      spreadDegrees: 52,
+      firstDelayTicks: 108, // 1.8s: the longest first-shot delay in the game.
+      windupTicks: 52,
+    },
+    shape: 'turret',
+    elite: true,
+  },
+
+  // ---------------------------------------------------------------------------
+  // Sector 5 — The Deep Manifest. The wreck you were actually sent for.
+  //
+  // The grammar is LAYERED THREAT ON ONE BODY. Sectors 1-4 each ask one question
+  // per enemy; the Deep Manifest's enemies ask two at once — a diver that also
+  // shoots, a wall that shoots and then bursts. Nothing here is a new *idea*, and
+  // that is deliberate: the finale is the exam, and an exam that introduces
+  // material is a bad exam.
+  //
+  // It also draws heavily on sector 1's roster, which is the one place in the
+  // game where reuse is the point rather than a saving. The Deep Manifest is
+  // where everything the company lost ends up, so it is full of the company's
+  // oldest hardware — including the Heavy Turret, which was sector 1's set-piece
+  // elite and is a common enemy here. Meeting it three at a time is the clearest
+  // possible statement of how far the run has come.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The armed diver. Parks, shoots, then dives — the first enemy in the game
+   * that telegraphs two different attacks out of one body.
+   *
+   * Sector 1's lancer is unarmed precisely so its dive is the only thing to
+   * read; the bailiff removes that courtesy. While it holds, its 20-tick muzzle
+   * tell and its 54-tick dive tell are running at the same time and mean
+   * opposite things: one says "move sideways", the other says "get out of this
+   * column". A pilot who has only ever learned "parked diver = wait for the
+   * dive" will stand in the aimed shot.
+   *
+   * 90 HP (0.56s at 160 dps) keeps it a decision rather than a duel. Contact 28
+   * because, like the lancer, its whole threat is one avoidable event.
+   */
+  bailiff: {
+    id: 'bailiff',
+    name: 'Bailiff',
+    hp: 90,
+    radius: 14,
+    contactDamage: 28,
+    scrap: 14,
+    movement: 'swoop',
+    movementParams: { speed: 128, holdYFraction: 0.2, holdTicks: 54, diveMultiplier: 3.0 },
+    weapon: {
+      kind: 'aimed',
+      intervalTicks: 66, // 1.1s: about one shot while parked, sometimes two.
+      bulletSpeed: 148,
+      damage: 8,
+      firstDelayTicks: 48,
+      windupTicks: 20,
+    },
+    shape: 'lancer',
+  },
+
+  /**
+   * A derelict still running its last standing order. 420 HP, a five-shot fan,
+   * and a twelve-shard burst when it dies.
+   *
+   * The sector's tonnage, and its clearest "two things at once": a revenant has
+   * to be out-ranged while alive and out-positioned as it dies, and 2.6 seconds
+   * of fire at 160 dps is long enough that where you are standing when it
+   * finally goes is a decision made several seconds earlier.
+   *
+   * Structurally it is the husk and the turret welded together, which is the
+   * finale's whole method — no new vocabulary, one more thing to hold in mind.
+   */
+  revenant: {
+    id: 'revenant',
+    name: 'Revenant Hulk',
+    hp: 420,
+    radius: 25,
+    contactDamage: 28,
+    scrap: 40,
+    movement: 'drift',
+    movementParams: { speed: 34 },
+    weapon: {
+      kind: 'spread',
+      intervalTicks: 96, // 1.6s
+      bulletSpeed: 138,
+      damage: 8,
+      count: 5,
+      spreadDegrees: 40,
+      firstDelayTicks: 78,
+      windupTicks: 36,
+    },
+    shape: 'hauler',
+    deathBurst: { count: 12, bulletSpeed: 118, damage: 7 },
+  },
+
+  /**
+   * Elite. The wreck's caretaker: a sixteen-shot ring every two seconds from a
+   * parked 820 HP body.
+   *
+   * Sixteen shots at 132 u/s is the densest single volley in the game, and it is
+   * survivable only because it is a ring — the gaps are wide near the source's
+   * own bearing and the pilot is nearly always outside it. It is placed early in
+   * the sector rather than late because it is the encounter that teaches the
+   * Deep Manifest's tempo: 5.1 seconds of committed fire while three other
+   * things are happening.
+   */
+  quartermaster: {
+    id: 'quartermaster',
+    name: 'Quartermaster',
+    hp: 820,
+    radius: 26,
+    contactDamage: 30,
+    scrap: 90,
+    movement: 'hover',
+    movementParams: { speed: 42, holdYFraction: 0.18, holdTicks: 900 },
+    weapon: {
+      kind: 'ring',
+      intervalTicks: 120, // 2s
+      bulletSpeed: 132,
+      damage: 8,
+      count: 16,
+      firstDelayTicks: 96,
+      windupTicks: 54,
+    },
+    shape: 'turret',
+    elite: true,
+  },
+
+  /**
+   * Elite, and the only elite in the game that moves sideways.
+   *
+   * Every other elite parks or drifts down, so the fight happens in a column the
+   * pilot chooses. The liquidator crosses at 58 u/s throwing a seven-shot
+   * 66-degree fan, which means the fight happens in a column *it* chooses and
+   * that column is always moving. 760 HP is 4.75s at 160 dps against roughly 8
+   * seconds of crossing time: killable, but only by someone who commits early
+   * and follows it.
+   *
+   * Contact 32 is the highest in the game, two under the sector-1 ceiling. A
+   * moving elite is the one thing a pilot is most likely to back into.
+   */
+  liquidator: {
+    id: 'liquidator',
+    name: 'Liquidator',
+    hp: 760,
+    radius: 24,
+    contactDamage: 32,
+    scrap: 100,
+    movement: 'strafe',
+    movementParams: { speed: 58, holdYFraction: 0.17 },
+    weapon: {
+      kind: 'spread',
+      intervalTicks: 90, // 1.5s
+      bulletSpeed: 152,
+      damage: 9,
+      count: 7,
+      spreadDegrees: 66,
+      firstDelayTicks: 84,
+      windupTicks: 42,
+    },
+    shape: 'escort',
     elite: true,
   },
 }

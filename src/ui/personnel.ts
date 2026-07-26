@@ -505,7 +505,7 @@ function trackedMeasure(measure: Measure, tracking: number): Measure {
 function outcomeTag(record: PersonnelRecord): { text: string; color: string } {
   return record.outcome === 'extracted'
     ? { text: 'EXTRACTED', color: Palette.good }
-    : { text: 'LOST', color: Palette.danger }
+    : { text: 'LOST', color: Palette.dangerText }
 }
 
 function verdictFor(input: PersonnelLayoutInput, record: PersonnelRecord): PuristVerdict {
@@ -588,7 +588,7 @@ function layoutRow(
       {
         size: CAUSE_SIZE,
         weight: 600,
-        color: record.outcome === 'extracted' ? Palette.good : Palette.danger,
+        color: record.outcome === 'extracted' ? Palette.good : Palette.dangerText,
       },
     ),
   )
@@ -785,7 +785,7 @@ export function layoutPersonnelScreen(input: PersonnelLayoutInput): PersonnelScr
       {
         size: 17,
         weight: 600,
-        color: record.outcome === 'extracted' ? Palette.good : Palette.danger,
+        color: record.outcome === 'extracted' ? Palette.good : Palette.dangerText,
       },
     )
     dy += 8

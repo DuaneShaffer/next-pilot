@@ -45,6 +45,47 @@ strictly worse is a hull nobody picks.
 
 Three are offered per run, drawn from what's been certified. `Lien` is always available.
 
+### What actually shipped, and what each missing hull is waiting on
+
+Five of the eight exist as of M5. The other three were **omitted rather than approximated**, for
+the same reason the rejected synergies below are recorded rather than deleted: a hull whose stated
+drawback does not actually happen is worse than an absent hull, because it ships looking finished.
+`HULLS_AWAITING_MECHANICS` in `src/content/hulls.ts` carries this list as data, and a test requires
+every certification that grants a hull to point at either a real hull or a named entry in it — so
+the gap fails loudly the moment it is forgotten instead of quietly.
+
+| Hull | Status | What it needs |
+| --- | --- | --- |
+| **Escrow** | Not shipped | Drone entities. Nothing in the sim spawns a *friendly*; the `drone` item tag exists and nothing reads it. |
+| **Indemnity** | Not shipped | A deferred damage queue in `sim/damage.ts` — damage enqueued with a due tick, visible on the HUD while pending, reducible in between. `applyHullDamage` subtracts immediately and no `EffectKind` holds state across ticks. |
+| **Writ** | Not shipped | A player-triggered phase state: a new input action (`InputSnapshot` is the whole contract), a charge firing consumes faster, and a readout. `HULL_INVULN_TICKS` is damage-triggered, not player-triggered. |
+
+Three more shipped with the **drawback intact and part of the upside missing**, which is stated in
+the code and never on the card the player reads:
+
+- **Arrears** — "elites spawn more often" is unwritable: `HullDef` has no spawn-table hook. Its
+  fragility carries the risk instead, and its mechanism text does not claim elites.
+- **Surety** — shield-to-weapon-charge conversion needs an `onShieldAbsorbed` hook, already
+  recorded below as missing. Paid up front as flat damage instead.
+- **Probate** — "a random relic" needs a starting-item *pool* and its own RNG stream. It starts
+  with a named relic and says which one.
+
+### Route choice between sectors — as built
+
+The world map is a card between sectors offering 2-3 **approaches** into the next one. The sector
+order never varies, so a route cannot let a player skip the difficulty curve; what varies is the
+price of arriving well-equipped. Each non-direct route arms a hazard for the whole of the next
+sector and pays for it once on arrival — an item, scrap, or repair, stated with real numbers.
+
+The direct approach is always first and always free. A risk/reward screen with no safe option is
+not a choice, it is a tax. And a sector with no hazards to trade against shows **no card at all**,
+because a card whose only action is "continue" teaches the player that stopping is pointless —
+which is the exact mistake the unbuyable wave-8 shop made.
+
+`vault` (a relic with a curse attached) and `unlisted` (unknown modifiers, higher certification
+chance) from the work-order list below are **not implemented**. Vault needs curse items to attach;
+unlisted needs certification odds to be a run-time quantity rather than an outcome.
+
 ## Sectors
 
 Five sectors, each with a distinct enemy grammar so the run has texture rather than escalating
@@ -152,13 +193,16 @@ Where it would earn its place: **high frequency, low deliberation** — a level 
 between its two big decisions. What to avoid is a level opening another three-option
 card.
 
-### World map and between-sector shops
+### World map and between-sector shops — SETTLED, built in M5
 
-Not new systems — these are the *existing* work-order design (see Work orders above)
-finally having somewhere to live. Work orders are specified as a route choice between
-sectors and are currently placed mid-sector only because sector 1 is the only sector,
-so there is nothing to route between. A world map is their intended home, and
-between-sector shops are the same story. Both arrive naturally with M5.
+Resolved as predicted: these were never new systems, only the existing work-order
+design finally having somewhere to live. See "Route choice between sectors — as built"
+above for what shipped, including the two work-order kinds that did not.
+
+One loose end: the **mid-sector** work-order card from M3 is still in the game at wave
+17 and still changes nothing. Now that routing has a real home, that card should either
+be given a mechanical consequence or removed. Leaving a card that does nothing is the
+wave-8-shop mistake wearing different clothes.
 
 ### Cross-run persistence — UNRESOLVED, and it decides what kind of game this is
 
@@ -235,7 +279,14 @@ Five mitigations together, because no single one suffices:
 Stereo pan is derived from playfield x and capped at ±0.55, so incoming fire is locatable without
 hard-panning, which is disorienting on headphones and vanishes on a phone speaker.
 
-**Nobody has heard any of this yet.** See the audio blind spot in `docs/VERIFICATION.md`.
+**Nobody has heard any of this yet — but it is now measured.** `npm run audio` renders every cue
+through the real backend and asserts what a listener would notice: no clipping, the hierarchy above
+holding in LUFS rather than in constants, cues that mean different things staying distinguishable,
+and the hazard warning standing clear of combat noise. It also writes WAVs for whoever listens
+first. It found that enemy fire was 3 dB *quieter* than the player's own gun, that ten of twenty
+sounds were pinned to the same gain by a clamp, and that four cues were inaudible on a laptop
+speaker. See `docs/VERIFICATION.md` §5 for what it still cannot tell you — chiefly whether any of
+it is any good.
 
 ## Mobile support — the decision, made early
 

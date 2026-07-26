@@ -24,7 +24,10 @@ import {
   type PoolSlice,
   type UnlockCondition,
 } from '../src/content/certifications'
+import { BOSSES } from '../src/content/bosses'
 import { ENEMIES } from '../src/content/enemies'
+import { HAZARDS } from '../src/content/hazards'
+import { HULLS, HULLS_AWAITING_MECHANICS } from '../src/content/hulls'
 import { ITEMS } from '../src/content/items'
 import { WORK_ORDERS } from '../src/content/workOrders'
 import {
@@ -218,22 +221,127 @@ describe('the roster', () => {
     }
   })
 
+  /**
+   * Slices the run actually draws from `poolFor(...)` today.
+   *
+   * THIS LIST, NOT "DOES THE ID EXIST", is what decides whether a grant is live, and
+   * the distinction only started to matter with M5. Before it, a pending grant was
+   * always pending because the content had not been written. Now the hulls, the boss
+   * variants and the hazards all ship and are still not gated:
+   *
+   *   - `hulls` reaches the pool, but `src/main.ts` issues `pool.hulls[0]`, which is
+   *     always the Lien because the base pool is always first. No hull selection
+   *     screen exists, so a granted hull is never issued.
+   *   - `bossVariants`: `pickVariant` reads `BossDef.variants` directly.
+   *   - `hazards`: armed from the stage definition, never from a pool.
+   *   - `items` and `enemies` are handed to the sim as whole tables.
+   *
+   * A grant on an ungated slice does nothing, so its card must say so — otherwise
+   * the hangar advertises a reward the game will not hand over. Wiring one of these
+   * up means moving it into this list and watching the `awaiting` assertions below
+   * demand that the copy be corrected in the same change.
+   */
+  const POOL_SLICES_HONOURED: readonly PoolSlice[] = ['workOrders']
+
+  /** Does the id resolve to something in a shipped content table? */
+  function grantExists(grant: { slice: PoolSlice; id: string }): boolean {
+    switch (grant.slice) {
+      case 'workOrders':
+        return Object.hasOwn(WORK_ORDERS, grant.id)
+      case 'items':
+        return Object.hasOwn(ITEMS, grant.id)
+      case 'enemies':
+        return Object.hasOwn(ENEMIES, grant.id)
+      case 'hulls':
+        return Object.hasOwn(HULLS, grant.id)
+      case 'bossVariants':
+        return Object.values(BOSSES).some((boss) => (boss.variants ?? []).some((v) => v.id === grant.id))
+      case 'hazards':
+        return Object.hasOwn(HAZARDS, grant.id)
+    }
+  }
+
   it('makes every grant either live or honestly pending', () => {
-    // The check that stops this milestone from advertising M5 content as finished. A
-    // grant is live when the id already exists in a shipped table and is absent from
-    // the base pool; anything else has to name what it waits on.
+    // The check that stops the hangar advertising a reward it cannot hand over. A
+    // grant is live when the id exists in a shipped table AND the run draws that
+    // slice from the pool; anything else has to name what it waits on.
     for (const def of CERTIFICATIONS) {
-      const live = def.grants.every((grant) => {
-        if (grant.slice === 'workOrders') return Object.hasOwn(WORK_ORDERS, grant.id)
-        if (grant.slice === 'items') return Object.hasOwn(ITEMS, grant.id)
-        if (grant.slice === 'enemies') return Object.hasOwn(ENEMIES, grant.id)
-        return false
-      })
+      const live = def.grants.every(
+        (grant) => POOL_SLICES_HONOURED.includes(grant.slice) && grantExists(grant),
+      )
       if (live) {
         expect(def.awaiting, `${def.id} is live and should not claim to be pending`).toBeNull()
       } else {
-        expect(def.awaiting, `${def.id} grants content that does not exist yet`).not.toBeNull()
+        expect(def.awaiting, `${def.id} grants content the player cannot reach yet`).not.toBeNull()
         expect((def.awaiting ?? '').trim().length).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it('never says it is waiting for content that has already shipped', () => {
+    // The failure that motivated this: four cards read "the hull roster (M5)" and
+    // "the sector-five boss (M5)" after both shipped. Copy that describes a past
+    // state of the repository is worse than no copy — it tells a player who has
+    // earned something that it does not exist.
+    const shipped: ReadonlyArray<readonly [string, RegExp]> = [
+      ['the hull roster', /hull roster/i],
+      ['the elite/sector rosters', /sector-(two|five) (roster|boss)/i],
+      ['sector hazards', /^sector hazards/i],
+    ]
+    for (const def of CERTIFICATIONS) {
+      const awaiting = def.awaiting
+      if (awaiting === null) continue
+      for (const [label, pattern] of shipped) {
+        expect(pattern.test(awaiting), `${def.id} still awaits "${label}", which shipped`).toBe(false)
+      }
+    }
+  })
+
+  it('grants a hull that exists, never an id that resolves to nothing', () => {
+    // THE DANGLING REFERENCE THIS PINS: the roster granted `writ`, which is not in
+    // `HULLS` — it is in `HULLS_AWAITING_MECHANICS`, blocked on a player-triggered
+    // phase state that `InputSnapshot` has no room for. `getHull('writ')` throws, and
+    // the only reason nothing crashed is that the app never reads past
+    // `pool.hulls[0]`. A grant masked by a second defect fails the day the second
+    // defect is fixed, which is the worst possible time to find it.
+    const awaitingIds = new Set(HULLS_AWAITING_MECHANICS.map((entry) => entry.id))
+    for (const def of CERTIFICATIONS) {
+      for (const grant of def.grants) {
+        if (grant.slice !== 'hulls') continue
+        expect(Object.hasOwn(HULLS, grant.id), `${def.id} grants unknown hull "${grant.id}"`).toBe(true)
+        expect(
+          awaitingIds.has(grant.id),
+          `${def.id} grants "${grant.id}", which hulls.ts says has no mechanics yet`,
+        ).toBe(false)
+      }
+    }
+  })
+
+  it('leaves no shipped hull unreachable', () => {
+    // `HULLS_PENDING_POOL_PLACEMENT` recorded three hulls — surety, probate,
+    // collateral — that were authored, tuned, tested and in no pool at all. That is
+    // the same class of defect as an item with `weight: 0`: content that exists only
+    // in the source. Asserted over `HULLS` rather than over that list, so a SIXTH
+    // hull added tomorrow fails here instead of quietly joining them.
+    const granted = new Set<string>(BASE_POOL.hulls)
+    for (const def of CERTIFICATIONS) {
+      for (const grant of def.grants) if (grant.slice === 'hulls') granted.add(grant.id)
+    }
+    for (const id of Object.keys(HULLS)) {
+      expect(granted.has(id), `hull "${id}" is in no pool and no certification grants it`).toBe(true)
+    }
+  })
+
+  it('gives each hull exactly one way in', () => {
+    // Two certifications granting the same hull would make one of them a no-op
+    // whenever the other was already filed, and nothing on either card would say so.
+    const seen = new Map<string, string>()
+    for (const def of CERTIFICATIONS) {
+      for (const grant of def.grants) {
+        if (grant.slice !== 'hulls') continue
+        const owner = seen.get(grant.id)
+        expect(owner, `${def.id} and ${owner} both grant "${grant.id}"`).toBeUndefined()
+        seen.set(grant.id, def.id)
       }
     }
   })

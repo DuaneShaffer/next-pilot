@@ -23,7 +23,7 @@ export const Palette = {
   /** Secondary text: labels, units, hints. Still WCAG AA on `void`. */
   textDim: '#7C8CA1',
   /** Tertiary: disabled, placeholder. Use sparingly — it is near-illegible by design. */
-  textFaint: '#4A5768',
+  textFaint: '#707F94',
 
   /** The player, focus rings, selected state, player projectiles. */
   self: '#5CE0F0',
@@ -39,16 +39,31 @@ export const Palette = {
    * rule exists to prevent.
    */
   danger: '#FF4A38',
+  /**
+   * `danger` when it is TEXT rather than a mark. Never interchangeable with it.
+   *
+   * `#FF4A38` is 3.78:1 on the panel and 4.10:1 on the void — both below WCAG AA,
+   * which UI.md rule 7 claims all text meets. It had been used for the incident
+   * report's cause line, personnel's LOST, and hazard callouts, so the rule was false
+   * for exactly the text a player most needs to read.
+   *
+   * Two tokens rather than one brightened token, because the two uses want opposite
+   * things: brightening the *mark* would cost it the little separation it has left
+   * from `caution` (they differ only along the L–M axis, which protanopes and
+   * deuteranopes lack), and darkening the *text* is what broke AA in the first place.
+   * 5.22:1 on the panel, 5.66:1 on the void.
+   */
+  dangerText: '#FF7059',
   /** Enemy hulls and structures. Cold steel: present, readable, not screaming. */
-  hostile: '#93A1B5',
+  hostile: '#7A8498',
   /** Enemy hull fill, dark enough that the outline carries the silhouette. */
   hostileFill: '#1B2430',
   /** Elite//reinforced enemy accent. */
-  hostileElite: '#F5B942',
+  hostileElite: '#4C7BFF',
   /** Confirmation, healing, gains, successful extraction. */
-  good: '#4ADE9B',
+  good: '#EAFFC0',
   /** Rare/relic tier highlight. */
-  relic: '#C084FC',
+  relic: '#C86BF0',
 
   /** Additive glow layers are drawn in these, always with 'lighter' compositing. */
   glowSelf: 'rgba(92, 224, 240, 0.55)',
@@ -62,6 +77,24 @@ export const Palette = {
   /** Explosion core. Drawn additively over a short lifetime. */
   glowExplosion: 'rgba(255, 176, 92, 0.55)',
 } as const
+
+/**
+ * A palette token at a given opacity.
+ *
+ * Exists because the alternative kept happening: a translucent wash would be written
+ * as a literal `rgba(255, 74, 56, 0.2)`, which is `danger` today and *nothing* the day
+ * `danger` is retuned — the fill silently keeps the old hue while every other use of
+ * the token moves, and the two reds are then subtly different for no reason anyone can
+ * discover. tests/palette.test.ts exists to measure these tokens and recommends
+ * changing several of them, which is exactly the day this bites.
+ *
+ * Takes the `#RRGGBB` form the tokens above are written in.
+ */
+export function withAlpha(hex: string, alpha: number): string {
+  const value = parseInt(hex.slice(1), 16)
+  const a = alpha < 0 ? 0 : alpha > 1 ? 1 : Number.isFinite(alpha) ? alpha : 0
+  return `rgba(${(value >> 16) & 0xff}, ${(value >> 8) & 0xff}, ${value & 0xff}, ${a.toFixed(3)})`
+}
 
 /** Starfield layers, back to front: dimmer and slower behind. */
 export const StarLayers = [

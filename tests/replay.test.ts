@@ -19,7 +19,12 @@ import type { BotName } from '../src/sim/bots'
 import { BOTS, BOT_NAMES } from '../src/sim/bots'
 import { World } from '../src/sim/world'
 import { diffDigests, digestWorld, Hasher, hashWorld } from '../src/meta/snapshot'
-import { SIM_VERSION } from '../src/meta/simVersion'
+import {
+  checkReplayCompatibility,
+  describeIncompatibility,
+  SIM_VERSION,
+} from '../src/meta/simVersion'
+import { RUN_PARAM, resolveRunMode } from '../src/meta/seedModes'
 import type { Replay, TickableWorld } from '../src/meta/replay'
 import {
   decodeReplay,
@@ -144,6 +149,14 @@ function worldView(overrides: Partial<WorldView> = {}): WorldView {
   return {
     seed: 'K7F29XQM3RTV',
     runState: 'active',
+    // M5 view fields. Fixtures state them explicitly rather than spreading a shared
+    // default, so adding a WorldView field fails here and someone decides what the
+    // fixture should say instead of inheriting a silent placeholder.
+    stage: { index: 0, count: 1, sectorId: 'debris-shelf', sectorName: 'Debris Shelf', bossName: null },
+    hullName: 'Lien',
+    boss: null,
+    hazards: [],
+    choiceResolve: null,
     hull: hull(),
     playerBullets: [bullet(), bullet({ x: 130, damage: 6 })],
     enemyBullets: [enemyBullet(), enemyBullet({ kind: 'tracker', vx: -30 })],
@@ -182,17 +195,20 @@ describe('state hashing', () => {
    * constant; find out why the arithmetic moved.
    */
   /**
-   * Re-recorded once, at M2, when `freezeTicks` and `telegraphTicks` entered the
-   * regression hash. Both are play-affecting state — hitstop consumes real ticks
-   * and a telegraph is real reaction time — so they belong in this digest, and its
-   * value legitimately moved. Previous constant: `a84510e42a86be74`.
+   * Re-recorded twice, and the bar each time was the same: name the play-affecting
+   * field that was added or removed. "The test went red" is not a reason.
    *
-   * That is the only reason this number has ever changed, and the bar for changing
-   * it again is the same: name the play-affecting field that was added or removed.
-   * "The test went red" is not a reason.
+   *   - M2 (`a84510e42a86be74` -> `14e21cacdce8283e`): `freezeTicks` and
+   *     `telegraphTicks` entered the regression hash. Hitstop consumes real ticks
+   *     and a telegraph is real reaction time.
+   *   - M5 (`14e21cacdce8283e` -> the constant below): `EnemyInstance.uid`,
+   *     `.secondary` and `.boss` entered the enemies component, and the stage,
+   *     armed hazards, the hull, the inventory and the pending card entered the run
+   *     component. Every one of them steers the next tick; see the header of
+   *     `src/meta/snapshot.ts` for the field-by-field argument.
    */
   it('matches a recorded digest for a known world', () => {
-    expect(hashWorld(worldView())).toBe('14e21cacdce8283e')
+    expect(hashWorld(worldView())).toBe('6975de91b40a3194')
   })
 
   it('includes the M2 timing state that hitstop and telegraphs introduced', () => {
@@ -594,6 +610,77 @@ describe('replay format versioning', () => {
   })
 })
 
+describe('a replay from an older simulation is refused, not played back wrong', () => {
+  /**
+   * THE M5 CASE, PINNED.
+   *
+   * M4 recorded single-sector runs. This build flies five sectors, restarts wave
+   * numbering per sector, and rolls three new streams. An M4 replay is therefore a
+   * valid input log for a completely different game — and every layer below this
+   * one is *happy* with it, which is exactly what makes it dangerous.
+   */
+  const OLD_SIM_VERSION = SIM_VERSION - 1
+
+  it('decodes an old replay without complaint — the format layer cannot catch this', () => {
+    // Stated as an assertion rather than a comment because it is the whole premise:
+    // if decoding threw, no version guard would be needed. It does not throw. The
+    // bytes are perfectly well formed; only their *meaning* has changed.
+    const decoded = decodeReplay(forgeReplay({ simVersion: OLD_SIM_VERSION, seed: 'K7F29XQM3RTV' }))
+    expect(decoded.version).toBe(REPLAY_FORMAT_VERSION)
+    expect(decoded.simVersion).toBe(OLD_SIM_VERSION)
+    expect(decoded.seed).toBe('K7F29XQM3RTV')
+    expect(decoded.inputs.length).toBeGreaterThan(0)
+  })
+
+  it('refuses it at the compatibility check, and says so honestly', () => {
+    const decoded = decodeReplay(forgeReplay({ simVersion: OLD_SIM_VERSION }))
+    const verdict = checkReplayCompatibility(decoded.simVersion)
+    expect(verdict).toEqual({ kind: 'older', recorded: OLD_SIM_VERSION, current: SIM_VERSION })
+
+    const message = describeIncompatibility(verdict)
+    expect(message).toBeTruthy()
+    // The honest sentence: the rules changed, so it would not play back the run it
+    // recorded. Not "corrupt", which would send the recipient hunting a bad link.
+    expect(message).toContain('earlier version')
+    expect(message).toContain('rules have changed')
+    expect(message).not.toMatch(/invalid|corrupt|error|damaged/i)
+  })
+
+  it('refuses it end to end, and keeps the seed so the link is still worth something', () => {
+    const params = new URLSearchParams()
+    params.set(RUN_PARAM.replay, forgeReplay({ simVersion: OLD_SIM_VERSION, seed: 'K7F29XQM3RTV' }))
+    const resolved = resolveRunMode({
+      params,
+      now: new Date('2026-07-25T12:00:00Z'),
+      dailyRecord: null,
+      randomSeed: () => 'FALLBACK2345',
+    })
+
+    // NOT a replay run. The one outcome that must never happen is `kind: 'replay'`
+    // here, because that is the silently divergent playback.
+    expect(resolved.mode.kind).not.toBe('replay')
+    expect(resolved.rejections).toContain('replay-incompatible')
+    expect(resolved.notice).toContain('earlier version')
+    // The starting conditions survive even when the run does not.
+    expect(resolved.mode.seed).toBe('K7F29XQM3RTV')
+  })
+
+  it('stamps this build s version on everything it records', () => {
+    // The other half of the guard: a replay recorded now has to carry v2, or the
+    // next bump has nothing to compare against.
+    expect(new ReplayRecorder('ABCD').toReplay().simVersion).toBe(SIM_VERSION)
+    expect(decodeReplay(new ReplayRecorder('ABCD').encode()).simVersion).toBe(SIM_VERSION)
+  })
+
+  it('accepts a replay recorded by this build', () => {
+    const encoded = recordOf('K7F29XQM3RTV', randomInputs('C0MPAT12345X', 300)).encode()
+    const decoded = decodeReplay(encoded)
+    expect(checkReplayCompatibility(decoded.simVersion)).toEqual({ kind: 'ok' })
+    expect(describeIncompatibility(checkReplayCompatibility(decoded.simVersion))).toBeNull()
+  })
+
+})
+
 describe('replay playback', () => {
   it('drives a world with exactly the recorded inputs, in order', () => {
     const inputs = randomInputs('PLAYBACK2345', 500)
@@ -762,6 +849,13 @@ describe('recorded run regression', () => {
     expect(view.stats.kills).toBe(fixture.expected.stats['kills'])
     expect(view.stats.waveIndex).toBe(fixture.expected.stats['waveIndex'])
     expect(digest.hash).toBe(fixture.expected.hash)
+  })
+
+  it.each(fixtures)('$file is stamped with this simulation version', (fixture) => {
+    // A fixture carrying an older sim version is asserting a hash that the current
+    // rules did not produce. Re-recording has to re-stamp, or the corpus quietly
+    // becomes a museum of what some previous build did.
+    expect(decodeReplay(fixture.replay).simVersion).toBe(SIM_VERSION)
   })
 
   it.each(fixtures)('$file replays identically twice in a row', (fixture) => {

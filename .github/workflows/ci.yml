@@ -12,6 +12,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The audio instrument, in its own job because it needs a real browser.
+  #
+  # This exists at all because audio was this project's one verification blind spot:
+  # every sound typechecked and had tests, and not one of those tests could say
+  # whether the game was audible, balanced, or clipping. It turned out enemy fire was
+  # 3.5 LU QUIETER than the player's own gun — a legibility bug, shipped, invisible to
+  # every other instrument we have.
+  #
+  # It is a browser job rather than a Node one on purpose: what a player hears is
+  # decided by Chromium's biquad coefficients and its DynamicsCompressor, so a Node
+  # reimplementation would measure a model of the graph and confidently certify a mix
+  # nobody produced the moment the two drifted.
+  #
+  # Split from `check` so the fast feedback loop stays fast — a browser install is
+  # ~30s that a typo in a test should not have to wait for.
+  audio:
+    name: Audio measurement
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Render and measure every cue
+        run: npm run audio
+
   check:
     name: Typecheck, test, build
     runs-on: ubuntu-latest
@@ -54,8 +84,26 @@ jobs:
         # Two ceilings: transfer size is the one that matters to a player, and the
         # uncompressed cap is a runaway backstop for something like an accidentally
         # inlined asset that compresses well and still bloats parse time.
+        #
+        # RAISED AT M5, 75KB -> 110KB, and the distinction from last time matters.
+        # The previous move changed the *metric* because disk size was never what a
+        # player pays. This one moves the *number*, which is the thing that usually
+        # means someone is dodging their own budget — so the justification has to be
+        # explicit or it is worthless:
+        #
+        #   75KB was set against one sector and 14 items. M5 shipped five sectors,
+        #   40 items, 28 interactions, 5 bosses with variants, 5 hulls, hazards, a
+        #   world map, and the rendering for all of it — and landed at 78KB. That is
+        #   ~11KB of gzipped content for roughly 4x the game, because every asset is
+        #   code-defined geometry and synthesised audio. The budget did not fail; the
+        #   thing it was sized against stopped existing.
+        #
+        # 110KB is ~40% headroom over today: enough for M6 and M7 without moving it
+        # again, and tight enough that an accidentally inlined asset still trips it.
+        # A budget that only ever gets raised is a comment, not a budget — so if this
+        # needs to move a third time, the answer is a code-split, not a bigger number.
         run: |
-          GZIP_BUDGET=76800      # 75KB transferred
+          GZIP_BUDGET=112640     # 110KB transferred
           RAW_BUDGET=409600      # 400KB on disk, backstop only
           GZIP_SIZE=$(cat $(find dist -type f \( -name '*.js' -o -name '*.html' -o -name '*.css' \)) | gzip -9 -c | wc -c)
           RAW_SIZE=$(du -sb dist | cut -f1)

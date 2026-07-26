@@ -54,6 +54,10 @@ import type {
   PendingChoiceKind,
   WorldView,
 } from '../sim/entities'
+// A module cycle: `worldMap` imports this file's hoisted helpers back. Only the
+// function declaration is used, and only inside a function body, so neither module
+// reads the other during initialisation. Do not import a `const` across this edge.
+import { drawWorldMap } from './worldMap'
 
 // ---------------------------------------------------------------------------
 // content the sim does not carry yet
@@ -269,16 +273,29 @@ const TIER_COLOR: Readonly<Record<ItemTier, string>> = {
   relic: Palette.relic,
 }
 
+/**
+ * Titles and subtitles stay keyed by the *whole* `PendingChoiceKind`, including
+ * `'route'`, even though `drawChoiceScreen` hands a route to `src/ui/worldMap.ts`
+ * before either table is read.
+ *
+ * Keeping the records exhaustive is what made adding `'route'` a compile error here
+ * rather than a card with a blank heading, and that is worth more than deleting two
+ * strings that only render if someone calls `layoutChoiceScreen` with a kind this
+ * card cannot lay out. They describe the world map, so a mistaken call still says
+ * something true.
+ */
 const KIND_TITLE: Readonly<Record<PendingChoiceKind, string>> = {
   item: 'SALVAGE RECOVERED',
   shop: 'FIELD REQUISITION',
   'work-order': 'WORK ORDER',
+  route: 'APPROACH SELECTION',
 }
 
 const KIND_SUBTITLE: Readonly<Record<PendingChoiceKind, string>> = {
   item: 'Fit one system. The sortie is held while you read.',
   shop: 'Fit one system at the listed price. Scrap not spent stays with you.',
   'work-order': 'Accept one assignment for the corridor ahead.',
+  route: 'The next sector is fixed. What you are choosing is how you arrive at it.',
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,9 +1119,14 @@ export function drawChoiceScreenLayout(
 }
 
 /**
- * Draw the item choice, shop, or work order for the run's open decision.
+ * Draw the item choice, shop, work order, or route for the run's open decision.
  *
  * No-ops when nothing is pending, so the caller can call it unconditionally.
+ *
+ * A route is a different screen, not a variant of this card: it has no offers, no
+ * prices, and no build to show, and what it does have — a run track, a destination,
+ * and a hazard brief per option — has nowhere to go here. Dispatching from this one
+ * entry point is what keeps `src/main.ts` free of the distinction.
  */
 export function drawChoiceScreen(
   ctx: CanvasRenderingContext2D,
@@ -1113,6 +1135,17 @@ export function drawChoiceScreen(
 ): void {
   const choice = view.pendingChoice
   if (choice === null) return
+
+  if (choice.kind === 'route') {
+    drawWorldMap(ctx, view, {
+      // The same simulation-owned cursor, passed straight through. Neither screen
+      // holds a selection of its own.
+      selected: opts.selected,
+      tick: opts.tick,
+      ...(opts.awaitingRelease === undefined ? {} : { awaitingRelease: opts.awaitingRelease }),
+    })
+    return
+  }
 
   const layout = layoutChoiceScreen({
     kind: choice.kind,

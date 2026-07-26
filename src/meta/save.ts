@@ -18,6 +18,45 @@
  * Adding a field means: bump CURRENT_VERSION, add SaveV{n+1}, add one migration,
  * and add a fixture test. It is deliberately more work than mutating a type,
  * because mutating a type is how progress gets silently destroyed.
+ *
+ * ## M5 (the five-sector run) DID NOT NEED A v4, and the reasoning is worth keeping
+ *
+ * The obvious reading of the milestone says otherwise — a run now has five sectors,
+ * so surely "how far did it get" needs a new field. Three things say no, and the
+ * third is the one that decides it.
+ *
+ * **Depth is already recorded, unambiguously.** `PersonnelRecord` has carried both
+ * `sectorId` and `waveIndex` since v3, and `src/main.ts` fills `sectorId` from the
+ * sector the run actually ended in. Wave numbering restarting per sector would make
+ * `waveIndex` alone ambiguous, but it is never alone. `docs/DESIGN.md` fixes the
+ * sector order — sector two is always The Tally — so the pair is exact, and a
+ * `stageIndex` field would be a second copy of a fact already stored. Two copies of
+ * one fact is not extra safety; it is a thing that can disagree with itself, and the
+ * disagreement lands in a file the player reads as history.
+ *
+ * **The one real gap is inside a store that does not need this file's help.**
+ * `DailyRecord` has `waveIndex` and no sector, so "wave 12" is genuinely ambiguous
+ * across five sectors. But `DailyRecord` and `PersonnelRecord` are owned by
+ * `seedModes.ts` and `personnel.ts`, each with its own coercer that already accepts
+ * a record missing any field, and `PERSONNEL_RECORD_VERSION` exists precisely so a
+ * record's shape can move without the envelope moving. Adding `sectorId` to a daily
+ * record is an additive field with a default, which is the path those modules were
+ * built for. The envelope — version, pilotNumber, settings, certifications,
+ * personnel, daily — is unchanged by M5. There is no new *store*.
+ *
+ * **A migration would have nothing honest to write.** This is the deciding one. A
+ * migration step must fill the new field for saves that already exist, and every v3
+ * daily record was flown on a single-sector build. `MIGRATIONS[3]` could only write
+ * a sentinel — which is exactly what a tolerant coercer produces for an absent field,
+ * at no cost. Shipping a version whose only observable effect is a sentinel and a
+ * fixture test devalues the mechanism: the next reader sees four versions where only
+ * three ever meant anything, and the discipline that makes v1 loadable in v3 comes
+ * from every bump being load-bearing.
+ *
+ * So: no v4. When the daily contract's screen starts *printing* depth, add
+ * `sectorId` to `DailyRecord`, default it in `coerceDailyRecord`, and populate it in
+ * `src/main.ts` — still no envelope bump. What WOULD need a v4 is a new store: a
+ * per-sector best, a chosen hull remembered between runs, a route history.
  */
 
 import {

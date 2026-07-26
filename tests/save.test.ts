@@ -248,6 +248,146 @@ describe('migration to v3', () => {
   })
 })
 
+/**
+ * The M5 verdict, pinned.
+ *
+ * `src/meta/save.ts` records why the five-sector run did NOT warrant a v4. A written
+ * argument rots; these are the three claims it rests on, asserted, so that if one of
+ * them stops being true the verdict is revisited rather than inherited.
+ *
+ * Every fixture below is a hand-written payload in the shape a shipped build wrote,
+ * for the reason the v1 fixture exists: generating one from today's types tests that
+ * the code agrees with itself.
+ */
+describe('the five-sector run needs no schema version of its own', () => {
+  /**
+   * A real v3 personnel record, as an M4 build wrote it.
+   *
+   * Hand-written and frozen. `sectorId` and `waveIndex` are the two fields the "how
+   * far did it get" question turns on.
+   */
+  const V3_PERSONNEL_RECORD = {
+    v: 1,
+    pilotNumber: 12,
+    hullId: 'lien',
+    outcome: 'lost',
+    causeKind: 'enemy-fire',
+    causeEnemyId: 'turret-heavy',
+    sectorId: 'debris-shelf',
+    waveIndex: 22,
+    ticks: 8_040,
+    kills: 96,
+    scrap: 310,
+    shotsFired: 2_400,
+    hits: 620,
+    seed: 'K7F29XQM3RTV',
+    items: [{ id: 'warheads', count: 1 }],
+    itemsOmitted: 0,
+    poolFingerprint: '0123456789abcdef',
+    simVersion: 1,
+    stateDigest: 'fedcba9876543210',
+  }
+
+  function v3SaveWith(personnel: readonly unknown[], daily: unknown = null): unknown {
+    return {
+      version: 3,
+      pilotNumber: 12,
+      settings: DEFAULT_SETTINGS,
+      certifications: { unlocked: [], progress: {} },
+      personnel,
+      daily,
+    }
+  }
+
+  it('already stores depth as a sector plus a wave, so no field is missing', () => {
+    // CLAIM 1. Wave numbering restarts per sector, which makes `waveIndex` alone
+    // ambiguous — but it has never been alone. The sector order is authored and
+    // fixed, so the pair is exact and a `stageIndex` field would be a second copy of
+    // a fact already stored.
+    const save = migrate(v3SaveWith([V3_PERSONNEL_RECORD]))
+    const record = save.personnel[0]
+    expect(record?.sectorId).toBe('debris-shelf')
+    expect(record?.waveIndex).toBe(22)
+  })
+
+  it('keeps a record filed in a later sector, with that sector named', () => {
+    // The case M5 introduced: a pilot lost in sector four at wave 8. Under a
+    // schema that stored only `waveIndex` this would read as a shallower run than a
+    // sector-one death at wave 22. With the sector named it does not.
+    const deep = { ...V3_PERSONNEL_RECORD, sectorId: 'deep-manifest', waveIndex: 8 }
+    const save = migrate(v3SaveWith([V3_PERSONNEL_RECORD, deep]))
+    expect(save.personnel).toHaveLength(2)
+    expect(save.personnel[1]?.sectorId).toBe('deep-manifest')
+    expect(save.personnel[1]?.waveIndex).toBe(8)
+  })
+
+  it('loads a record that is missing the sector rather than rejecting it', () => {
+    // The pre-v3 shape, and also what a partially-written record looks like. It
+    // degrades to a stated 'unknown' instead of inventing a sector — which is why
+    // adding a field to a *record* never needs an envelope migration to backfill it.
+    const { sectorId: _dropped, ...withoutSector } = V3_PERSONNEL_RECORD
+    const save = migrate(v3SaveWith([withoutSector]))
+    expect(save.personnel).toHaveLength(1)
+    expect(save.personnel[0]?.sectorId).toBe('unknown')
+    expect(save.personnel[0]?.waveIndex).toBe(22)
+  })
+
+  it('accepts stores carrying fields this build does not know', () => {
+    // CLAIM 2. `DailyRecord` and `PersonnelRecord` are owned by their own modules
+    // with their own coercers, so a future build adding `sectorId` to a daily record
+    // needs no envelope bump: this build reads such a save and keeps every field it
+    // does understand. That is what makes the additive path real rather than hoped
+    // for, and it is the whole reason M5 did not need a v4.
+    const save = migrate(
+      v3SaveWith([{ ...V3_PERSONNEL_RECORD, stageIndex: 3, routeTaken: 'the-long-way' }], {
+        date: '2026-07-25',
+        ticks: 9_000,
+        waveIndex: 6,
+        scrap: 42,
+        outcome: 'lost',
+        sectorId: 'the-tally',
+        stageIndex: 1,
+      }),
+    )
+    expect(save.version).toBe(CURRENT_VERSION)
+    expect(save.personnel[0]?.waveIndex).toBe(22)
+    expect(save.personnel[0]?.sectorId).toBe('debris-shelf')
+    expect(save.daily?.waveIndex).toBe(6)
+    expect(save.daily?.outcome).toBe('lost')
+    // The unknown fields are dropped rather than kept, which is the same trade
+    // `coerceUnlockedIds` makes: this build cannot describe them, so it will not
+    // write them back out as if it could.
+    expect(save.daily).not.toHaveProperty('sectorId')
+  })
+
+  it('still carries a real v1 payload the whole way, unchanged by M5', () => {
+    // CLAIM 3. The envelope did not move, so the chain that has to keep working
+    // still does — from the payload a v1 build actually wrote, not a generated one.
+    const save = migrate(V1_FIXTURE)
+    expect(save.version).toBe(CURRENT_VERSION)
+    expect(CURRENT_VERSION).toBe(3)
+    expect(save.pilotNumber).toBe(37)
+    expect(save.settings).toEqual(DEFAULT_SETTINGS)
+    expect(save.certifications.unlocked).toEqual([])
+    expect(save.personnel).toEqual([])
+    expect(save.daily).toBeNull()
+  })
+
+  it('has an envelope with exactly the stores M5 left it with', () => {
+    // A NEW STORE is what would force a v4 — a per-sector best, a remembered hull, a
+    // route history. Pinning the key set means adding one cannot be done by editing
+    // `Save` and hoping; it fails here, next to the reasoning that says why.
+    expect(Object.keys(migrate(V1_FIXTURE)).sort()).toEqual([
+      'certifications',
+      'daily',
+      'personnel',
+      'pilotNumber',
+      'settings',
+      'version',
+    ])
+  })
+})
+
 describe('pilot numbering', () => {
   /**
    * The number names the pilot currently flying, so it can only change once that
