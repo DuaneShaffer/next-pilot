@@ -359,7 +359,14 @@ A read of the whole tree at the M5 exit point. `npm run check` was green through
 worth more than any single entry. Where a guard exists but does not fire, it is named, because a
 test that cannot fail is worse than a missing one: it reads as coverage.
 
-Numbered R1–R15 so commits and the M5 caveat above can cite them. Unfixed unless marked.
+Numbered R1–R15 so commits and the M5 caveat above can cite them.
+
+**Status lives in `git log`, not in this list.** Fixes cite their R-number in the commit subject,
+so `git log --oneline --grep='R7'` is authoritative and a status column here would be stale within
+the hour — this section is the *finding*, not its state. Several were fixed the same day they were
+recorded, and the fixing turned up further defects in the same code paths; those are in the commit
+messages rather than here, because a finding list that grows as it is worked stops being a record
+of what a cold read of the tree found.
 
 ### Blocks trusting the measurements
 
