@@ -290,17 +290,37 @@ export function updateEnemyWeapon(
       fireVolley(e, secondDef, hullX, hullY, out)
       fired = true
     }
-    // The instance's telegraph fields are the DISPLAY telegraph: whichever barrel
-    // fires soonest. A second weapon whose windup nothing draws would be an
-    // unannounced attack, which rule 3 exists to prevent — so the visible warning
-    // always tracks the nearest incoming volley rather than always the primary.
-    if (slot.windup > 0 && (e.telegraphTicks === 0 || slot.windup < e.telegraphTicks)) {
-      e.telegraphTicks = slot.windup
-      e.telegraphTotal = slot.windupTotal
-    }
   }
 
   return fired
+}
+
+/**
+ * The warning to draw: whichever barrel fires soonest.
+ *
+ * A PURE READ, and it lives here rather than in `updateEnemyWeapon` because of a bug
+ * that shipped. The first version wrote the secondary's windup into
+ * `e.telegraphTicks` so the renderer would show the nearest incoming volley — but
+ * that field is also the primary's authoritative windup, read back into `stepWeapon`
+ * on the next tick. The primary saw a committed telegraph it had never started,
+ * counted it down, and fired off its own cadence: **2.4x its authored rate**, paced
+ * by the other barrel's warning. Deterministic, so no replay fixture could catch it,
+ * and every boss in the game was tuned against it.
+ *
+ * The rule that failed is worth stating plainly: a field that is both authoritative
+ * state and a display value will eventually be written for the display and read as
+ * the state. So the two barrels now keep entirely private cadence, and "which warning
+ * is on screen" is answered here — a presentation question, answered without writing
+ * anything.
+ */
+export function visibleTelegraph(e: EnemyInstance): { ticks: number; total: number } {
+  const primary = { ticks: e.telegraphTicks, total: e.telegraphTotal }
+  const slot = e.secondary
+  if (slot === undefined || slot.windup <= 0) return primary
+  if (primary.ticks <= 0 || slot.windup < primary.ticks) {
+    return { ticks: slot.windup, total: slot.windupTotal }
+  }
+  return primary
 }
 
 /** One weapon slot's bookkeeping for a tick. Pure, so both barrels share it. */

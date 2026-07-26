@@ -19,6 +19,7 @@ import { TICK_HZ } from '../src/core/loop'
 import { World, type RunContent } from '../src/sim/world'
 import { HAZARD_ACTIVE_TICKS, HAZARD_WARNING_TICKS, INTERDICTION_SPEED_FACTOR } from '../src/sim/hazards'
 import { bossPhaseDefId } from '../src/sim/bosses'
+import { FREEZE_MAX_TICKS } from '../src/sim/damage'
 import { CHOICE_TIMEOUT_TICKS, HELD_CONFIRM_DWELL_TICKS } from '../src/sim/progression'
 import { BOSSES } from '../src/content/bosses'
 import { HAZARDS } from '../src/content/hazards'
@@ -590,6 +591,73 @@ describe('hazards', () => {
     for (const b of world.enemyBullets) {
       expect(b.sourceDefId).toBe(DEBRIS.id)
       expect(b.causeKind).toBe('hazard')
+    }
+  })
+
+  it('fires exactly one cycle apart, matching what its card claims', () => {
+    /**
+     * REGRESSION, and it shipped.
+     *
+     * `intervalTicks` is documented as "ticks between hazard events" and every
+     * authored description quotes it as seconds. `HazardField` treated it as the IDLE
+     * span, so the real period was `interval + 60 + activeSpan` — a card saying "every
+     * 4 seconds" fired every 5, and one saying "every 5" fired every 8.
+     *
+     * The reason it survived review is worth keeping: the obvious content-side test —
+     * assert the number in the description matches `intervalTicks` — passes either
+     * way, because the text agreed with the field and only the field was wrong. The
+     * gap has to be measured in TICKS BETWEEN FIRINGS, which is what this does.
+     *
+     * Measured on a hazard that deals NO damage, so the period is exact. A damaging
+     * one is checked below, where hitstop makes it approximate.
+     */
+    const world = hazardWorld(INTERDICT)
+    expect(world.stage.index).toBe(1)
+
+    const fires: number[] = []
+    for (let i = 0; i < 40 * TICK_HZ && world.runState === 'active'; i++) {
+      world.tick(IDLE)
+      if (world.events.some((e) => e.kind === 'hazard-fired')) fires.push(world.stats.tick)
+    }
+
+    expect(fires.length, 'the hazard never fired twice').toBeGreaterThan(2)
+    for (let i = 1; i < fires.length; i++) {
+      const gap = (fires[i] as number) - (fires[i - 1] as number)
+      expect(gap, `fired ${gap} ticks apart, card promises ${INTERDICT.intervalTicks}`).toBe(
+        INTERDICT.intervalTicks,
+      )
+    }
+  })
+
+  it('slips only by the hitstop its own damage causes', () => {
+    /**
+     * The honest caveat on the promise above, found by measuring: a corrosion hit is a
+     * hull hit, a hull hit grants hitstop, and hitstop pauses the hazard clock along
+     * with everything else in the tick. So a DAMAGING hazard's period runs a few ticks
+     * long — 365 against a promised 360 when this was written.
+     *
+     * That is correct rather than a second bug: gameplay freezes as a whole, and a
+     * hazard that kept counting through hitstop would drift *ahead* of the waves and
+     * movement it shares a clock with. But it does mean "every 6 seconds" is exact
+     * only for a hazard you are not being hurt by, and the bound belongs in a test
+     * rather than in nobody's head.
+     */
+    const world = hazardWorld(CORROSION)
+    const fires: number[] = []
+    for (let i = 0; i < 40 * TICK_HZ && world.runState === 'active'; i++) {
+      world.hull.integrity = world.hull.maxIntegrity
+      world.tick(IDLE)
+      if (world.events.some((e) => e.kind === 'hazard-fired')) fires.push(world.stats.tick)
+    }
+
+    expect(fires.length).toBeGreaterThan(2)
+    for (let i = 1; i < fires.length; i++) {
+      const gap = (fires[i] as number) - (fires[i - 1] as number)
+      expect(gap).toBeGreaterThanOrEqual(CORROSION.intervalTicks)
+      // One freeze per firing at most: nothing else in this scenario lands a hit.
+      expect(gap, `slipped ${gap - CORROSION.intervalTicks} ticks past the promise`).toBeLessThanOrEqual(
+        CORROSION.intervalTicks + FREEZE_MAX_TICKS,
+      )
     }
   })
 

@@ -219,13 +219,11 @@ export function buildRoutes(
     hazards: [],
     hazardIds: [],
     reward: { kind: 'none' },
-    // STATED FLATLY, not hedged. A sector carries no hazards of its own — the only
-    // way one becomes live is a route arming it — so "none at all" is the literal
-    // truth and the screen should say it. The screen was hedging ("adds nothing to
-    // the sector ahead") to stay honest about a case that does not exist, and the
-    // cost of that caution was a player reasonably reading it as "there may be
-    // hazards anyway, this just doesn't add any".
-    rewardText: 'No hazards on this leg, and no bonus. Arrive as you are.',
+    // Through `rewardText`, not a copy of the same sentence. Two literals for one
+    // reward is two places to edit and one to forget, and the screen renders this
+    // string verbatim — so a drift between them would show up as the map contradicting
+    // itself about the option the player is most likely to take.
+    rewardText: rewardText({ kind: 'none' }),
   }
   if (hazards.length === 0) return []
 
@@ -241,16 +239,22 @@ export function buildRoutes(
   // always the item" is not a substitute for reading the card.
   const scrap = ROUTE_SCRAP_BASE + ROUTE_SCRAP_PER_STAGE * stageIndex
   const repair = Math.round(maxIntegrity * ROUTE_REPAIR_FRACTION)
-  const paid: RouteReward[] = [
-    { kind: 'item' },
-    rng.chance(0.5) ? { kind: 'scrap', amount: scrap } : { kind: 'repair', amount: repair },
-  ]
-  if (rng.chance(0.5)) paid.reverse()
+  const item: RouteReward = { kind: 'item' }
+  const other: RouteReward = rng.chance(0.5)
+    ? { kind: 'scrap', amount: scrap }
+    : { kind: 'repair', amount: repair }
+  // A TUPLE, so indexing is checked rather than cast. The previous version built an
+  // array and read `paid[0] as RouteReward` — reflexive casts of exactly the kind
+  // `noUncheckedIndexedAccess` exists to make impossible, silencing the compiler on
+  // the one question it was asking.
+  const [firstReward, secondReward]: readonly [RouteReward, RouteReward] = rng.chance(0.5)
+    ? [other, item]
+    : [item, other]
 
   return [
     direct,
-    routeFor(stageIndex, sectorName, bossName, first, paid[0] as RouteReward),
-    routeFor(stageIndex, sectorName, bossName, second, paid[1] as RouteReward),
+    routeFor(stageIndex, sectorName, bossName, first, firstReward),
+    routeFor(stageIndex, sectorName, bossName, second, secondReward),
   ]
 }
 

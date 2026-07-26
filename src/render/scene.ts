@@ -38,6 +38,7 @@
 import { TICK_SECONDS } from '../core/loop'
 import { PLAYFIELD_H, PLAYFIELD_W } from '../core/space'
 import type { Bullet, EnemyBullet, EnemyInstance, Hull, WorldView } from '../sim/entities'
+import { visibleTelegraph } from '../sim/enemies'
 import { drawBossCallout, drawBossHull } from './boss'
 import {
   blitGlow,
@@ -188,8 +189,10 @@ function drawDamageBar(ctx: CanvasRenderingContext2D, e: EnemyInstance, x: numbe
  * NaN — a NaN line width silently drops the whole silhouette.
  */
 function telegraphProgress(e: EnemyInstance): number {
-  const remaining = e.telegraphTicks ?? 0
-  const total = e.telegraphTotal ?? 0
+  // Whichever barrel fires soonest — see visibleTelegraph. Reading `telegraphTicks`
+  // alone would leave a second barrel's windup undrawn, and an attack nothing warns
+  // about is what rule 3 exists to prevent.
+  const { ticks: remaining, total } = visibleTelegraph(e)
   if (!(remaining > 0) || !(total > 0)) return 0
   const p = 1 - remaining / total
   return p < 0 ? 0 : p > 1 ? 1 : p
@@ -234,8 +237,8 @@ function drawEnemies(
       x,
       y,
       e.radius,
-      e.telegraphTicks ?? 0,
-      e.telegraphTotal ?? 0,
+      visibleTelegraph(e).ticks,
+      visibleTelegraph(e).total,
       reduceFlashes,
     )
   }

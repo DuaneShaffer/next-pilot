@@ -29,6 +29,7 @@
 
 import { PLAYFIELD_H, PLAYFIELD_W } from '../core/space'
 import type { BossRuntime, EnemyInstance } from '../sim/entities'
+import { visibleTelegraph } from '../sim/enemies'
 import { hitFlashStrength } from './effects'
 import { pulse } from './intensity'
 import { Palette } from './palette'
@@ -342,8 +343,10 @@ export function drawBossHull(
 
 /** 0..1 windup progress, defensively — a NaN line width drops the whole silhouette. */
 function telegraphCharge(e: EnemyInstance): number {
-  const remaining = e.telegraphTicks ?? 0
-  const total = e.telegraphTotal ?? 0
+  // Whichever barrel fires soonest — see visibleTelegraph. Reading `telegraphTicks`
+  // alone would leave a second barrel's windup undrawn, and an attack nothing warns
+  // about is what rule 3 exists to prevent.
+  const { ticks: remaining, total } = visibleTelegraph(e)
   if (!(remaining > 0) || !(total > 0)) return 0
   return clamp01(1 - remaining / total)
 }

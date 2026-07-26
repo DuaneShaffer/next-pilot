@@ -116,20 +116,35 @@ export class HazardField {
 
         case 'warning': {
           r.phase = 'active'
-          // An instant hazard holds `active` only long enough to be visible; a
-          // sustained one holds it for the whole window it is actually in force.
-          const span = SUSTAINED.has(r.def.kind) ? HAZARD_ACTIVE_TICKS : 1
+          const span = activeSpanFor(r.def)
           r.span = span
           r.remaining = span
           this.pulses.push({ def: r.def, warning: false, fired: true })
           break
         }
 
-        case 'active':
+        case 'active': {
           r.phase = 'idle'
-          r.span = intervalOf(r.def)
+          /*
+           * `intervalTicks` is the FULL PERIOD, so the idle span is what is left of it
+           * after the warning and the active window.
+           *
+           * This was the interval itself, which made the real cycle
+           * `interval + 60 + activeSpan` — a hazard whose card said "every 4 seconds"
+           * fired every 5, and one saying "every 5" fired every 8. `HazardDef`'s own
+           * doc calls the field "ticks between hazard events", and this file's header
+           * calls a description whose numbers do not match "a lie told to the player at
+           * the exact moment they are making a decision". Both were true of the code.
+           *
+           * Worse, it was untestable from the content side: a test asserting the
+           * number appears in the description passes either way, because the text
+           * matched the field and only the field was wrong.
+           */
+          const spent = HAZARD_WARNING_TICKS + activeSpanFor(r.def)
+          r.span = Math.max(1, intervalOf(r.def) - spent)
           r.remaining = r.span
           break
+        }
       }
     }
     return this.pulses
@@ -169,11 +184,28 @@ export class HazardField {
 }
 
 /**
- * A hazard's cycle length, floored.
+ * How long a hazard holds `active`.
  *
- * A cycle shorter than its own warning would fire before it finished announcing
- * itself, which is the one thing this module exists to prevent — so content cannot
- * express it, whatever the number says.
+ * An instant kind does its work on the tick it fires and holds `active` only long
+ * enough to be visible; a sustained one holds it for the whole window it is in force.
+ * Getting this backwards would make a blackout a single dark frame.
+ */
+function activeSpanFor(def: HazardDef): number {
+  return SUSTAINED.has(def.kind) ? HAZARD_ACTIVE_TICKS : 1
+}
+
+/**
+ * A hazard's FULL cycle length in ticks — warning, active window, and idle span
+ * together — floored so the three phases fit inside it.
+ *
+ * The floor exists so a cycle cannot be shorter than the phases it contains, which
+ * would drive the idle span to zero and make the hazard continuous.
+ *
+ * It is NOT, as this comment previously claimed, to stop a hazard "firing before it
+ * finished announcing itself" — the phases are sequential, so the warning always
+ * completes in full however short the interval. That rationale was wrong, and a wrong
+ * reason attached to a correct guard is how the guard gets removed later by someone
+ * who checks the reason.
  */
 function intervalOf(def: HazardDef): number {
   const authored = Number.isFinite(def.intervalTicks) ? Math.floor(def.intervalTicks) : TICK_HZ * 8

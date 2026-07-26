@@ -397,6 +397,132 @@ describe('movement kinds', () => {
  * volley looks like independent of *when* it leaves. The windup has its own
  * describe block below, where the timing is the subject rather than the noise.
  */
+describe('two barrels keep their own cadence', () => {
+  /**
+   * REGRESSION, and it shipped.
+   *
+   * `e.telegraphTicks` was doing two jobs: the primary barrel's authoritative windup,
+   * read back into `stepWeapon` on the next tick, AND the display telegraph. The
+   * secondary's windup was copied into it so the renderer would draw the nearest
+   * incoming volley — which meant the primary saw a committed telegraph it had never
+   * started, counted it down, and fired a volley off its own cadence.
+   *
+   * Effect: a boss phase with a secondary fired its primary pattern roughly twice as
+   * often as authored, paced by the *other* barrel's telegraph. Deterministic, so no
+   * replay fixture could catch it, and every boss was tuned against it.
+   *
+   * The lesson is the one this codebase keeps relearning: a field that is both
+   * authoritative state and a display value will eventually be written for the display
+   * and read as the state.
+   */
+  const PRIMARY_INTERVAL = 40
+  const PRIMARY_WINDUP = 10
+  const SECONDARY_INTERVAL = 25
+  const SECONDARY_WINDUP = 15
+
+  function twoBarrelDef(): EnemyDef {
+    return makeDef({
+      radius: 4,
+      weapon: {
+        kind: 'aimed',
+        intervalTicks: PRIMARY_INTERVAL,
+        bulletSpeed: 100,
+        damage: 3,
+        firstDelayTicks: PRIMARY_INTERVAL,
+        windupTicks: PRIMARY_WINDUP,
+      },
+      secondaryWeapon: {
+        kind: 'ring',
+        intervalTicks: SECONDARY_INTERVAL,
+        bulletSpeed: 90,
+        damage: 2,
+        count: 4,
+        firstDelayTicks: SECONDARY_INTERVAL,
+        windupTicks: SECONDARY_WINDUP,
+      },
+    })
+  }
+
+  /** Ticks on which each barrel fired, told apart by how many rounds arrived. */
+  function fireTicks(ticks: number): { primary: number[]; secondary: number[] } {
+    const def = twoBarrelDef()
+    const e = createEnemy(def, 100, 100, 1)
+    const primary: number[] = []
+    const secondary: number[] = []
+    const out: AttributedEnemyBullet[] = []
+    for (let tick = 0; tick < ticks; tick++) {
+      const before = out.length
+      updateEnemyWeapon(e, def, 100, 600, out)
+      const added = out.length - before
+      // The ring emits 4, the aimed shot emits 1. Both on one tick would be 5.
+      if (added === 1 || added === 5) primary.push(tick)
+      if (added === 4 || added === 5) secondary.push(tick)
+    }
+    return { primary, secondary }
+  }
+
+  it('fires the primary strictly on its own interval', () => {
+    const { primary } = fireTicks(400)
+    expect(primary.length).toBeGreaterThan(3)
+    for (let i = 1; i < primary.length; i++) {
+      const gap = (primary[i] as number) - (primary[i - 1] as number)
+      expect(gap, `primary fired ${gap} ticks after the previous volley`).toBe(PRIMARY_INTERVAL)
+    }
+  })
+
+  it('fires the secondary strictly on its own interval', () => {
+    const { secondary } = fireTicks(400)
+    expect(secondary.length).toBeGreaterThan(3)
+    for (let i = 1; i < secondary.length; i++) {
+      const gap = (secondary[i] as number) - (secondary[i - 1] as number)
+      expect(gap, `secondary fired ${gap} ticks after the previous volley`).toBe(SECONDARY_INTERVAL)
+    }
+  })
+
+  it('gives the primary exactly the rate a single-barrel enemy would have', () => {
+    // The direct statement of the bug: adding a second barrel must not change how
+    // often the FIRST one fires. It doubled it.
+    const TICKS = 400
+    const withSecond = fireTicks(TICKS).primary.length
+
+    const soloDef = makeDef({
+      radius: 4,
+      weapon: twoBarrelDef().weapon,
+    })
+    const solo = createEnemy(soloDef, 100, 100, 1)
+    const out: AttributedEnemyBullet[] = []
+    let soloShots = 0
+    for (let tick = 0; tick < TICKS; tick++) {
+      const before = out.length
+      updateEnemyWeapon(solo, soloDef, 100, 600, out)
+      if (out.length > before) soloShots++
+    }
+    expect(withSecond).toBe(soloShots)
+  })
+
+  it('never fires a volley it did not announce', () => {
+    // The player-facing consequence. Every shot must be preceded by that barrel's own
+    // windup; a volley arriving off another barrel's telegraph is unannounced fire,
+    // which UI.md rule 3 and every telegraph in the game exist to prevent.
+    const def = twoBarrelDef()
+    const e = createEnemy(def, 100, 100, 1)
+    const out: AttributedEnemyBullet[] = []
+    let primaryWindupSeen = 0
+    for (let tick = 0; tick < 400; tick++) {
+      const before = out.length
+      const windingBefore = e.telegraphTicks
+      updateEnemyWeapon(e, def, 100, 600, out)
+      const added = out.length - before
+      if (added === 1 || added === 5) {
+        // The tick a volley leaves, the primary must have been on its last windup tick.
+        expect(windingBefore, `primary fired at tick ${tick} with no windup pending`).toBe(1)
+        primaryWindupSeen++
+      }
+    }
+    expect(primaryWindupSeen).toBeGreaterThan(3)
+  })
+})
+
 describe('enemy weapons', () => {
   it('never fires when unarmed', () => {
     const def = makeDef({ weapon: UNARMED })
