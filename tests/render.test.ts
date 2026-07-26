@@ -26,8 +26,11 @@ import type {
   StageView,
   WorldView,
 } from '../src/sim/entities'
+import { BOSSES } from '../src/content/bosses'
 import {
+  BOSS_NAME_SIZE,
   bossBarBlocks,
+  bossNameLines,
   bossThresholdMarks,
   CALLOUT_BOTTOM,
   CALLOUT_TOP,
@@ -63,7 +66,7 @@ import { drawHull, drawLowIntegrityRim, drawScene } from '../src/render/scene'
 import { drawPanel, type PanelState } from '../src/render/panel'
 import { PULSE_HZ, PULSE_RATE, pulse, REDUCED_FLASH_SCALE } from '../src/render/intensity'
 import { Palette } from '../src/render/palette'
-import { formatSeconds } from '../src/render/text'
+import { formatSeconds, type Measure } from '../src/render/text'
 import { Starfield } from '../src/render/starfield'
 
 // ---------------------------------------------------------------------------
@@ -794,6 +797,78 @@ describe('boss health bar', () => {
           expect(left + width).toBeLessThanOrEqual(x + w + 0.01)
           expect(width).toBeGreaterThanOrEqual(0)
         }
+      }
+    }
+  })
+
+  /**
+   * Every authored boss and variant name, against the real table.
+   *
+   * A capture caught `The Repossessor` rendering as `THE REPOSSESS…`, which the
+   * fixtures in this file were too short to expose — the whole reason this walks
+   * `src/content/bosses.ts` instead. The name is the label a player uses to talk about
+   * the fight; truncating it is not a cosmetic loss.
+   *
+   * Measured at 0.62em per character, deliberately wider than any font in the stack,
+   * so a name that passes here has margin in the real renderer. Same trick, and the
+   * same reasoning, as tests/textFits.test.ts.
+   */
+  const WIDE_EM = 0.62
+  const wideMeasure: Measure = (text, size, _weight = 400, tracking = 0) =>
+    text.length * size * WIDE_EM + Math.max(0, text.length - 1) * tracking
+
+  const BOSS_NAMES: ReadonlyArray<readonly [string, string]> = Object.values(BOSSES).flatMap(
+    (boss) => [
+      [boss.id, boss.name] as const,
+      ...(boss.variants ?? []).map((variant) => [`${boss.id}/${variant.id}`, variant.name] as const),
+    ],
+  )
+
+  it('has real boss names to check', () => {
+    // Guards the guard: an empty table would make every assertion below vacuous.
+    expect(BOSS_NAMES.length).toBeGreaterThanOrEqual(9)
+    expect(BOSS_NAMES.map(([, name]) => name)).toContain('The Repossessor')
+    expect(Math.max(...BOSS_NAMES.map(([, name]) => name.length))).toBeGreaterThanOrEqual(27)
+  })
+
+  for (const [id, name] of BOSS_NAMES) {
+    it(`renders "${name}" in full (${id})`, () => {
+      const lines = bossNameLines(name, Panel.contentW, wideMeasure)
+
+      // Nothing dropped, nothing elided: the lines put back together are the name.
+      expect(lines.join(' ')).toBe(name.replace(/\s+/g, ' ').trim())
+      expect(lines.join('')).not.toContain('…')
+
+      // Every line fits the column at the size the panel draws it.
+      for (const line of lines) {
+        expect(
+          wideMeasure(line, BOSS_NAME_SIZE, 700),
+          `"${line}" is wider than the panel column`,
+        ).toBeLessThanOrEqual(Panel.contentW)
+      }
+
+      // Two lines is the height the panel's flexible region is budgeted for. A longer
+      // name is not forbidden — it will render in full on three lines — but it costs
+      // the build readout a row, so it should be a decision rather than a surprise.
+      expect(lines.length, `"${name}" needs ${lines.length} lines`).toBeLessThanOrEqual(2)
+    })
+  }
+
+  it('draws the full name through the panel, with no ellipsis anywhere', () => {
+    for (const [, name] of BOSS_NAMES) {
+      const enemy = bossEnemy()
+      if (enemy.boss) enemy.boss.name = name
+      const { ctx, calls } = makeStub()
+      drawPanel(ctx, worldFixture({ boss: enemy }), panelState())
+
+      const drawn = calls
+        .filter((c) => c.name === 'fillText')
+        .map((c) => String(c.args[0]))
+        .join('')
+      expect(drawn, `"${name}" was elided in the panel`).not.toContain('…')
+      // Every word of the name reached the canvas.
+      for (const word of name.split(/\s+/)) {
+        expect(drawn, `"${word}" of "${name}" is missing from the panel`).toContain(word)
       }
     }
   })

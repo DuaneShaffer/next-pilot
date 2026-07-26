@@ -33,7 +33,7 @@ import { hitFlashStrength } from './effects'
 import { pulse } from './intensity'
 import { Palette } from './palette'
 import { drawEnemyShape, traceEnemyOutline } from './shapes'
-import { canvasMeasure, drawText, measureText, wrapText } from './text'
+import { canvasMeasure, drawText, measureText, wrapText, type Measure } from './text'
 
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0
@@ -124,6 +124,40 @@ export interface BossBarOptions {
 const BLOCK_GAP = 2
 /** Height of the tick below each interior threshold. */
 const MARK_H = 3
+/** Headroom the caret needs above the bar. Callers must reserve it. */
+export const BAR_CARET_H = 6
+
+/**
+ * Size the boss name is drawn at, and the widest it may be laid out.
+ *
+ * Exported so tests/render.test.ts can run the real content table through the same
+ * wrapping the panel uses, rather than through a fixture that happens to be short.
+ */
+export const BOSS_NAME_SIZE = 13
+
+/**
+ * Break a boss name into lines that fit, WITHOUT ever dropping any of it.
+ *
+ * The panel used to truncate: `The Repossessor` became `THE REPOSSESS…` because the
+ * name shared its line with the hp readout. A boss whose name the player cannot read
+ * is the one label they would use to talk about the fight, and the longest authored
+ * name — `Unlisted Tenant — Spore Bed`, 27 characters — cannot fit one 164-unit line
+ * at any size at or above the 12px floor rule 7 sets. So the name gets its own line,
+ * and wraps if it needs to. There is no ellipsis path here on purpose.
+ *
+ * Returns however many lines the name needs; the caller sizes its block from the
+ * count. A test pins the real table at two lines, so a future name that would push
+ * the block taller fails there rather than surprising the layout.
+ */
+export function bossNameLines(
+  name: string,
+  maxWidth: number,
+  measure: Measure,
+  size = BOSS_NAME_SIZE,
+): readonly string[] {
+  const lines = wrapText(name, maxWidth, size, measure, 700)
+  return lines.length > 0 ? lines : ['']
+}
 
 export function drawBossHealthBar(ctx: CanvasRenderingContext2D, options: BossBarOptions): void {
   const { x, y, w, h, thresholds, fraction, phaseIndex } = options
@@ -159,6 +193,41 @@ export function drawBossHealthBar(ctx: CanvasRenderingContext2D, options: BossBa
   for (const mark of bossThresholdMarks(thresholds)) {
     ctx.fillRect(x + mark * w - 0.5, y + h + 1, 1, MARK_H)
   }
+
+  /**
+   * Two marks that answer "which way does this go, and which block is now".
+   *
+   * A reviewer looking at a still could not tell either, and they were right to say
+   * so: the fill colour alone was carrying both facts, which is one channel doing two
+   * jobs and is also exactly what rule 3 forbids. So:
+   *
+   *   the CARET sits on the fill edge — the point that moves. It travels leftward as
+   *   the boss takes damage, which makes the direction self-evident the first time
+   *   anything happens, and in a frozen frame it says "here".
+   *   the BRACKET encloses the phase being fought. The caret's distance to the
+   *   bracket's left edge is, literally, the damage left before the pattern changes —
+   *   which is the one question a phase-segmented bar exists to answer.
+   *
+   * Both are geometry, so they survive greyscale and they survive the palette moving
+   * underneath them.
+   */
+  const current = blocks.find((block) => block.phaseIndex === phaseIndex) ?? blocks[0]
+  if (current) {
+    const left = x + current.from * w
+    const width = Math.max(1, Math.min((current.to - current.from) * w - BLOCK_GAP, x + w - left))
+    ctx.strokeStyle = Palette.hostileElite
+    ctx.lineWidth = 1
+    ctx.strokeRect(left - 0.5, y - 1.5, width + 1, h + 3)
+  }
+
+  const head = x + clamp01(fraction) * w
+  ctx.fillStyle = Palette.text
+  ctx.beginPath()
+  ctx.moveTo(Math.max(x + 3, Math.min(x + w - 3, head)) - 3, y - BAR_CARET_H)
+  ctx.lineTo(Math.max(x + 3, Math.min(x + w - 3, head)) + 3, y - BAR_CARET_H)
+  ctx.lineTo(Math.max(x + 3, Math.min(x + w - 3, head)), y - 1.5)
+  ctx.closePath()
+  ctx.fill()
 }
 
 // ---------------------------------------------------------------------------

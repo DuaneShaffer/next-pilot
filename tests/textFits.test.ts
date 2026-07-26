@@ -628,14 +628,19 @@ describe('hull issue copy fits its containers', () => {
     }
   })
 
-  it('fits every derived net line on one line of a card', () => {
+  it('fits every derived net line beside its label on one line of a card', () => {
+    // The label shares the row, so the two are measured together — each fitting alone
+    // proves nothing about the line.
+    const label = measure(HULL_SELECT_STRINGS.netLabel, HULL_LABEL_SIZE, 600, 1.4) + 10
     for (const def of Object.values(HULLS)) {
       const net = compareToBaseline(def).net
       if (net === null) continue
-      const lines = wrapText(net, CARDS.hullText, HULL_ROW_SIZE, measure)
+      const lines = wrapText(net, CARDS.hullText - label, HULL_ROW_SIZE, measure)
       for (const line of lines) {
-        expect(measure(line, HULL_ROW_SIZE), `net for "${def.id}" overflows: ${line}`)
-          .toBeLessThanOrEqual(CARDS.hullText)
+        expect(
+          label + measure(line, HULL_ROW_SIZE),
+          `net for "${def.id}" collides with its label: ${line}`,
+        ).toBeLessThanOrEqual(CARDS.hullText)
       }
       expect(lines.length, `net for "${def.id}" needs ${lines.length} lines`).toBe(1)
     }

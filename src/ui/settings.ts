@@ -57,15 +57,15 @@ import { Palette } from '../render/palette'
 import { canvasMeasure, drawLabel, drawText, wrapText } from '../render/text'
 
 /**
- * `Settings` plus the fields this screen needs that `src/meta/save.ts` has not
- * shipped yet.
+ * Alias for `Settings`, kept as a name rather than deleted.
  *
- * Optional on purpose: save.ts is owned elsewhere, and a settings screen that
- * cannot compile until another file lands is a settings screen that blocks. When
- * `autoFire` becomes a required field there, this intersection still typechecks and
- * this comment can go.
+ * It was an intersection widening `Settings` with an optional `autoFire`, so this
+ * screen could ship before save.ts had the field — a settings screen that cannot
+ * compile until another file lands is a settings screen that blocks. `autoFire` is
+ * now required in save schema v4, so the widening is gone and the alias is only here
+ * to keep both screens naming one type.
  */
-export type UiSettings = Settings & { readonly autoFire?: boolean }
+export type UiSettings = Settings
 
 /** Settings rows that both screens can show. Keyed so neither can drift. */
 export type SharedSettingId = 'shake' | 'flashes' | 'volume' | 'mute' | 'autofire'

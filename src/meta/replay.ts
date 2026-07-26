@@ -17,18 +17,26 @@
  * link and a file upload, and there is no compression library to reach for
  * because this project has no runtime dependencies.
  *
- * ## Wire format (version 1)
+ * ## Wire format (version 3)
  *
  * ```
  *   offset  bytes  field
  *   0       3      magic 'NPR'
  *   3       1      format version
- *   4       1      seed length in bytes (1..64)
- *   5       n      seed, printable ASCII
+ *   4       1      simulation version          (added at format 2)
+ *   5       1      seed length in bytes (1..64)
+ *   6       n      seed, printable ASCII
+ *   ...     1      hull id length (0..32)      (added at format 3)
+ *   ...     m      hull id, printable ASCII; empty means "no hull was chosen"
  *   ...     v      tick count, unsigned LEB128
  *   ...     2v..   runs: [packed input byte, LEB128 repeat count] ...
  *   end-4   4      FNV-1a checksum of everything before it, little-endian
  * ```
+ *
+ * THE TABLE IS THE SPEC and it has been wrong before: it still described format 1
+ * after `simVersion` entered the header, which meant the only written account of
+ * the bytes disagreed with the code that wrote them. Every field added here has to
+ * be added above.
  *
  * Then base64url with no padding, so it drops into a query string untouched.
  *
@@ -55,15 +63,34 @@ import { packInput, unpackInput } from '../core/input'
 /**
  * Encoding version — how the bytes are laid out.
  *
- * Bumped to 2 when `simVersion` entered the header. Distinct from SIM_VERSION,
- * which describes what those bytes *mean*: a format mismatch fails to decode and is
- * safe, while a sim mismatch decodes perfectly and plays back the wrong run. See
- * src/meta/simVersion.ts.
+ * Bumped to 2 when `simVersion` entered the header, and to 3 when `hullId` did.
+ * Distinct from SIM_VERSION, which describes what those bytes *mean*: a format
+ * mismatch fails to decode and is safe, while a sim mismatch decodes perfectly and
+ * plays back the wrong run. See src/meta/simVersion.ts.
+ *
+ * Which is why `hullId` was a FORMAT bump and not a sim bump. The simulation's
+ * rules did not change — `World` given the same content, hull and inputs does the
+ * same thing it did yesterday. What changed is that the payload was *incomplete*:
+ * it described a run without saying which ship flew it. A format bump makes every
+ * format-2 replay fail loudly at the version check, which is the correct and
+ * legible outcome, where leaving the format alone would have let those replays
+ * decode and be flown in the wrong hull.
  */
-export const REPLAY_FORMAT_VERSION = 2
+export const REPLAY_FORMAT_VERSION = 3
 
 const MAGIC = [0x4e, 0x50, 0x52] as const // 'NPR'
-const HEADER_MIN_BYTES = MAGIC.length + 1 + 1 + 1 + 1 + 1 + 4
+/**
+ * Smallest byte count that could hold a header, written as a sum of the fields so
+ * it cannot drift out of step with the wire format:
+ * magic, format version, sim version, seed length, one seed byte, hull id length,
+ * one tick-count varint byte, checksum.
+ *
+ * The hull length byte was added at format 3. Omitting it here would not have been
+ * a hole — every later read is bounds-checked — but a constant that claims to be
+ * the header size and is one byte short is a constant that will be trusted by the
+ * next person who adds a field.
+ */
+const HEADER_MIN_BYTES = MAGIC.length + 1 + 1 + 1 + 1 + 1 + 1 + 4
 const MAX_SEED_BYTES = 64
 /**
  * ~16 hours at 60Hz. Not a design limit on run length — a sanity bound so a
@@ -79,6 +106,16 @@ export type ReplayErrorReason =
   | 'version-mismatch'
   | 'checksum-mismatch'
   | 'bad-seed'
+  /**
+   * The hull id field is malformed.
+   *
+   * Its own reason rather than `bad-seed`, which is what it first reported. These
+   * codes exist so a test can pin behaviour and a caller can tell failures apart,
+   * and "bad-seed: hull id length 33 out of range" is a message that contradicts
+   * its own code — it sends the next person debugging a rejected link to look at
+   * the seed, which is the one part of the payload that was fine.
+   */
+  | 'bad-hull'
   | 'bad-input-byte'
   | 'bad-run-count'
   | 'tick-count-mismatch'
@@ -108,9 +145,35 @@ export interface Replay {
    */
   readonly simVersion: number
   readonly seed: string
+  /**
+   * The hull the run was flown in.
+   *
+   * ADDED AT FORMAT 3, and the reason is worth keeping. A replay was seed plus
+   * inputs, which was lossless *by accident*: every run flew a Lien because the hull
+   * was never chosen. The moment hull selection shipped, a Collateral run — 30
+   * shots/second and no shield — would have replayed as a Lien at 20 shots/second,
+   * diverging within a few ticks, and the share card would have handed out the link
+   * without complaint.
+   *
+   * A FORMAT bump rather than a sim-version bump, deliberately. See simVersion.ts:
+   * a format mismatch fails to decode, which is safe and legible; a sim mismatch
+   * decodes perfectly and plays back wrong, which is the dangerous case this field
+   * exists to prevent. Old replays are now refused rather than silently mis-flown.
+   */
+  readonly hullId: string
   /** One packed input byte per tick. Length is the tick count. */
   readonly inputs: Uint8Array
 }
+
+/**
+ * Ceiling on the encoded hull id, and what a missing one means.
+ *
+ * The empty string is legal and means "the run did not choose a hull", which is
+ * exactly what every replay recorded before hull selection existed meant. It keeps
+ * the field honest rather than defaulting to `'lien'` and asserting something the
+ * recording never knew.
+ */
+const MAX_HULL_BYTES = 32
 
 // ---------------------------------------------------------------------------
 // base64url
@@ -270,12 +333,26 @@ export function encodeReplay(replay: Replay): string {
   if (!Number.isInteger(simVersion) || simVersion < 0 || simVersion > 255) {
     throw new ReplayError('bad-seed', `simVersion ${simVersion} out of range`)
   }
+  const hullBytes: number[] = []
+  for (let i = 0; i < replay.hullId.length; i++) {
+    const code = replay.hullId.charCodeAt(i)
+    if (code < 0x21 || code > 0x7e) {
+      throw new ReplayError('bad-hull', `hull id character ${code} at ${i} is not printable ASCII`)
+    }
+    hullBytes.push(code)
+  }
+  if (hullBytes.length > MAX_HULL_BYTES) {
+    throw new ReplayError('bad-hull', `hull id length ${hullBytes.length} out of range`)
+  }
+
   const bytes: number[] = [
     ...MAGIC,
     REPLAY_FORMAT_VERSION,
     simVersion,
     seedBytes.length,
     ...seedBytes,
+    hullBytes.length,
+    ...hullBytes,
   ]
   writeVarint(bytes, replay.inputs.length)
 
@@ -367,6 +444,21 @@ export function decodeReplay(text: string): Replay {
   }
   offset += seedLength
 
+  const hullLength = bytes[offset] ?? 0
+  offset++
+  if (hullLength > MAX_HULL_BYTES || offset + hullLength > bodyEnd) {
+    throw new ReplayError('bad-hull', `hull id length ${hullLength} out of range`)
+  }
+  let hullId = ''
+  for (let i = 0; i < hullLength; i++) {
+    const code = bytes[offset + i] ?? 0
+    if (code < 0x21 || code > 0x7e) {
+      throw new ReplayError('bad-hull', `hull id byte ${code} is not printable ASCII`)
+    }
+    hullId += String.fromCharCode(code)
+  }
+  offset += hullLength
+
   const tickRead = readVarint(bytes, offset, 'tick count')
   offset = tickRead.next
   const tickCount = tickRead.value
@@ -404,7 +496,7 @@ export function decodeReplay(text: string): Replay {
     )
   }
 
-  return { version, simVersion, seed, inputs }
+  return { version, simVersion, seed, hullId, inputs }
 }
 
 // ---------------------------------------------------------------------------
@@ -421,7 +513,17 @@ export function decodeReplay(text: string): Replay {
 export class ReplayRecorder {
   private readonly bytes: number[] = []
 
-  constructor(readonly seed: string) {}
+  /**
+   * `hullId` defaults to empty, which means "this run did not choose a hull".
+   *
+   * Optional so a sim test recording a run does not have to know hulls exist, and
+   * empty rather than `'lien'` because a default that asserts a fact the recorder
+   * never knew is how a replay ends up confidently wrong.
+   */
+  constructor(
+    readonly seed: string,
+    readonly hullId: string = '',
+  ) {}
 
   record(input: InputSnapshot): void {
     this.bytes.push(packInput(input))
@@ -438,6 +540,7 @@ export class ReplayRecorder {
       // what lets a future build refuse it instead of replaying it wrong.
       simVersion: SIM_VERSION,
       seed: this.seed,
+      hullId: this.hullId,
       inputs: Uint8Array.from(this.bytes),
     }
   }

@@ -59,7 +59,7 @@ describe('migration', () => {
     const current = {
       version: CURRENT_VERSION,
       pilotNumber: 12,
-      settings: { shake: 0, reduceFlashes: true, masterVolume: 0.5, muted: true },
+      settings: { shake: 0, reduceFlashes: true, masterVolume: 0.5, muted: true, autoFire: true },
       certifications: { unlocked: [], progress: {} },
       personnel: [],
       daily: null,
@@ -174,9 +174,9 @@ describe('migration to v3', () => {
    * start from a payload a v1 build actually wrote. Generating the fixture from
    * today's types would test that the code agrees with itself.
    */
-  it('carries a real v1 save all the way to v3', () => {
+  it('carries a real v1 save all the way to the current version', () => {
     const save = migrate(V1_FIXTURE)
-    expect(save.version).toBe(3)
+    expect(save.version).toBe(CURRENT_VERSION)
     // The one thing a v1 player would notice being lost.
     expect(save.pilotNumber).toBe(37)
     expect(save.settings).toEqual(DEFAULT_SETTINGS)
@@ -198,7 +198,10 @@ describe('migration to v3', () => {
   it('keeps a v2 player their settings', () => {
     const settings = { shake: 0.25, reduceFlashes: true, masterVolume: 0.5, muted: true }
     const save = migrate({ version: 2, pilotNumber: 4, settings })
-    expect(save.settings).toEqual(settings)
+    // Every preference they expressed survives; the one field v4 added does not
+    // appear in a v2 payload and defaults OFF, because auto-fire changes how the ship
+    // behaves and a v2 player never asked for it.
+    expect(save.settings).toEqual({ ...settings, autoFire: false })
     expect(save.pilotNumber).toBe(4)
   })
 
@@ -365,7 +368,7 @@ describe('the five-sector run needs no schema version of its own', () => {
     // still does — from the payload a v1 build actually wrote, not a generated one.
     const save = migrate(V1_FIXTURE)
     expect(save.version).toBe(CURRENT_VERSION)
-    expect(CURRENT_VERSION).toBe(3)
+    expect(CURRENT_VERSION).toBe(4)
     expect(save.pilotNumber).toBe(37)
     expect(save.settings).toEqual(DEFAULT_SETTINGS)
     expect(save.certifications.unlocked).toEqual([])
@@ -385,6 +388,56 @@ describe('the five-sector run needs no schema version of its own', () => {
       'settings',
       'version',
     ])
+  })
+})
+
+describe('migration to v4 — Settings.autoFire', () => {
+  /**
+   * A REAL v3 payload, hand-written, not generated from today's types.
+   *
+   * Same reason the v1 fixture is hand-written: generating it would test that the
+   * code agrees with itself. This is what a shipped v3 build actually wrote —
+   * `settings` with exactly four keys and no `autoFire`.
+   */
+  const V3_FIXTURE = {
+    version: 3,
+    pilotNumber: 21,
+    settings: { shake: 0.5, reduceFlashes: true, masterVolume: 0.3, muted: false },
+    certifications: { unlocked: [], progress: {} },
+    personnel: [],
+    daily: null,
+  }
+
+  it('adds autoFire OFF and changes nothing else', () => {
+    const save = migrate(V3_FIXTURE)
+    expect(save.version).toBe(4)
+    expect(save.pilotNumber).toBe(21)
+    expect(save.settings.autoFire).toBe(false)
+    // Every other preference is byte-identical. A migration that quietly renormalised
+    // a volume would be indistinguishable from one that did its job.
+    expect(save.settings.shake).toBe(0.5)
+    expect(save.settings.reduceFlashes).toBe(true)
+    expect(save.settings.masterVolume).toBe(0.3)
+    expect(save.settings.muted).toBe(false)
+  })
+
+  it('respects an autoFire the player actually set', () => {
+    const save = migrate({ ...V3_FIXTURE, version: 4, settings: { ...V3_FIXTURE.settings, autoFire: true } })
+    expect(save.settings.autoFire).toBe(true)
+  })
+
+  it('coerces a garbage autoFire rather than trusting it', () => {
+    const save = migrate({ ...V3_FIXTURE, version: 4, settings: { ...V3_FIXTURE.settings, autoFire: 'yes' } })
+    expect(save.settings.autoFire).toBe(false)
+    // And it costs the player nothing else — one bad field must not reset a save.
+    expect(save.pilotNumber).toBe(21)
+  })
+
+  it('runs the whole chain, v1 through v4, in order', () => {
+    const save = migrate(V1_FIXTURE)
+    expect(save.version).toBe(4)
+    expect(save.pilotNumber).toBe(37)
+    expect(save.settings).toEqual(DEFAULT_SETTINGS)
   })
 })
 

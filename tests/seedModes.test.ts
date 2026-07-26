@@ -758,6 +758,7 @@ describe('replay link length policy, from real encoded runs', () => {
     const broken: Replay = {
       version: REPLAY_FORMAT_VERSION,
       simVersion: SIM_VERSION,
+      hullId: '',
       // A space is not printable-ASCII by the encoder's rule, so this cannot encode.
       seed: 'not a seed ',
       inputs: new Uint8Array([0b0000101]),

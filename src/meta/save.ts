@@ -69,7 +69,7 @@ import { sanitizePersonnelHistory, type PersonnelRecord } from './personnel'
 import { coerceDailyRecord, type DailyRecord } from './seedModes'
 
 const STORAGE_KEY = 'next-pilot/save'
-export const CURRENT_VERSION = 3
+export const CURRENT_VERSION = 4
 
 /** Motion and flash preferences. See docs/UI.md rule 10 — this is accessibility. */
 export interface Settings {
@@ -84,6 +84,22 @@ export interface Settings {
   reduceFlashes: boolean
   masterVolume: number
   muted: boolean
+  /**
+   * Hold the trigger for the player during a sortie.
+   *
+   * MOTOR ACCESSIBILITY, not a convenience. A shmup asks for a key held down
+   * continuously for three minutes at a stretch, five times a run, and there is no
+   * skill expressed in holding it — the trigger is down essentially always.
+   *
+   * Applied in `src/core/input.ts` and gated on the input context exactly the way
+   * touch is, so it is asserted only during a sortie. That gate is load-bearing: a
+   * trigger that never releases interacts with `HELD_CONFIRM_DWELL_TICKS` to
+   * auto-confirm option 0 on every reward card, which would make pick rates a
+   * constant and make the same seed play out differently depending on a setting.
+   * Replay-safe because it changes which keys produce an `InputSnapshot`, never what
+   * the simulation does with one.
+   */
+  autoFire: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -91,6 +107,7 @@ export const DEFAULT_SETTINGS: Settings = {
   reduceFlashes: false,
   masterVolume: 0.8,
   muted: false,
+  autoFire: false,
 }
 
 // --- versioned shapes. Never edit a shipped one. -----------------------------
@@ -131,11 +148,34 @@ interface SaveV3 {
   daily: DailyRecord | null
 }
 
-export type Save = SaveV3
-type AnySave = SaveV1 | SaveV2 | SaveV3
+/**
+ * v4 adds one field, and only one: `Settings.autoFire`.
+ *
+ * NOT a multi-sector migration. Five sectors landed in the same milestone and the
+ * obvious instinct was to record how far a run got — but `PersonnelRecord` has
+ * carried `sectorId` *and* `waveIndex` since v3, and the sector order is authored and
+ * fixed, so the pair is already exact. A `stageIndex` field would be a second copy of
+ * a stored fact, free to disagree with itself.
+ *
+ * `DailyRecord` genuinely does lack a sector, and it still gets nothing: every v3
+ * daily record was flown single-sector, so a migration could only write a sentinel
+ * that its coercer already produces for free. A migration with nothing honest to
+ * write should not be written.
+ */
+interface SaveV4 {
+  version: 4
+  pilotNumber: number
+  settings: Settings
+  certifications: CertificationState
+  personnel: readonly PersonnelRecord[]
+  daily: DailyRecord | null
+}
+
+export type Save = SaveV4
+type AnySave = SaveV1 | SaveV2 | SaveV3 | SaveV4
 
 export const DEFAULT_SAVE: Save = {
-  version: 3,
+  version: 4,
   pilotNumber: 1,
   settings: { ...DEFAULT_SETTINGS },
   certifications: DEFAULT_CERTIFICATIONS,
@@ -175,6 +215,17 @@ const MIGRATIONS: Record<number, (save: AnySave) => AnySave> = {
       daily: null,
     } satisfies SaveV3
   },
+  3: (save) => {
+    const v3 = save as SaveV3
+    return {
+      ...v3,
+      version: 4,
+      // OFF for a returning player. Auto-fire changes how the ship behaves, and a v3
+      // player never expressed a preference — so they get what they already
+      // experienced, the same reasoning that keeps shake ON through the v1 migration.
+      settings: { ...v3.settings, autoFire: false },
+    } satisfies SaveV4
+  },
 }
 
 function clamp01(value: unknown, fallback: number): number {
@@ -191,6 +242,7 @@ function coerceSettings(raw: unknown): Settings {
       typeof input.reduceFlashes === 'boolean' ? input.reduceFlashes : DEFAULT_SETTINGS.reduceFlashes,
     masterVolume: clamp01(input.masterVolume, DEFAULT_SETTINGS.masterVolume),
     muted: typeof input.muted === 'boolean' ? input.muted : DEFAULT_SETTINGS.muted,
+    autoFire: typeof input.autoFire === 'boolean' ? input.autoFire : DEFAULT_SETTINGS.autoFire,
   }
 }
 

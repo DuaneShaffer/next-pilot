@@ -15,10 +15,15 @@ import type { ItemDef } from '../content/types'
 import { PANEL_W, PLAYFIELD_W, VIRTUAL_H } from '../core/space'
 import { formatSeed } from '../core/seed'
 import type { EnemyInstance, HazardView, StageView, WorldView } from '../sim/entities'
-import { drawBossHealthBar } from './boss'
+import {
+  BAR_CARET_H,
+  BOSS_NAME_SIZE,
+  bossNameLines,
+  drawBossHealthBar,
+} from './boss'
 import { drawHazardBlock } from './hazards'
 import { Font, Palette } from './palette'
-import { drawLabel, drawText, drawValue, measureText } from './text'
+import { canvasMeasure, drawLabel, drawText, drawValue, measureText } from './text'
 
 const PAD = 14
 const CONTENT_X = PLAYFIELD_W + PAD
@@ -403,13 +408,36 @@ function drawHeldBuild(
  * which is an announcement and is named in the rule; and the ring on the boss itself,
  * which is attached to a moving entity like the damage strip every other enemy gets.
  *
- * Layout is two text rows and a bar:
+ * Layout is a heading, the name on its OWN line or lines, a phase/hp row, and the bar:
  *
- *   BOSS                 PHASE 2 / 3
- *   SLEDGE AUDITOR           1240 hp
+ *   BOSS
+ *   Unlisted Tenant —
+ *   Spore Bed
+ *   PHASE 2 / 3              1240 hp
  *   [====|=====|=========]
+ *
+ * The name owning its line is the fix for a defect a capture caught: sharing the row
+ * with the hp readout clipped `The Repossessor` to `THE REPOSSESS…`. The longest
+ * authored name is 27 characters and cannot fit 164 units at the 12px floor, so
+ * sharing was never going to work — it wraps instead, and never truncates.
+ * `tests/render.test.ts` runs the real `src/content/bosses.ts` table through the same
+ * wrapping, so a boss added later with a longer name fails there.
+ *
+ * Authored case, not upper: `The Deep Manifest` is a name, and the panel already
+ * reserves uppercase for labels.
  */
-const BOSS_BLOCK_H = 44
+const BOSS_HEADING_H = 14
+const BOSS_NAME_LINE_H = 15
+const BOSS_STAT_H = 15
+const BOSS_BAR_H = 9
+/** Bar row: the caret's headroom, the bar, and the threshold ticks under it. */
+const BOSS_BAR_ROW_H = BAR_CARET_H + BOSS_BAR_H + 5
+
+/** Height this block needs for a given name, so the caller can reserve it. */
+function bossBlockHeight(ctx: CanvasRenderingContext2D, name: string): number {
+  const lines = bossNameLines(name, CONTENT_W, canvasMeasure(ctx))
+  return BOSS_HEADING_H + BOSS_NAME_LINE_H * lines.length + BOSS_STAT_H + BOSS_BAR_ROW_H
+}
 
 function drawBossBlock(
   ctx: CanvasRenderingContext2D,
@@ -429,51 +457,48 @@ function drawBossBlock(
     baseline: 'top',
     color: Palette.textFaint,
   })
-  drawText(ctx, `PHASE ${phaseIndex + 1} / ${phases}`, right, top, {
+
+  let y = top + BOSS_HEADING_H
+  for (const line of bossNameLines(boss.name, CONTENT_W, canvasMeasure(ctx))) {
+    drawText(ctx, line, CONTENT_X, y, {
+      size: BOSS_NAME_SIZE,
+      weight: 700,
+      baseline: 'top',
+      color: Palette.hostileElite,
+    })
+    y += BOSS_NAME_LINE_H
+  }
+
+  drawText(ctx, `PHASE ${phaseIndex + 1} / ${phases}`, CONTENT_X, y, {
     size: 11,
     weight: 600,
-    align: 'right',
     baseline: 'top',
     color: Palette.textDim,
   })
-
   // Remaining hull, with its unit. A bar answers "how far through"; the number
   // answers "is my damage doing anything", and during a four-minute fight both are
-  // questions the player is actually asking.
-  const hp = `${Math.max(0, Math.round(enemy.hp))} hp`
-  const hpWidth = measureText(ctx, hp, { size: 11 })
-  // Right-ALIGNED, not merely positioned at the right edge. Drawn left-aligned from
-  // `right` it ran off the panel — caught by looking at a capture, and now caught by
-  // tests/render.test.ts, which measures a string's width instead of its anchor.
-  drawText(ctx, hp, right, top + 16, {
+  // questions the player is actually asking. Right-ALIGNED, not merely positioned at
+  // the right edge — drawn left-aligned from `right` it ran off the panel, which is
+  // now caught by a test that measures a string's width instead of its anchor.
+  drawText(ctx, `${Math.max(0, Math.round(enemy.hp))} hp`, right, y, {
     size: 11,
     align: 'right',
     baseline: 'top',
     color: Palette.textDim,
   })
-  // Size 12 rather than 13: at 13 the authored name "Sledge Auditor" clipped to
-  // "SLEDGE AUDIT…" once the hp readout took its share of the row, and a boss whose
-  // name you cannot read is a boss you cannot talk about. Weight and colour carry the
-  // prominence instead of size.
-  drawText(
-    ctx,
-    truncateToWidth(ctx, boss.name.toUpperCase(), CONTENT_W - hpWidth - 12, 12),
-    CONTENT_X,
-    top + 16,
-    { size: 12, weight: 700, tracking: 0.6, baseline: 'top', color: Palette.hostileElite },
-  )
+  y += BOSS_STAT_H
 
   drawBossHealthBar(ctx, {
     x: CONTENT_X,
-    y: top + 32,
+    y: y + BAR_CARET_H,
     w: CONTENT_W,
-    h: 9,
+    h: BOSS_BAR_H,
     thresholds: boss.thresholds,
     fraction: enemy.maxHp > 0 ? enemy.hp / enemy.maxHp : 0,
     phaseIndex,
   })
 
-  return top + BOSS_BLOCK_H
+  return y + BOSS_BAR_ROW_H
 }
 
 export interface PanelState {
@@ -665,7 +690,9 @@ export function drawPanel(
   const blocksBottom = logDivider - 8
 
   const boss = bossOf(view)
-  const bossReserve = boss ? BOSS_BLOCK_H + 10 : 0
+  // Measured, not a constant: the block is taller when a long boss name wraps, and a
+  // fixed reserve would let the hazard block above it claim space the name needs.
+  const bossReserve = boss?.boss ? bossBlockHeight(ctx, boss.boss.name) + 10 : 0
 
   const hazards = hazardsOf(view)
   if (hazards.length > 0) {

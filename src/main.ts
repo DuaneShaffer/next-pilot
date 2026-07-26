@@ -19,6 +19,14 @@ import { BOSSES } from './content/bosses'
 import { HAZARDS } from './content/hazards'
 import { HULLS, LIEN_ID } from './content/hulls'
 import { STANDARD_RUN } from './content/runs'
+import { Rng } from './core/rng'
+import {
+  HULL_OFFER_STREAM,
+  drawHullSelect,
+  moveHullSelection,
+  offerHulls,
+  shouldShowHullSelect,
+} from './ui/hullSelect'
 import { createAudioDirector } from './audio'
 import { adoptLegacySave, loadSave, persistSave, type Save, type Settings } from './meta/save'
 import { Viewport } from './render/layout'
@@ -69,6 +77,7 @@ const VERSION = 'v0.2.0 · m2'
 
 type Screen =
   | 'title'
+  | 'hull-select'
   | 'sortie'
   | 'paused'
   | 'incident'
@@ -130,10 +139,23 @@ function readUrlOptions(fallbackSeed: string): UrlOptions {
     ? Math.max(1, Math.min(MAX_FAST_FORWARD, Math.floor(rawFf)))
     : 1
 
+  /**
+   * Screens the URL may jump straight to.
+   *
+   * Deliberately a whitelist rather than a cast: `?screen=` is reachable from a
+   * shared link, and a screen the app cannot render from a cold start would leave a
+   * black page. `hull-select` is here so the capture harness can photograph it —
+   * without a URL route it is reachable only through a sortie launch, which is a
+   * screen nobody could ever review.
+   */
+  const rawScreen = params.get('screen')
+  const jumpable: readonly Screen[] = ['sortie', 'hull-select', 'hangar', 'personnel']
+  const requested = jumpable.find((name) => name === rawScreen)
+
   return {
     seed,
     // An autopilot with nothing to fly is pointless, so it implies a sortie.
-    screen: params.get('screen') === 'sortie' || autopilot ? 'sortie' : 'title',
+    screen: autopilot ? 'sortie' : (requested ?? 'title'),
     autopilot,
     fastForward,
     holdChoice: params.get('holdchoice') === '1',
@@ -199,6 +221,17 @@ function main(): void {
   let menuTick = 0
   let pauseSelection = 0
   let hangarSelection = 0
+  /** The hulls this sortie offers, drawn once from the run seed. */
+  let hullOffer: readonly string[] = []
+  let hullSelection = 0
+  /**
+   * The hull issued, kept as an id.
+   *
+   * Not derived from the display name. `fileCompletedRun` used to lower-case
+   * `panelState.hullName` to get an id, which was correct only because every hull was
+   * called "Lien" and every id was "lien".
+   */
+  let currentHullId: string = LIEN_ID
   let personnelSelection = 0
   let personnelScroll = 0
   /** Guards double-filing: the run-ended transition can be reached more than once. */
@@ -215,7 +248,7 @@ function main(): void {
    * sharing once it is over, and by then the inputs are gone. One byte per tick is
    * cheap enough that the alternative — asking first — is the wrong trade.
    */
-  let recorder = new ReplayRecorder(options.seed)
+  let recorder = new ReplayRecorder(options.seed, LIEN_ID)
 
   /**
    * How this run was started. Resolved once, from the URL and the save.
@@ -318,7 +351,7 @@ function main(): void {
       save.personnel,
       buildPersonnelRecord(world, {
         pilotNumber: save.pilotNumber,
-        hullId: panelState.hullName.toLowerCase(),
+        hullId: currentHullId,
         sectorId: world.sectorId,
         poolFingerprint: fingerprintPool(runPool),
       }),
@@ -353,36 +386,49 @@ function main(): void {
 
     seed = withSeed ?? generateSeed()
     runPool = poolFor(unlockedSet(save.certifications.unlocked))
-    /**
-     * KNOWN DEFECT, being fixed by a hull-selection screen. Left visible rather than
-     * papered over.
-     *
-     * The comment that used to sit here claimed this "at least means a certification
-     * that grants a hull changes what is flown". It does not, and the claim was wrong
-     * the moment it was written: `BASE_POOL.hulls` is `['lien']` and `poolFor` appends
-     * grants after the base, so index 0 is ALWAYS the Lien. Every hull grant is
-     * therefore inert and four shipped hulls are unreachable.
-     *
-     * docs/DESIGN.md specifies the real answer — three hulls offered per run, drawn
-     * from what has been certified, Lien always among them — and that is a screen, not
-     * an index. Rolling one at random here would be worse than the bug: it would take
-     * a decision the design gives to the player and hide it in a seed.
-     */
-    const hullId = runPool.hulls?.[0] ?? LIEN_ID
+
+    // Its own named stream off the run seed, so the same seed always offers the same
+    // hulls and adding this draw cannot shift any other roll in the run.
+    hullOffer = offerHulls(Rng.fromSeed(seed, HULL_OFFER_STREAM), runPool.hulls ?? [])
+    hullSelection = 0
+
+    // Skipped when the pool holds nothing but the Lien. A card whose only action is
+    // "continue" teaches the player that stopping is pointless — the mistake the
+    // unbuyable wave-8 shop and the inert work-order card both already made — and it
+    // would put a third input in the death-to-next-run path that UI.md rule 6 caps
+    // at two.
+    if (!shouldShowHullSelect(hullOffer)) {
+      launchSortie(hullOffer[0] ?? LIEN_ID)
+      return
+    }
+    screen = 'hull-select'
+    menuTick = 0
+    keyboard.clearPressed()
+  }
+
+  /**
+   * Build the run. Split out of `beginSortie` so a hull can be chosen in between.
+   */
+  function launchSortie(hullId: string): void {
+    currentHullId = Object.hasOwn(HULLS, hullId) ? hullId : LIEN_ID
     world = new World(seed, {
       ...content,
       workOrders: runPool.workOrders,
-      ...(HULLS[hullId] ? { hull: HULLS[hullId] } : {}),
+      ...(HULLS[currentHullId] ? { hull: HULLS[currentHullId] } : {}),
     })
     panelState.hullName = world.hullName
     sceneStars = new Starfield(seed)
     resetFeelState(feel)
-    recorder = new ReplayRecorder(seed)
+    // The hull is recorded WITH the run. A replay was seed + inputs, which was
+    // lossless only because every run flew a Lien; a Collateral run played back as a
+    // Lien fires 20 shots/second instead of 30 and diverges within a few ticks.
+    recorder = new ReplayRecorder(seed, currentHullId)
     runMode = { kind: 'free', seed, purist: false }
     filed = false
     newlyCertified = []
     screen = 'sortie'
     menuTick = 0
+    keyboard.clearPressed()
     loop.resetClock()
   }
 
@@ -579,6 +625,25 @@ function main(): void {
         return
       }
 
+      if (screen === 'hull-select') {
+        menuTick++
+        if (keyboard.consumePressed('up')) {
+          hullSelection = moveHullSelection(hullSelection, -1, hullOffer.length)
+        }
+        if (keyboard.consumePressed('down')) {
+          hullSelection = moveHullSelection(hullSelection, 1, hullOffer.length)
+        }
+        if (keyboard.consumePressed('confirm')) {
+          audio.confirm()
+          launchSortie(hullOffer[hullSelection] ?? LIEN_ID)
+        }
+        if (keyboard.consumePressed('cancel') || keyboard.consumePressed('pause')) {
+          audio.cancel()
+          screen = 'title'
+        }
+        return
+      }
+
       if (screen === 'hangar') {
         menuTick++
         if (keyboard.consumePressed('up')) {
@@ -668,6 +733,18 @@ function main(): void {
           selected: shareSelection,
           copied: copiedChoice,
           tick: menuTick,
+        })
+        return
+      }
+
+      if (screen === 'hull-select') {
+        drawHullSelect(ctx, {
+          offer: hullOffer,
+          selected: hullSelection,
+          tick: menuTick,
+          seed,
+          poolCount: runPool.hulls?.length ?? 0,
+          reduceFlashes: save.settings.reduceFlashes,
         })
         return
       }
@@ -909,6 +986,16 @@ function main(): void {
       },
     },
   })
+
+  /**
+   * A URL jumping straight to hull selection still has to go through `beginSortie`.
+   *
+   * The offer is drawn there, so setting the screen alone would render a selection
+   * card with nothing on it. If the pool holds only the Lien this launches a sortie
+   * instead — which is correct, and which the capture harness reports as a loud
+   * failure rather than photographing the wrong screen.
+   */
+  if (screen === 'hull-select') beginSortie(seed)
 
   let rafHandle = 0
   const frame = (nowMs: number): void => {

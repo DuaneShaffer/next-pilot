@@ -677,7 +677,18 @@ function buildContent(input: HullSelectLayoutInput, measure: Measure): readonly 
       baseline: def.id === LIEN_ID,
       comparison,
       mechanism: wrapText(def.mechanism, HULL_SELECT_TEXT_W, HULL_MECH_SIZE, measure),
-      net: comparison.net === null ? [] : wrapText(comparison.net, HULL_SELECT_TEXT_W, HULL_ROW_SIZE, measure),
+      // Wrapped against the width the LABEL leaves, not the full column: the first
+      // line is drawn offset by it, and wrapping to the full width would put that line
+      // through the card's right edge.
+      net:
+        comparison.net === null
+          ? []
+          : wrapText(
+              comparison.net,
+              HULL_SELECT_TEXT_W - (measure(HULL_NET_LABEL, HULL_LABEL_SIZE, 600, 1.4) + 10),
+              HULL_ROW_SIZE,
+              measure,
+            ),
       starting,
       flavour: def.flavour ? wrapText(def.flavour, HULL_SELECT_TEXT_W, HULL_SUB_SIZE, measure) : [],
       height: 0,

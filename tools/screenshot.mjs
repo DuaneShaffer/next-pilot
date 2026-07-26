@@ -29,12 +29,20 @@ const DIST = 'dist'
 const OUT_DIR = 'screenshots'
 /** Fixed seed so captures are comparable between runs. */
 const SEED = 'K7F29XQM3RTV'
-/** Whole-run ceiling. Generous for a slow machine, finite regardless. */
 /**
- * Whole-run ceiling. Raised from 120s as capture states were added — 24 shots across
- * two viewports, several of which wait on a late-run predicate.
+ * Whole-run ceiling. Generous for a slow machine, finite regardless.
+ *
+ * 120s -> 300s as capture states were added, then 300s -> 900s at M5. The reason is
+ * not "shots got added": a run is now FIFTEEN MINUTES of simulation rather than
+ * three, and the late captures (a sector-four hazard, a boss's second phase) have to
+ * fast-forward most of it. At 300s the harness was killed part-way through the
+ * small-viewport pass, which is silent data loss dressed as a timeout — the desktop
+ * images looked complete and half the layout-breakage checks simply never ran.
+ *
+ * A watchdog that fires during normal operation stops being a safety net and becomes
+ * a source of flaky, partial results, which is worse than no watchdog at all.
  */
-const WATCHDOG_MS = 300_000
+const WATCHDOG_MS = 900_000
 const PAGE_TIMEOUT_MS = 15_000
 /** Per-shot ceiling for a waitFor predicate. Fast-forwarded runs are quick. */
 const WAIT_FOR_TIMEOUT_MS = 45_000
@@ -198,6 +206,17 @@ const SHOTS = [
     name: 'boss-phase-two',
     url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=24`,
     waitFor: 'bossPhase >= 1',
+    holdMs: 0,
+  },
+  {
+    // Hull selection. Only appears once a certification has widened the pool past
+    // the Lien, which is why it sits AFTER the shots that file runs — the browser
+    // context carries localStorage forward, so by here the save has certifications.
+    // If the pool is still Lien-only the run launches instead and this fails loudly,
+    // which is the honest outcome rather than a picture of the wrong screen.
+    name: 'hull-select',
+    url: `/?seed=${SEED}&screen=hull-select`,
+    waitFor: 'screen === "hull-select"',
     holdMs: 0,
   },
   {

@@ -383,6 +383,10 @@ function forgeReplay(options: {
   /** Simulation version byte. Defaults to this build's, like a real recording. */
   simVersion?: number
   seed?: string
+  /** Hull id. Defaults to empty — "this run did not choose a hull". */
+  hullId?: string
+  /** Overrides the hull length byte without changing the bytes that follow it. */
+  hullLength?: number
   tickCount?: number
   runs?: ReadonlyArray<[number, number]>
   breakChecksum?: boolean
@@ -392,6 +396,7 @@ function forgeReplay(options: {
   const version = options.version ?? REPLAY_FORMAT_VERSION
   const simVersion = options.simVersion ?? SIM_VERSION
   const seed = options.seed ?? 'ABCD'
+  const hullId = options.hullId ?? ''
   const runs = options.runs ?? [[packInput(NEUTRAL_INPUT), 4]]
   const tickCount = options.tickCount ?? runs.reduce((sum, [, count]) => sum + count, 0)
 
@@ -399,6 +404,10 @@ function forgeReplay(options: {
   // lets a future build refuse a replay rather than play it back wrong.
   const bytes: number[] = [...magic, version, simVersion, seed.length]
   for (let i = 0; i < seed.length; i++) bytes.push(seed.charCodeAt(i))
+  // The hull id, added at format 3. A length byte then that many printable bytes,
+  // so a zero here is a complete and legal field rather than an absent one.
+  bytes.push(options.hullLength ?? hullId.length)
+  for (let i = 0; i < hullId.length; i++) bytes.push(hullId.charCodeAt(i))
   const varint = (value: number): void => {
     let v = value
     while (v >= 0x80) {
@@ -603,6 +612,7 @@ describe('replay format versioning', () => {
     const wrong: Replay = {
       version: 99,
       simVersion: SIM_VERSION,
+      hullId: '',
       seed: 'ABCD',
       inputs: new Uint8Array([0b0101]),
     }

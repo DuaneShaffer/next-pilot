@@ -56,7 +56,18 @@ export const STATS: Readonly<Record<StatKey, StatSpec>> = {
   scrapMultiplier: { base: 1, min: 0, max: 20 },
   pickupRadius: { base: 34, min: 8, max: 260 },
   /** Focus speed multiplier. Above 1 would make focusing *faster*, so it is capped. */
-  focusFactor: { base: 0.45, min: 0.1, max: 1 },
+  /**
+   * `lowerIsBetter`, and it was missing.
+   *
+   * Focus multiplies hull speed while held, so a *smaller* factor is a *tighter*
+   * hold — which is the entire point of the key. Without the flag, any screen that
+   * signs a delta from this table would tell the player that a hull raising their
+   * focus factor had improved it. Nothing moves this stat today, so nothing is wrong
+   * on screen right now; the first item or hull that touches it would have shipped a
+   * green plus sign on a drawback. Found by the hull-selection screen, which is the
+   * first consumer to sign deltas from this table at all.
+   */
+  focusFactor: { base: 0.45, min: 0.1, max: 1, lowerIsBetter: true },
 }
 
 export const STAT_KEYS = Object.keys(STATS) as readonly StatKey[]
