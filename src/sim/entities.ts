@@ -338,8 +338,22 @@ export interface WorldView {
   /** Which leg of the run is being flown. Never a planned figure — see StageView. */
   readonly stage: StageView
 
-  /** The hull this run was issued, by name. */
+  /** The hull this run was issued, by name. Display copy — see `hullId` to compare. */
   readonly hullName: string
+  /**
+   * The hull's id, for anything that needs to *compare* rather than display.
+   *
+   * Added because `playback`'s hull guard was comparing `Replay.hullId` — an id —
+   * against `hullName`, a display name, and passing only by coincidence: all five
+   * shipped hulls happen to be named their id capitalised. The first hull that broke
+   * that convention got a **correct** playback refused with `bad-hull`, which is worse
+   * than the hole the guard plugs: the recipient of a good share link is told their run
+   * cannot be played.
+   *
+   * Not hashed. It is one-to-one with `hullName`, which the digest already separates
+   * hulls by, so hashing both would widen the digest for no new information.
+   */
+  readonly hullId: string
 
   /**
    * The live boss, or null.

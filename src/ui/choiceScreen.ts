@@ -154,7 +154,13 @@ const BUILD_PAD_BOTTOM = 6
 const BUILD_CHIP_LINES = 2
 const BUILD_SYN_LINES = 2
 
-const CHIP_SEP = '   ·   '
+/**
+ * Separator between held-item chips.
+ *
+ * Exported so the packing test can split a line back into names with the real
+ * separator instead of a copy of it — the count it checks is derived from that split.
+ */
+export const CHIP_SEP = '   ·   '
 
 // ---------------------------------------------------------------------------
 // pure helpers
@@ -542,8 +548,15 @@ function buildOptionContent(
 /**
  * Pack held-item chips into at most `maxLines` lines, ending with an overflow
  * count rather than silently dropping the tail.
+ *
+ * THE INVARIANT, which is the whole reason this function exists rather than a slice:
+ * the names it emits plus the number in its `+N more` must equal the number of chips
+ * it was given. Anything else contradicts the "N systems fitted" summary drawn on the
+ * same strip, and a build readout that disagrees with itself is worse than one that
+ * says less. Exported so `tests/choiceScreen.test.ts` can sweep that equality across
+ * item counts and name lengths rather than sample it.
  */
-function packChips(
+export function packChips(
   chips: readonly string[],
   maxWidth: number,
   maxLines: number,
@@ -568,18 +581,29 @@ function packChips(
     placed++
   }
 
-  const remaining = chips.length - placed
-  if (remaining > 0) {
-    const tail = `${CHIP_SEP}+${remaining} more`
+  if (placed < chips.length) {
     // The overflow marker has to fit on the last line, so the last chip gives way
     // to it rather than the count being dropped — an undercount of the build is
     // worse than one fewer name.
-    while (line.length > 0 && measure(`${line}${tail}`, size, 400) > maxWidth) {
+    //
+    // COUNTED INSIDE THE TRIM, because the trim is what changes the number. The
+    // marker used to be numbered from `placed` before this loop ran, so each chip it
+    // dropped went missing from both the line and the count: 5 names and `+1 more`
+    // beside a summary reading 7 fitted — the exact undercount the paragraph above
+    // says cannot happen. Re-deriving the tail each pass also keeps the measurement
+    // honest, since `+9 more` and `+10 more` are not the same width.
+    let hidden = chips.length - placed
+    let tail = `${CHIP_SEP}+${hidden} more`
+    while (line !== '' && measure(`${line}${tail}`, size, 400) > maxWidth) {
       const cut = line.lastIndexOf(CHIP_SEP)
-      if (cut < 0) break
-      line = line.slice(0, cut)
+      // No separator left means one chip that still will not share its line with the
+      // marker. It goes too — dropping it into the count keeps the total right, where
+      // leaving it drew the marker past the edge of the strip.
+      line = cut < 0 ? '' : line.slice(0, cut)
+      hidden++
+      tail = `${CHIP_SEP}+${hidden} more`
     }
-    line = line.length > 0 ? `${line}${tail}` : `+${remaining} more`
+    line = line === '' ? `+${hidden} more` : `${line}${tail}`
   }
   if (line !== '') lines.push(line)
   return lines

@@ -16,7 +16,7 @@
  * ---------------------------------------------------------------------------
  * THIS FILE HAS ITS OWN TESTS, and the reason is the whole point of R10.
  *
- * Three of contract 2's rules were unenforced for months while `npm run contracts`
+ * Three of contract 2's rules were not enforced at all while `npm run contracts`
  * printed "Contracts OK": `src/audio` was missing from the forbidden-import list
  * even though `src/audio/index.ts` tells its reader this checker forbids it, the
  * DOM/clock patterns were never applied to the `src/core/**` files the sim
@@ -370,6 +370,11 @@ async function importClosure(seeds) {
           // most of the way to a check nobody runs.
           continue
         }
+        // A dynamic `import()` or `require()` binds whatever it likes at runtime —
+        // `const { Keyboard } = await import('../core/input')` names nothing a
+        // static clause can see — so treat it like a namespace import and hold the
+        // whole target to the strict rule.
+        if (/^(?:import|require)\s*\(/.test(match[0])) importedNames.set(display(target), '*')
         queue.push(target)
       }
     }

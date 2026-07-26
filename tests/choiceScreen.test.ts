@@ -16,13 +16,16 @@ import { ITEMS } from '../src/content/items'
 import type { ItemDef } from '../src/content/types'
 import type { ActiveInteraction, HeldItem, ItemOffer, PendingChoiceKind } from '../src/sim/entities'
 import {
+  CHIP_SEP,
   MONO_ADVANCE,
+  OPTION_TEXT_W,
   WORK_ORDERS,
   clampSelection,
   isAffordable,
   layoutChoiceScreen,
   lineBounds,
   monoMeasure,
+  packChips,
   truncateToWidth,
   wrapText,
   type ChoiceLayoutInput,
@@ -258,8 +261,104 @@ describe('the build is visible while choosing', () => {
     }))
     const result = layout({ held: inventory })
     const text = result.build.lines.map((line) => line.text).join(' ')
-    expect(text).toMatch(/\+\d+ more/)
     expect(text).toContain(`${ITEM_IDS.length} systems fitted`)
+    // THE COUNT ITSELF, not merely the shape of it. `/\+\d+ more/` matched the shipped
+    // defect perfectly: the strip listed 7 names and said "+31 more" against a summary
+    // of 40 fitted, because the marker was numbered before the trim that dropped a
+    // whole chip to make room for it. A regex that accepts any digits is not an
+    // assertion about a count.
+    const shown = namesOnChipLines(result)
+    const hidden = overflowCount(result)
+    expect(hidden).toBeGreaterThan(0)
+    expect(shown.length + hidden).toBe(ITEM_IDS.length)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// the build strip's overflow count
+// ---------------------------------------------------------------------------
+
+/** Every chip name the build strip drew, taken apart with the real separator. */
+function namesOnChipLines(result: ChoiceScreenLayout): string[] {
+  return result.build.lines
+    .map((line) => line.text)
+    // The chip lines are the ones that are neither the heading, the right-aligned
+    // summary, nor a synergy row.
+    .filter((text) => !/systems? fitted/.test(text) && text !== 'CURRENT BUILD' && !text.startsWith('[+]'))
+    .flatMap((text) => text.split(CHIP_SEP))
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0 && !/^\+\d+ more$/.test(name))
+}
+
+function overflowCount(result: ChoiceScreenLayout): number {
+  const match = /\+(\d+) more/.exec(result.build.lines.map((line) => line.text).join(' '))
+  return match?.[1] === undefined ? 0 : Number(match[1])
+}
+
+describe('names shown plus the overflow count equals the build', () => {
+  /**
+   * The property, swept rather than sampled.
+   *
+   * `packChips` numbered its marker from how many chips it had placed, then trimmed
+   * whole chips off the last line to make room for the marker and never put them back.
+   * One name always went missing, so the strip could read `5 names · +1 more` beside a
+   * summary saying 7 — and the comment above the trim claims the opposite, that a name
+   * gives way rather than the count being wrong.
+   *
+   * Swept across both axes that decide where the trim lands: how many chips there are,
+   * and how wide each one is.
+   */
+  it('holds for every chip count and name length', () => {
+    const WIDTH = OPTION_TEXT_W
+    for (const nameLength of [3, 7, 11, 14, 18, 23, 31, 47]) {
+      for (let count = 1; count <= 24; count++) {
+        // Distinct names, all the same width, so a dropped chip is unambiguous.
+        const chips = Array.from(
+          { length: count },
+          (_, index) => `${String(index).padStart(2, '0')}${'x'.repeat(Math.max(1, nameLength - 2))}`,
+        )
+        const lines = packChips(chips, WIDTH, 2, 12, monoMeasure)
+        const joined = lines.join(CHIP_SEP)
+        const marker = /\+(\d+) more/.exec(joined)
+        const hidden = marker?.[1] === undefined ? 0 : Number(marker[1])
+        const shown = joined
+          .split(CHIP_SEP)
+          .map((part) => part.trim())
+          .filter((part) => part.length > 0 && !/^\+\d+ more$/.test(part))
+
+        const where = `${count} chips of ${nameLength} chars`
+        expect(shown.length + hidden, `${where}: shown ${shown.length} + ${hidden}`).toBe(count)
+        // Every name that IS shown must be whole — a truncated chip would satisfy the
+        // arithmetic while lying about what is fitted.
+        for (const name of shown) expect(chips, `${where}: "${name}" is not a chip`).toContain(name)
+        expect(lines.length, `${where}: too many lines`).toBeLessThanOrEqual(2)
+      }
+    }
+  })
+
+  it('keeps every packed line inside the width it was given', () => {
+    // The trim exists to make the marker fit; it must actually fit afterwards.
+    for (const width of [90, 140, 200, OPTION_TEXT_W]) {
+      const chips = Array.from({ length: 12 }, (_, i) => `System ${'y'.repeat(i)}`)
+      for (const line of packChips(chips, width, 2, 12, monoMeasure)) {
+        expect(monoMeasure(line, 12, 400), `"${line}" overflows ${width}`).toBeLessThanOrEqual(width)
+      }
+    }
+  })
+
+  it('reports the whole build when not one name fits', () => {
+    // One line, one chip too wide for it: the names are gone, so the count is all the
+    // player gets and it must be the true total.
+    const chips = ['A very long system name indeed', 'Another', 'A third']
+    const lines = packChips(chips, 60, 1, 12, monoMeasure)
+    expect(lines.join(' ')).toContain('+3 more')
+  })
+
+  it('says nothing about overflow when everything fits', () => {
+    const chips = ['One', 'Two', 'Three']
+    const lines = packChips(chips, OPTION_TEXT_W, 2, 12, monoMeasure)
+    expect(lines.join(' ')).not.toMatch(/more/)
+    expect(lines.join(CHIP_SEP).split(CHIP_SEP)).toEqual(chips)
   })
 })
 

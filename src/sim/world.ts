@@ -508,6 +508,11 @@ export class World implements WorldView {
     return this.hullDef?.name ?? 'Lien'
   }
 
+  /** The hull's id. What a replay records, and what a guard should compare. */
+  get hullId(): string {
+    return this.hullDef?.id ?? 'lien'
+  }
+
   get boss(): EnemyInstance | null {
     return this.bossRef
   }

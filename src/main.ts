@@ -1002,6 +1002,12 @@ function main(): void {
       // and a stale copy is precisely the HUD-lies-about-the-weapon bug again.
       panelState.fireRate = world.shotsPerSecond
       panelState.reduceFlashes = save.settings.reduceFlashes
+      // The HUD names the kind of run. `describeRunMode` was documented as "what the
+      // HUD says about this run" and only the share card had ever called it, so a daily
+      // contract looked pixel-identical to a free run — and a *replay* looked identical
+      // to a live one, which is worse: input is coming from the log, so a player who
+      // does not know that concludes the game has stopped responding.
+      panelState.runMode = runMode
       // Stage identity is refreshed here too, for exactly the same reason. It changes
       // mid-run now, and a copy taken at launch would tell a pilot in sector four
       // that they are in sector one — which is the bug a tester already reported.

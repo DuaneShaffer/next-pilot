@@ -191,7 +191,7 @@ function play(policy: BotPolicy, seed: string, content?: RunContent, maxTicks = 
     // A frozen tick never reaches `updateChoice`, so the sim's counter stands still
     // and a stall would read as a swap. No card can resolve on a frozen tick either,
     // so there is nothing to detect on one.
-    const chained =
+    const chained: boolean =
       pending !== null && open !== null && !frozen && openTicks !== null && openTicks <= lastOpenTicks
     if (open !== null && (pending === null || chained)) {
       record(open)
@@ -575,6 +575,13 @@ describe('policies resolve the world map', () => {
     // The integration check behind the unit tests above: a policy that cannot resolve
     // a route card does not crash, it silently caps the run at the first seam, and
     // every per-sector number a sweep produces afterwards is garbage.
+    //
+    // THE ASSERTION IN HERE USED TO BE VACUOUS. It read
+    // `expect(pendingChoice === null || ticks < FIVE_SECTOR_TICKS).toBe(true)`, whose
+    // second clause is the loop condition — it could not fail, and it is why R1's
+    // 1,201-tick stalls crossed this test untouched. What it was reaching for is the
+    // longest any single card stayed open, which is measured here instead.
+    let seams = 0
     for (const name of BOT_NAMES) {
       const seed = 'SEAMS1234567'
       const world = new World(seed, FIVE_SECTOR_CONTENT)
@@ -582,20 +589,77 @@ describe('policies resolve the world map', () => {
       const policy = BOTS[name].create(seed)
       let ticks = 0
       let routeCards = 0
-      let sawRoute = false
+      let cardOpenFor = 0
+      let longestCard = 0
       while (view.runState === 'active' && ticks < FIVE_SECTOR_TICKS) {
+        const wasRoute = view.pendingChoice?.kind === 'route'
         world.tick(policy(view))
         ticks++
-        const open = view.pendingChoice?.kind === 'route'
-        if (open && !sawRoute) routeCards++
-        sawRoute = open
-        // A route card resolved by the sim's 60-second backstop rather than by the
-        // policy is the failure this catches, and it looks like a long run, not a
-        // stuck one.
-        expect(view.pendingChoice === null || ticks < FIVE_SECTOR_TICKS).toBe(true)
+        if (view.pendingChoice === null) {
+          cardOpenFor = 0
+        } else {
+          cardOpenFor++
+          if (cardOpenFor > longestCard) longestCard = cardOpenFor
+          if (view.pendingChoice.kind === 'route' && !wasRoute) routeCards++
+        }
       }
       expect(view.runState, `${name} was still active at the cap`).not.toBe('active')
+      // A card resolved by the sim's 20-second backstop rather than by the policy is
+      // the failure this catches, and it looks like a long run, not a stuck one. The
+      // bound is deliberately far below `CHOICE_TIMEOUT_TICKS`: hitstop can add a few
+      // ticks to a card, a timeout adds 1,200.
+      expect(
+        longestCard,
+        `${name} sat on one card for ${longestCard} ticks — a card was resolved by the sim, not by the policy`,
+      ).toBeLessThan(CHOICE_TIMEOUT_TICKS / 10)
+      seams += routeCards
     }
+    // Without this the test above is a test about five runs that died in sector one.
+    // `routeCards` was already being counted here and never asserted on.
+    expect(seams, 'no policy reached a single seam, so nothing above was exercised').toBeGreaterThan(0)
+  })
+
+  it('resolves the transit cards a seam chains, and does not resolve them by mashing 0', () => {
+    /**
+     * THE INTEGRATION FORM OF R1, on the real run.
+     *
+     * A seam opens route -> (transit item, if the route paid one) -> transit shop, and
+     * every card after the first opens in the tick its predecessor closed. Two things
+     * are asserted, and the second is the one that was broken for the whole of M5:
+     *
+     *   1. no card is resolved by the sim's backstop (the 1,201-tick stall), and
+     *   2. the cursor gets navigated on chained cards — a resolver that has lost track
+     *      of the card confirms index 0 forever, which looks like a preference.
+     *
+     * Seeds are fixed and taken from the sweep's own derivation so the run reaches
+     * seams at all; `aggressor` and `build-focused` are the two policies that get deep
+     * enough often enough to make this cheap.
+     */
+    let chained = 0
+    let chainedNotIndexZero = 0
+    for (const name of ['aggressor', 'build-focused'] as BotName[]) {
+      for (const seed of ['Q228D934D5A8', 'Q428DC5AEJ8Q']) {
+        const run = play(BOTS[name].create(seed), seed, FIVE_SECTOR_CONTENT, FIVE_SECTOR_TICKS)
+        for (const choice of run.choices) {
+          const scriptTicks = choice.ticksOpen - choice.frozenTicks
+          expect(
+            scriptTicks,
+            `${name} spent ${scriptTicks} unfrozen ticks on a ${choice.chained ? 'chained ' : ''}${choice.kind}`,
+          ).toBeLessThanOrEqual(MAX_CHOICE_RESOLUTION_TICKS)
+          if (!choice.chained) continue
+          chained++
+          // Two ticks is `scriptFor(0, …)`: one release, one act. Anything longer is a
+          // navigation press, which is only possible if `select` was consulted for
+          // THIS card rather than inherited from the previous one.
+          if (scriptTicks > 2) chainedNotIndexZero++
+        }
+      }
+    }
+    expect(chained, 'no card chained in any of these runs, so this test proves nothing').toBeGreaterThan(4)
+    expect(
+      chainedNotIndexZero,
+      'every chained card was resolved on option 0 — the policy is not being consulted at a seam',
+    ).toBeGreaterThan(0)
   })
 
   it('accepting a hazard is a real behavioural difference, not a label', () => {
@@ -849,6 +913,7 @@ function fakeView(choice: PendingChoice | null, overrides: Partial<WorldView> = 
     // fixture should say instead of inheriting a silent placeholder.
     stage: { index: 0, count: 1, sectorId: 'debris-shelf', sectorName: 'Debris Shelf', bossName: null },
     hullName: 'Lien',
+    hullId: 'lien',
     boss: null,
     hazards: [],
     hull: fakeHull(),

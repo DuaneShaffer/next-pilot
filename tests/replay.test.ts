@@ -19,6 +19,12 @@ import type { BotName } from '../src/sim/bots'
 import { BOTS, BOT_NAMES } from '../src/sim/bots'
 import { World } from '../src/sim/world'
 import { HULLS } from '../src/content/hulls'
+import {
+  EFFECT_ITEM_IDS,
+  PROBE_HULL,
+  PROBE_INTERACTIONS,
+  PROBE_ITEMS,
+} from './replays/content'
 import { diffDigests, digestWorld, Hasher, hashWorld } from '../src/meta/snapshot'
 import {
   checkReplayCompatibility,
@@ -155,6 +161,7 @@ function worldView(overrides: Partial<WorldView> = {}): WorldView {
     // fixture should say instead of inheriting a silent placeholder.
     stage: { index: 0, count: 1, sectorId: 'debris-shelf', sectorName: 'Debris Shelf', bossName: null },
     hullName: 'Lien',
+    hullId: 'lien',
     boss: null,
     hazards: [],
     choiceResolve: null,
@@ -770,8 +777,15 @@ describe('the hull is part of the recorded run', () => {
     expect((thrown as ReplayError).reason).toBe('bad-hull')
     // The message has to name both ships, or the reader cannot tell which side is
     // wrong — the link, or the code that opened it.
-    expect((thrown as ReplayError).message).toContain('collateral')
-    expect((thrown as ReplayError).message).toContain('Lien')
+    //
+    // Case-insensitively, and that is the point rather than laziness: the guard now
+    // compares `WorldView.hullId` to `Replay.hullId` — id to id — rather than an id
+    // against a display name, which it did before and which passed only because every
+    // shipped hull happens to be named its id capitalised. So the message reports
+    // whichever the world gave it. What must not regress is that BOTH appear.
+    const message = (thrown as ReplayError).message.toLowerCase()
+    expect(message).toContain('collateral')
+    expect(message).toContain('lien')
   })
 
   it('plays when the caller honours the hull the replay names', () => {
@@ -793,6 +807,32 @@ describe('the hull is part of the recorded run', () => {
     expect(() =>
       playback(replay, (seed) => new World(seed, { items: {}, interactions: [], hull: HULLS['collateral'] as never })),
     ).not.toThrow()
+  })
+
+  it('keeps every hull name recognisable from its id', () => {
+    /**
+     * A CONVENTION THE GUARD DEPENDS ON, so it is asserted rather than hoped for.
+     *
+     * `playback` compares `replay.hullId` (an id) against `TickableWorld.hullName` (a
+     * display name), because `World` exposes no id at all. It folds both through
+     * `hullKey` — lowercase, separators stripped — so `probe-hull` and `Probe Hull`
+     * match. Every shipped hull currently satisfies that, and it took a fabricated
+     * hull named `Probe` with the id `probe-hull` to discover the check had been
+     * passing on all five by coincidence and would refuse a perfectly good replay.
+     *
+     * A hull whose display name is not its id in disguise — `writ` shown as "The
+     * Writ" — would be refused today. The real fix is a `hullId` on `WorldView` so
+     * this compares id to id; until then this test is what stops the convention being
+     * broken silently by an authoring choice that looks purely cosmetic.
+     */
+    const key = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]/g, '')
+    for (const hull of Object.values(HULLS)) {
+      expect(
+        key(hull.name),
+        `hull "${hull.id}" is displayed as "${hull.name}", which playback cannot match to its id`,
+      ).toBe(key(hull.id))
+    }
+    expect(key(PROBE_HULL.name)).toBe(key(PROBE_HULL.id))
   })
 
   it('says nothing when either side does not know its hull', () => {
@@ -990,6 +1030,20 @@ describe('bot policies', () => {
 // the regression corpus
 // ---------------------------------------------------------------------------
 
+/**
+ * Which content a fixture was recorded against.
+ *
+ * `'empty'` is the historical default and stays the default when the field is absent,
+ * because `tools/playtest.ts --record-fixture` writes fixtures without it and must
+ * keep working. Those are the no-items baselines.
+ *
+ * `'effect-bus'` means the frozen fabricated table in `tests/replays/content.ts`. The
+ * whole corpus was `'empty'` until M5 exit, which meant it had never exercised an
+ * item, an interaction, or a single `EffectKind` — see that file's header for the
+ * bugs that hid there.
+ */
+type FixtureContent = 'empty' | 'effect-bus'
+
 interface Fixture {
   file: string
   fixtureVersion: number
@@ -997,7 +1051,17 @@ interface Fixture {
   policy: string
   seed: string
   ticks: number
+  /** Absent means `'empty'`, so playtest-written fixtures load unchanged. */
+  content?: FixtureContent
   replay: string
+  /** Present only on an item-bearing fixture: what it held and what that exercised. */
+  build?: {
+    hullId: string
+    items: ReadonlyArray<{ id: string; count: number }>
+    interactions: readonly string[]
+    effectsExercised: readonly string[]
+    effectsNotExercised: readonly string[]
+  }
   expected: {
     runState: string
     hash: string
@@ -1005,6 +1069,28 @@ interface Fixture {
     counts: Record<string, number>
     stats: Record<string, number>
   }
+}
+
+/**
+ * Build the world a fixture declares.
+ *
+ * ONE PLACE, shared by every corpus assertion below, because a fixture replayed
+ * against different content than it was recorded against does not reproduce — and the
+ * failure looks exactly like a simulation regression. `hullId` comes from the replay
+ * rather than from the fixture JSON, so the payload is what decides, which is the
+ * whole point of the field existing.
+ */
+function worldForFixture(fixture: Fixture, seed: string, hullId: string): World {
+  if ((fixture.content ?? 'empty') === 'empty') {
+    // The baselines. `new World(seed)` is exactly how they were recorded.
+    return new World(seed)
+  }
+  const hull = hullId === PROBE_HULL.id ? PROBE_HULL : undefined
+  return new World(seed, {
+    items: PROBE_ITEMS,
+    interactions: PROBE_INTERACTIONS,
+    ...(hull ? { hull } : {}),
+  })
 }
 
 const FIXTURE_DIR = fileURLToPath(new URL('./replays', import.meta.url))
@@ -1051,7 +1137,7 @@ describe('recorded run regression', () => {
     expect(replay.seed).toBe(fixture.seed)
     expect(replay.inputs.length).toBe(fixture.ticks)
 
-    const { world } = playback(replay, (seed) => new World(seed))
+    const { world } = playback(replay, (seed, hullId) => worldForFixture(fixture, seed, hullId))
     const view: WorldView = world
     const digest = digestWorld(view)
 
@@ -1074,10 +1160,101 @@ describe('recorded run regression', () => {
     expect(decodeReplay(fixture.replay).simVersion).toBe(SIM_VERSION)
   })
 
+  it('covers both an empty item pool and a live one', () => {
+    // The corpus was ENTIRELY `'empty'` until M5 exit, which meant 40 items, 28
+    // interactions and every EffectKind had never appeared in a recorded run. Two
+    // bugs found in one day sat in that gap. Keeping both modes is what makes a
+    // divergence localisable: red in the effect-bus fixture but green in the three
+    // baselines points at the bus, and red in all four points at the sim underneath.
+    const modes = new Set(fixtures.map((f) => f.content ?? 'empty'))
+    expect(modes.has('empty'), 'the no-items baselines are gone').toBe(true)
+    expect(modes.has('effect-bus'), 'nothing in the corpus exercises an item').toBe(true)
+  })
+
+  it('covers a run that came home as well as runs that did not', () => {
+    // All three baselines end `lost`, so until the item fixture landed the corpus had
+    // never replayed an extraction — the stage-clear path, and a `run` component with
+    // no incident in it.
+    const outcomes = new Set(fixtures.map((f) => f.expected.runState))
+    expect(outcomes.has('lost')).toBe(true)
+    expect(outcomes.has('extracted')).toBe(true)
+  })
+
+  const effectFixtures = fixtures.filter((f) => f.content === 'effect-bus')
+
+  /**
+   * EVERY EFFECT THE ITEM FIXTURE CLAIMS TO COVER, PROVED BY REMOVING IT.
+   *
+   * Replay the identical input log against a hull whose starting kit omits one item.
+   * If what happened is unchanged, that effect never fired and the fixture's coverage
+   * claim would be a lie. This is also a live guard against an effect going inert: the
+   * `fireRateWindow` bug where the window ticked down from zero forever, and the
+   * `scrapMultiplier` that had no consumer, are both exactly this shape.
+   *
+   * COMPARES CONSEQUENCES, NOT THE WHOLE HASH. `inventory` is inside the `run`
+   * component, so removing an item moves the aggregate hash whether or not its effect
+   * ever ran — measured that way every policy scored a perfect 7/7, including one that
+   * took zero damage and so cannot have triggered retaliation.
+   */
+  function consequences(fixture: Fixture, startingItems: readonly string[]): string {
+    const replay = decodeReplay(fixture.replay)
+    const { world } = playback(replay, (seed) =>
+      new World(seed, {
+        items: PROBE_ITEMS,
+        interactions: PROBE_INTERACTIONS,
+        hull: { ...PROBE_HULL, startingItems },
+      }),
+    )
+    const view: WorldView = world
+    const d = digestWorld(view)
+    return [d.hull, d.playerBullets, d.enemyBullets, d.enemies, d.stats, view.runState].join('|')
+  }
+
+  it.each(effectFixtures)('$file exercises every EffectKind, provably', (fixture) => {
+    const all = PROBE_HULL.startingItems ?? []
+    const baseline = consequences(fixture, all)
+    for (const [id, kind] of EFFECT_ITEM_IDS) {
+      const without = all.filter((entry) => entry !== id)
+      expect(
+        consequences(fixture, without),
+        `removing ${id} changed nothing, so ${kind} never fired in this fixture`,
+      ).not.toBe(baseline)
+    }
+  })
+
+  it.each(effectFixtures)('$file records a build that matches what it replays', (fixture) => {
+    // The fixture states what it held so a reader can see what it covers without
+    // running anything. That statement has to stay true, or it becomes a comment.
+    const replay = decodeReplay(fixture.replay)
+    const { world } = playback(replay, (seed, hullId) => worldForFixture(fixture, seed, hullId))
+    const view: WorldView = world
+    const build = fixture.build
+    expect(build).toBeDefined()
+    if (!build) return
+
+    expect(replay.hullId).toBe(build.hullId)
+    expect(view.hullName).toBe(PROBE_HULL.name)
+    expect(view.inventory.map((i) => ({ id: i.defId, count: i.count }))).toEqual(build.items)
+    expect(view.activeInteractions.map((i) => i.defId)).toEqual(build.interactions)
+    // Interactions had never been live in a recorded run before this fixture.
+    expect(build.interactions.length).toBeGreaterThan(0)
+    expect([...build.effectsExercised].sort()).toEqual(EFFECT_ITEM_IDS.map(([, kind]) => kind).sort())
+    expect(build.effectsNotExercised).toEqual([])
+  })
+
+  it.each(effectFixtures)('$file refuses to replay in the wrong hull', (fixture) => {
+    // The fixture flies a hull, so the format-3 guard is load-bearing here rather than
+    // theoretical: a factory that ignores `replay.hullId` builds a Lien with no items
+    // and would diverge on the first volley.
+    const replay = decodeReplay(fixture.replay)
+    expect(() => playback(replay, (seed) => new World(seed))).toThrow(/bad-hull/)
+  })
+
   it.each(fixtures)('$file replays identically twice in a row', (fixture) => {
     const replay = decodeReplay(fixture.replay)
-    const once = hashWorld(playback(replay, (seed) => new World(seed)).world)
-    const twice = hashWorld(playback(replay, (seed) => new World(seed)).world)
+    const build = (seed: string, hullId: string): World => worldForFixture(fixture, seed, hullId)
+    const once = hashWorld(playback(replay, build).world)
+    const twice = hashWorld(playback(replay, build).world)
     expect(once).toBe(twice)
   })
 })

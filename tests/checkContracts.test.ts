@@ -244,6 +244,21 @@ describe('contract 2 — core, which is shared with the host', () => {
     expect(output).toContain("`Keyboard` is imported by the sim's closure")
   })
 
+  it('treats a dynamic import of a core module as reaching everything in it', () => {
+    // `const { Keyboard } = await import('../core/input')` binds a name no static
+    // clause can see, so the target has to be held to the strict rule.
+    const { code, output } = runChecker(
+      fixture(
+        withAppended(
+          'sim/world.ts',
+          `export const late = async () => (await import('../core/input')).Keyboard`,
+        ),
+      ),
+    )
+    expect(code).toBe(1)
+    expect(output).toContain('must not touch the DOM or any clock')
+  })
+
   it('stays quiet when the sim imports only a TYPE from a host-touching core file', () => {
     // Types are erased, so `import type { ... }` cannot carry host code into a
     // headless run. Flagging it would be the false positive that gets rules deleted.

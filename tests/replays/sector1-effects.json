@@ -1,0 +1,88 @@
+{
+  "fixtureVersion": 1,
+  "name": "sector1-effects",
+  "policy": "random",
+  "seed": "BUSC0VERAGE1",
+  "ticks": 11763,
+  "content": "effect-bus",
+  "note": "The item-bearing fixture — the rest of the corpus flies an empty item pool. Recorded against the FROZEN fabricated content in tests/replays/content.ts, not against src/content/items.ts; that file argues why. Replaying these inputs must reproduce expected.hash exactly.",
+  "replay": "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",
+  "build": {
+    "hullId": "probe-hull",
+    "items": [
+      {
+        "id": "probe-split",
+        "count": 3
+      },
+      {
+        "id": "probe-pierce",
+        "count": 1
+      },
+      {
+        "id": "probe-chain",
+        "count": 2
+      },
+      {
+        "id": "probe-overkill",
+        "count": 1
+      },
+      {
+        "id": "probe-window",
+        "count": 2
+      },
+      {
+        "id": "probe-coil",
+        "count": 1
+      },
+      {
+        "id": "probe-nanites",
+        "count": 1
+      }
+    ],
+    "interactions": [
+      "probe-through-and-through"
+    ],
+    "effectsExercised": [
+      "splitShot",
+      "pierce",
+      "chainOnHit",
+      "scrapOnOverkill",
+      "fireRateWindow",
+      "retaliate",
+      "repairOnKill"
+    ],
+    "effectsNotExercised": []
+  },
+  "expected": {
+    "runState": "extracted",
+    "hash": "e2970a1aa576858d",
+    "components": {
+      "hull": "a63d1c9aa9fa6e02",
+      "playerBullets": "015ff1148420207d",
+      "enemyBullets": "0578ab1b96fff663",
+      "enemies": "0578ab1b96fff663",
+      "stats": "f295800268669c16",
+      "run": "de5692b62cff0adf"
+    },
+    "cosmetic": "3439d76583d5b1ba",
+    "counts": {
+      "playerBullets": 70,
+      "enemyBullets": 0,
+      "enemies": 0,
+      "explosions": 0
+    },
+    "stats": {
+      "tick": 11763,
+      "waveIndex": 30,
+      "kills": 107,
+      "scrap": 393,
+      "shotsFired": 3101,
+      "hits": 902,
+      "damageTaken": 217
+    },
+    "incident": {
+      "causeKind": "none",
+      "causeEnemyId": null
+    }
+  }
+}

@@ -443,12 +443,17 @@ describe('one source of truth for shared settings', () => {
   })
 
   it('gives the two screens the same behaviour', () => {
-    const before = settings({ shake: 1 })
-    for (const id of ['shake', 'volume', 'mute', 'flashes'] as const) {
-      for (const delta of [-1, 1]) {
-        expect(adjustSetting(before, id, delta)).toEqual(adjustSettingValue(before, id, delta))
+    // The muted state is in the matrix deliberately: R7 was a disagreement between an
+    // adjustment and a display, and it was wrong on BOTH screens because they share
+    // these two functions. Parity has to be asserted where the bug lived.
+    for (const overrides of [{ shake: 1 }, { muted: true, masterVolume: 0.5 }, { muted: false }]) {
+      const before = settings(overrides)
+      for (const id of ['shake', 'volume', 'mute', 'flashes'] as const) {
+        for (const delta of [-1, 1]) {
+          expect(adjustSetting(before, id, delta)).toEqual(adjustSettingValue(before, id, delta))
+        }
+        expect(formatSettingValue(before, id)).toEqual(formatSettingDisplay(before, id))
       }
-      expect(formatSettingValue(before, id)).toEqual(formatSettingDisplay(before, id))
     }
   })
 

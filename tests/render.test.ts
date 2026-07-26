@@ -64,6 +64,8 @@ import {
 } from '../src/render/feel'
 import { drawHull, drawLowIntegrityRim, drawScene } from '../src/render/scene'
 import { drawPanel, type PanelState } from '../src/render/panel'
+import { formatSeed } from '../src/core/seed'
+import { describeRunMode, type RunMode } from '../src/meta/seedModes'
 import { PULSE_HZ, PULSE_RATE, pulse, REDUCED_FLASH_SCALE } from '../src/render/intensity'
 import { Palette } from '../src/render/palette'
 import { formatSeconds, type Measure } from '../src/render/text'
@@ -394,6 +396,7 @@ function worldFixture(overrides: Partial<WorldView> = {}): WorldView {
     freezeTicks: 0,
     stage: STAGE,
     hullName: 'Lien',
+    hullId: 'lien',
     boss: null,
     hazards: [],
     ...overrides,
@@ -1114,6 +1117,126 @@ describe('stage identity comes from the run', () => {
     const { ctx, calls } = makeStub()
     expect(() => drawPanel(ctx, broken, panelState())).not.toThrow()
     assertNoNaN(calls)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// the footer says what kind of run this is
+// ---------------------------------------------------------------------------
+
+/**
+ * A daily contract used to look pixel-identical to a free flight.
+ *
+ * `describeRunMode` is documented as "what the HUD says about this run" and the HUD
+ * never called it — the share card did. Every assertion here derives its expected
+ * string from that function rather than restating it, so a wording change there stays
+ * a wording change rather than a test failure, while an *invented* label in the panel
+ * is one.
+ */
+describe('the panel names the run mode', () => {
+  const SEED = 'K7F29XQM3RTV'
+
+  const DAILY: RunMode = {
+    kind: 'daily',
+    seed: SEED,
+    purist: true,
+    date: '2026-07-26',
+    isToday: true,
+    alreadyFlown: false,
+  }
+  const REPLAY: RunMode = {
+    kind: 'replay',
+    seed: SEED,
+    purist: false,
+    ofDaily: null,
+    // `version` is not read by anything under test; the fields that are read are the
+    // tick count and the recorded sim version.
+    replay: { version: 3, simVersion: 4, seed: SEED, hullId: 'lien', inputs: new Uint8Array(720) },
+  }
+  const FREE: RunMode = { kind: 'free', seed: SEED, purist: false }
+
+  const MODES: readonly RunMode[] = [
+    FREE,
+    { kind: 'shared', seed: SEED, purist: false },
+    { kind: 'shared', seed: SEED, purist: true },
+    DAILY,
+    { ...DAILY, date: '2026-07-25', isToday: false },
+    { ...DAILY, alreadyFlown: true },
+    REPLAY,
+    { ...REPLAY, ofDaily: '2026-07-26' },
+  ]
+
+  const drawn = (state: PanelState): string[] => {
+    const { ctx, calls } = makeStub()
+    drawPanel(ctx, worldFixture({ seed: SEED }), state)
+    const glyphs = calls.filter((c) => c.name === 'fillText').map((c) => String(c.args[0]))
+    // Joined both ways: a tracked string arrives one glyph per call, so only the
+    // unseparated form contains the word.
+    return [glyphs.join(' '), glyphs.join('')]
+  }
+
+  it('draws the label the run mode resolves to, for every kind of run', () => {
+    for (const mode of MODES) {
+      const label = describeRunMode(mode).label
+      const [spaced, joined] = drawn(panelState({ runMode: mode }))
+      expect(`${spaced} ${joined}`, `${mode.kind} run does not say "${label}"`).toContain(label)
+    }
+  })
+
+  it('tells a replay apart from a run the player is flying', () => {
+    // The case that matters most: input is coming from the log, and a player who has
+    // not been told reads that as a game that has stopped responding.
+    expect(describeRunMode(REPLAY).label).not.toBe(describeRunMode(FREE).label)
+    const [, joined] = drawn(panelState({ runMode: REPLAY }))
+    expect(joined).toContain(describeRunMode(REPLAY).label)
+    expect(joined).not.toContain(describeRunMode(FREE).label)
+  })
+
+  it('draws no badge at all when the caller does not know the mode', () => {
+    // Absent, not guessed: labelling an unknown run 'FREE FLIGHT' would be the panel
+    // asserting something it was never told.
+    const [, joined] = drawn(panelState())
+    for (const mode of MODES) expect(joined).not.toContain(describeRunMode(mode).label)
+    // The seed still is, though — rule 8 has no exceptions.
+    expect(joined).toContain(formatSeed(SEED))
+  })
+
+  it('keeps the seed on one line beside its label, at the panel’s real width', () => {
+    /**
+     * The badge is paid for by putting the seed row on one line, so this is the
+     * measurement that decision rests on — with the conservative 0.62-em estimate the
+     * other fit tests use, not the stub's 7-units-per-character, because the stub
+     * under-measures 13px text and this is exactly where that would hide.
+     */
+    const EM = 0.62
+    const label = 'SEED'.length * 12 * EM + ('SEED'.length - 1) * 1.4
+    const value = formatSeed(SEED).length * 13 * EM
+    const MIN_GAP = 10
+    expect(label + MIN_GAP + value).toBeLessThanOrEqual(Panel.contentW)
+  })
+
+  it('keeps the whole footer inside the canvas and inside the column', () => {
+    // The badge took the footer's spare room, so the bottom edge is the new risk. And
+    // rule 1 again for the x: the panel's sweep of that runs on a state with no run
+    // mode, so the badge's own ink would not otherwise be covered by it.
+    const { ctx, calls } = makeStub()
+    drawPanel(ctx, worldFixture({ seed: SEED }), panelState({ runMode: DAILY }))
+    assertNoNaN(calls)
+    for (const call of calls) {
+      if (call.name === 'fillText') {
+        const y = Number(call.args[2])
+        // Text is anchored from its top, so the deepest ink is the anchor plus a line.
+        expect(y + 14, `"${String(call.args[0])}" hangs off the bottom`).toBeLessThanOrEqual(
+          VIRTUAL_H,
+        )
+      }
+      for (const x of inkX(call)) {
+        expect(x, `${call.name} drew at x=${x}, inside the playfield`).toBeGreaterThanOrEqual(
+          PLAYFIELD_W,
+        )
+        expect(x, `${call.name} drew at x=${x}, past the window`).toBeLessThanOrEqual(VIRTUAL_W)
+      }
+    }
   })
 })
 

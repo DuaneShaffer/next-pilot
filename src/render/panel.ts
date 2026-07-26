@@ -14,6 +14,7 @@
 import type { ItemDef } from '../content/types'
 import { PANEL_W, PLAYFIELD_W, VIRTUAL_H } from '../core/space'
 import { formatSeed } from '../core/seed'
+import { describeRunMode, type RunMode } from '../meta/seedModes'
 import type { EnemyInstance, HazardView, StageView, WorldView } from '../sim/entities'
 import {
   BAR_CARET_H,
@@ -560,6 +561,20 @@ export interface PanelState {
    */
   waveCount?: number
   /**
+   * What kind of run this is: free flight, a shared seed, a daily contract, a replay.
+   *
+   * The MODE rather than a pre-formatted label, deliberately. `describeRunMode` is
+   * documented as "what the HUD says about this run" and nothing in the HUD called it,
+   * so the panel calls it here and cannot author a badge of its own — the string on
+   * the instrument panel and the string on the share card are the same string by
+   * construction. A caller handing over a `{ label, detail }` pair could not promise
+   * that, and two names for one run is the defect this whole footer exists to avoid.
+   *
+   * Optional because a caller that does not know the mode must be able to draw the
+   * panel; the row is simply absent then rather than guessing at 'FREE FLIGHT'.
+   */
+  runMode?: RunMode
+  /**
    * Item table, for resolving held ids to names.
    *
    * Optional and injected rather than imported, for the reason the incident report
@@ -756,10 +771,42 @@ export function drawPanel(
   )
 
   drawDivider(ctx, footerDivider)
-  drawLabel(ctx, 'Seed', CONTENT_X, footerTop, { baseline: 'top' })
-  drawText(ctx, formatSeed(view.seed), CONTENT_X, footerTop + 15, {
-    size: 12,
-    baseline: 'top',
-    color: Palette.textDim,
-  })
+
+  /**
+   * WHAT kind of run this is, above WHICH run it is.
+   *
+   * A daily contract used to look pixel-identical to a free flight, and the two are
+   * not the same offer: a daily is one attempt, shared with everyone flying today, and
+   * filed whether the player likes the result or not. A replay is worse — the inputs
+   * come from the log, so a player who has not been told will read an unresponsive
+   * game rather than a recording. Rule 8 already puts the seed here because identity
+   * belongs in the footer; the *kind* of run is the other half of that identity.
+   *
+   * PAID FOR OUT OF THE FOOTER'S OWN SLACK, not out of the flexible region above.
+   * The 34-unit footer held a stacked label and value with ~20 units spare beneath;
+   * putting the seed on one line the way every other row on this panel does frees
+   * exactly the line this badge needs, so the boss, hazard and build readouts lose
+   * nothing. `drawStatLine` measures both halves and degrades to the old stacked form
+   * if a longer seed format ever collides, so the worst case here is today's layout.
+   *
+   * NEUTRAL text, not a palette role. Rule 3 assigns every colour a meaning and none
+   * of them is "this run is a contract"; a role colour here would be decoration, and
+   * decoration in `danger` or `caution` is how a threat reflex gets trained on noise.
+   * Prominence comes from weight, caps and tracking instead — rule 7's own conclusion.
+   *
+   * The detail line (`describeRunMode().detail`) is deliberately NOT drawn: for a free
+   * or shared run it is the seed, which is the row directly beneath, and for a replay
+   * it is the recording's length and sim version, which is diagnostic rather than
+   * something a player acts on mid-flight. The share card shows both.
+   */
+  if (state.runMode) {
+    drawText(ctx, describeRunMode(state.runMode).label, CONTENT_X, footerTop, {
+      size: 11,
+      weight: 600,
+      tracking: 1.6,
+      baseline: 'top',
+      color: Palette.text,
+    })
+  }
+  drawStatLine(ctx, footerTop + 16, 'Seed', formatSeed(view.seed), '', Palette.textDim)
 }

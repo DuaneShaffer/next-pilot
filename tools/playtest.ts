@@ -46,9 +46,11 @@ import {
   BUILD_FOCUSED_TARGET,
   MAX_CHOICE_RESOLUTION_TICKS,
   ROUTE_STYLES,
+  choiceOpenTicks,
   isBotName,
   isRouteStyle,
 } from '../src/sim/bots'
+import { CHOICE_TIMEOUT_TICKS } from '../src/sim/progression'
 import type { RunContent } from '../src/sim/world'
 import { World } from '../src/sim/world'
 import { digestWorld } from '../src/meta/snapshot'
@@ -91,6 +93,29 @@ function contentForHull(hullId: string | null): RunContent {
   const hull = HULLS[hullId]
   if (hull === undefined) fail(`unknown hull "${hullId}". Known: ${HULL_ORDER.join(', ')}`)
   return { ...RUN_CONTENT, hull }
+}
+
+/**
+ * Hand the flown hull extra starting items. `--give=repair-nanites`.
+ *
+ * THE ABLATION SWITCH FOR ITEMS, and it exists because the item claims in
+ * `src/content/items.ts` were measured with an edit to the content table that no
+ * flag recorded. "Give the baseline Lien this relic and change nothing else" is the
+ * only way to turn an item's strength into a number rather than a correlation — the
+ * interaction splits printed further down are conditioned on surviving long enough
+ * to be offered both halves, and say so.
+ *
+ * It builds a NEW hull def rather than mutating `HULLS`, so a sweep cannot leak the
+ * ablation into the hull table that the rest of the process reads.
+ */
+function withStartingItems(content: RunContent, give: readonly string[]): RunContent {
+  if (give.length === 0) return content
+  const base = content.hull ?? HULLS['lien']
+  if (base === undefined) fail('no baseline hull to give items to')
+  return {
+    ...content,
+    hull: { ...base, startingItems: [...(base.startingItems ?? []), ...give] },
+  }
 }
 
 /** Single-sector content, for numbers comparable with the M1–M4 sweeps. */
@@ -137,10 +162,18 @@ function matchRoute(
 ): { index: number; reward: string } | null {
   if (offered === null) return null
   const key = [...armed].sort().join(',')
+  const matches: number[] = []
   for (let i = 0; i < offered.length; i++) {
-    if (offered[i]?.hazardIds === key) return { index: i, reward: offered[i]?.reward ?? 'none' }
+    if (offered[i]?.hazardIds === key) matches.push(i)
   }
-  return null
+  const first = matches[0]
+  if (first === undefined) return null
+  // Two options carrying the same hazard are indistinguishable after the fact, and
+  // this used to answer with the first one's reward anyway — a number that reads as
+  // measured and is a coin flip. Saying `ambiguous` costs one row of the reward table
+  // and keeps the rest of it true.
+  const reward = matches.length > 1 ? 'ambiguous' : (offered[first]?.reward ?? 'none')
+  return { index: first, reward }
 }
 
 const DEFAULT_RUNS = 200
@@ -238,6 +271,18 @@ interface ChoiceObservation {
   /** 1 for a run's first shop, 2 for its second, and so on. 0 for a free choice. */
   shopOrdinal: number
   /**
+   * True when this card opened in the tick the previous one closed.
+   *
+   * A seam is route -> (transit item) -> transit shop with no gap between them, and
+   * until this existed the observer below could not see past the first card: the
+   * whole chain was recorded as one long route card, which has no offers, so
+   * `summariseItems` dropped it. That is why every transit item and transit shop in
+   * M5 was missing from the pick-rate table, why the transit shops were missing from
+   * ECONOMY, and why R1's 1,201-tick stalls never tripped the resolution-budget
+   * guard: the ticks were charged to a card the report throws away.
+   */
+  chained: boolean
+  /**
    * False when the run ended with this screen still up.
    *
    * Distinct from `takenId === null`, which also covers a deliberate decline. The
@@ -269,6 +314,18 @@ export interface StageObservation {
   entryIntegrity: number
   entryMaxIntegrity: number
   entryShield: number
+  /**
+   * Maximum shield, which is NOT the shield the pilot arrived with.
+   *
+   * It was missing, and its absence is R1's sibling: `medianEntryHealthPct` divided
+   * by `entryMaxIntegrity + entryShield`, so the *current* shield appeared in both
+   * halves and cancelled. 100 integrity with a spent 40-point shield — 100 of 140
+   * effective HP — reported 100%, while 90 integrity behind a full shield (130 of
+   * 140) reported 92.9%. The error is always in the same direction and is largest for
+   * exactly the pilots that spend their shield and recover their integrity, which is
+   * the reading Repair Nanites and Probate were both justified with.
+   */
+  entryMaxShield: number
   /**
    * The build's damage-per-second CEILING on arrival: damage x volley x rate.
    *
@@ -456,6 +513,7 @@ interface OpenStage {
   entryIntegrity: number
   entryMaxIntegrity: number
   entryShield: number
+  entryMaxShield: number
   entryCeilingDps: number
   entryVolley: number
   hazardIds: readonly string[]
@@ -491,6 +549,7 @@ interface OpenChoice {
   openedAtTick: number
   frozenTicks: number
   shopOrdinal: number
+  chained: boolean
   inventoryBefore: ReadonlyMap<string, number>
 }
 
@@ -505,6 +564,8 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
 
   const choices: ChoiceObservation[] = []
   let open: OpenChoice | null = null
+  /** The open card's sim-side `openTicks` as last observed. See `chained` below. */
+  let lastChoiceOpenTicks = -1
   let scrapSpent = 0
   let shopsSeen = 0
 
@@ -541,6 +602,7 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
     entryIntegrity: view.hull.integrity,
     entryMaxIntegrity: view.hull.maxIntegrity,
     entryShield: view.hull.shield,
+    entryMaxShield: view.hull.maxShield,
     entryCeilingDps: ceilingDps(view, volley),
     entryVolley: volley,
     hazardIds: view.hazards.map((h) => h.id),
@@ -569,6 +631,7 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
       entryIntegrity: stage.entryIntegrity,
       entryMaxIntegrity: stage.entryMaxIntegrity,
       entryShield: stage.entryShield,
+      entryMaxShield: stage.entryMaxShield,
       entryCeilingDps: stage.entryCeilingDps,
       entryVolley: stage.entryVolley,
       hazardIds: stage.hazardIds,
@@ -619,10 +682,43 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
     if (wasOpen !== null && frozenThisTick) wasOpen.frozenTicks++
 
     // Choice bookkeeping runs AFTER the tick, because a screen both opens and
-    // closes inside one. The two transitions cannot coincide: the sim refuses to
-    // open a choice on a tick that resolved one, so every screen is seen open for
-    // at least one tick and none is ever missed.
+    // closes inside one.
+    //
+    // THE TWO TRANSITIONS DO COINCIDE, and the comment that used to sit here said
+    // they could not. In a *sector* that is true — the sim refuses to open a reward
+    // card on a tick that resolved one — but a SEAM chains them deliberately:
+    // `takeRoute` nulls the card and calls `advanceTransition`, which opens the next
+    // one in the same tick. `choiceOpenTicks` is the sim's own per-card counter, and
+    // it going backwards is the only observable that says the card was swapped.
     const pending = view.pendingChoice
+    const openTicks = choiceOpenTicks(view)
+    // Not on a frozen tick: the sim returns before `updateChoice`, so the counter
+    // stands still and a stalled card would read as a swapped one. Nothing can
+    // resolve on a frozen tick either, so there is nothing to detect.
+    const chained =
+      pending !== null &&
+      open !== null &&
+      !frozenThisTick &&
+      openTicks !== null &&
+      openTicks <= lastChoiceOpenTicks
+    if (open !== null && (pending === null || chained)) {
+      const taken = acquiredId(open.inventoryBefore, inventoryCounts(view))
+      const spent = Math.max(0, open.scrapAtOpen - view.stats.scrap)
+      scrapSpent += spent
+      choices.push({
+        kind: open.kind,
+        offers: open.offers,
+        takenId: taken,
+        spent,
+        ticksOpen: ticks - open.openedAtTick,
+        frozenTicks: open.frozenTicks,
+        scrapAtOpen: open.scrapAtOpen,
+        shopOrdinal: open.shopOrdinal,
+        chained: open.chained,
+        resolved: true,
+      })
+      open = null
+    }
     if (pending !== null && open === null) {
       if (pending.kind === 'shop') shopsSeen++
       open = {
@@ -640,25 +736,12 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
         openedAtTick: ticks,
         frozenTicks: 0,
         shopOrdinal: pending.kind === 'shop' ? shopsSeen : 0,
+        chained,
         inventoryBefore: inventoryCounts(view),
       }
-    } else if (pending === null && open !== null) {
-      const taken = acquiredId(open.inventoryBefore, inventoryCounts(view))
-      const spent = Math.max(0, open.scrapAtOpen - view.stats.scrap)
-      scrapSpent += spent
-      choices.push({
-        kind: open.kind,
-        offers: open.offers,
-        takenId: taken,
-        spent,
-        ticksOpen: ticks - open.openedAtTick,
-        frozenTicks: open.frozenTicks,
-        scrapAtOpen: open.scrapAtOpen,
-        shopOrdinal: open.shopOrdinal,
-        resolved: true,
-      })
-      open = null
     }
+    if (pending === null) lastChoiceOpenTicks = -1
+    else if (!frozenThisTick) lastChoiceOpenTicks = openTicks ?? lastChoiceOpenTicks + 1
 
     // --- damage output, measured from the outside --------------------------
     // Every live enemy's hp against what it was last tick. Unavoidably per-tick:
@@ -760,6 +843,7 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
       frozenTicks: open.frozenTicks,
       scrapAtOpen: open.scrapAtOpen,
       shopOrdinal: open.shopOrdinal,
+      chained: open.chained,
       resolved: false,
     })
   }
@@ -904,6 +988,91 @@ export interface ItemReport {
   maxChoiceScriptTicks: number
   /** Choices still open when the run ended. Counted as offers with no pick. */
   choicesUnresolvedAtRunEnd: number
+}
+
+/**
+ * Whether the BOTS decided their cards, or the SIM did it for them.
+ *
+ * Its own section, over every card of every kind, because the item report cannot
+ * host it: `summariseItems` skips any choice with no offers, so a route card — the
+ * first card of every seam — is invisible there, and so was the 1,201-tick stall
+ * that used to sit behind it. A card resolved by `CHOICE_TIMEOUT_TICKS` is not a
+ * slow bot, it is a pick nobody made plus twenty seconds of dead sim time charged to
+ * the run's survival number.
+ *
+ * The threshold is IMPORTED, not written down. The prose here previously said the
+ * backstop was 3,600 ticks while the constant said 1,200, and a guard comparing
+ * against a stale copy of a number is a guard that passes.
+ */
+interface ChoiceHealth {
+  cards: number
+  /** Cards that opened in the tick the previous one closed. A seam makes 2-3. */
+  chained: number
+  /** Cards whose unfrozen ticks exceeded the bot's own navigation budget. */
+  overBudget: number
+  worstScriptTicks: number
+  worstKind: string
+  /** Cards the sim resolved itself. Every one of these is a corrupted measurement. */
+  timedOut: number
+  /** Ticks spent on over-budget cards. What a survival median was inflated by. */
+  deadTicks: number
+}
+
+function summariseChoiceHealth(runs: readonly RunResult[]): ChoiceHealth {
+  const health: ChoiceHealth = {
+    cards: 0,
+    chained: 0,
+    overBudget: 0,
+    worstScriptTicks: 0,
+    worstKind: '-',
+    timedOut: 0,
+    deadTicks: 0,
+  }
+  for (const run of runs) {
+    for (const choice of run.choices) {
+      health.cards++
+      if (choice.chained) health.chained++
+      const scriptTicks = choice.ticksOpen - choice.frozenTicks
+      if (scriptTicks > health.worstScriptTicks) {
+        health.worstScriptTicks = scriptTicks
+        health.worstKind = choice.kind
+      }
+      if (scriptTicks > MAX_CHOICE_RESOLUTION_TICKS) {
+        health.overBudget++
+        health.deadTicks += scriptTicks
+      }
+      if (choice.ticksOpen >= CHOICE_TIMEOUT_TICKS) health.timedOut++
+    }
+  }
+  return health
+}
+
+function printChoiceHealth(health: ChoiceHealth): void {
+  console.log('')
+  console.log('CHOICE RESOLUTION — did the POLICIES decide, or did the sim decide for them?')
+  console.log(
+    `  ${health.cards} cards seen, ${health.chained} of them opened in the same tick the previous one closed` +
+      ' (a seam chains route -> transit item -> transit shop)',
+  )
+  if (health.timedOut > 0) {
+    console.log(
+      `  FAIL  ${health.timedOut} card(s) were resolved by the sim's ${CHOICE_TIMEOUT_TICKS}-tick backstop, not by a` +
+        ' policy. Those picks are not picks, and each one adds 20 seconds of dead time to a survival number.',
+    )
+  }
+  if (health.overBudget > 0) {
+    console.log(
+      `  FAIL  ${health.overBudget} card(s) exceeded the ${MAX_CHOICE_RESOLUTION_TICKS}-tick navigation budget ` +
+        `(worst: ${health.worstScriptTicks} unfrozen ticks on a ${health.worstKind}), ${health.deadTicks} ticks in total.` +
+        ' A policy that overruns has lost the cursor, so its picks are not the ones it chose.',
+    )
+  }
+  if (health.timedOut === 0 && health.overBudget === 0) {
+    console.log(
+      `  PASS  every card resolved inside ${MAX_CHOICE_RESOLUTION_TICKS} unfrozen ticks ` +
+        `(worst ${health.worstScriptTicks} on a ${health.worstKind}); none reached the ${CHOICE_TIMEOUT_TICKS}-tick backstop`,
+    )
+  }
 }
 
 function summariseItems(runs: readonly RunResult[]): ItemReport {
@@ -1362,12 +1531,16 @@ function summariseSectors(runs: readonly RunResult[]): SectorReport {
       medianEntryScrap: percentile(sortedNumbers(observed.map((s) => s.entryScrap)), 0.5),
       medianEntryItems: percentile(sortedNumbers(observed.map((s) => s.entryItems)), 0.5),
       medianEntryIntegrity: percentile(sortedNumbers(observed.map((s) => s.entryIntegrity)), 0.5),
+      // Effective HP over MAXIMUM effective HP. The denominator has to be the
+      // pilot's ceiling, not the shield they happen to be carrying — see
+      // `entryMaxShield`, which this divided by the current shield for the whole of
+      // M5 and so cancelled it out of the reading entirely.
       medianEntryHealthPct: percentile(
         sortedNumbers(
           observed.map((s) =>
-            s.entryMaxIntegrity + s.entryShield === 0
+            s.entryMaxIntegrity + s.entryMaxShield === 0
               ? 0
-              : (s.entryIntegrity + s.entryShield) / (s.entryMaxIntegrity + s.entryShield),
+              : (s.entryIntegrity + s.entryShield) / (s.entryMaxIntegrity + s.entryMaxShield),
           ),
         ),
         0.5,
@@ -1414,6 +1587,126 @@ function summariseSectors(runs: readonly RunResult[]): SectorReport {
   }
 }
 
+/**
+ * What the policies did with the world map, and what it cost them.
+ *
+ * NEW, and it is new because the conclusion it supports had never been measured
+ * directly. M5 recorded that "the world map is no longer a trap" off an ablation
+ * between route styles; what nobody printed was how often a detour was actually
+ * taken, or whether the sector behind one is survivable. `chooseRoute` is a stated
+ * PREFERENCE (see `bots.ts`), so a table of what it prefers is the only way to tell
+ * a policy that declines every hazard from one that never saw a card.
+ *
+ * The conditional clear rates are the trap question in its honest form: the clear
+ * rate of a sector entered with a hazard armed against one entered without, pooled
+ * over sectors 2-5. It is still not a controlled experiment — a policy that takes
+ * detours is also a policy that got paid for them — which is what `--route-style`
+ * exists to separate.
+ */
+export interface RouteReport {
+  /** Sectors arrived at through a seam. Sector one is not one. */
+  seams: number
+  /** Seams where the free direct approach was taken. */
+  direct: number
+  /** Seams where a hazard was accepted for a reward. */
+  detour: number
+  /**
+   * Seams whose approach could not be matched to an offered route.
+   *
+   * Not an error and not hidden: a sector with no hazards has no card to show, so
+   * there is nothing to attribute. See `matchRoute` and COVERAGE.
+   */
+  unmatched: number
+  /** Sectors entered with at least one hazard armed. The exact reading. */
+  hazardArmed: number
+  /** Reward kind taken, by name. Unreliable when a sector has one hazard — COVERAGE. */
+  byReward: Readonly<Record<string, number>>
+  enteredWithHazard: number
+  clearedWithHazard: number
+  enteredWithoutHazard: number
+  clearedWithoutHazard: number
+}
+
+function summariseRoutes(runs: readonly RunResult[]): RouteReport {
+  const byReward: Record<string, number> = {}
+  const report = {
+    seams: 0,
+    direct: 0,
+    detour: 0,
+    unmatched: 0,
+    hazardArmed: 0,
+    enteredWithHazard: 0,
+    clearedWithHazard: 0,
+    enteredWithoutHazard: 0,
+    clearedWithoutHazard: 0,
+  }
+  for (const run of runs) {
+    for (const stage of run.stages) {
+      if (stage.index === 0) continue
+      report.seams++
+      if (stage.routeIndex === null) report.unmatched++
+      else if (stage.routeIndex === 0) report.direct++
+      else {
+        report.detour++
+        const reward = stage.routeReward ?? 'unknown'
+        byReward[reward] = (byReward[reward] ?? 0) + 1
+      }
+      if (stage.hazardIds.length > 0) {
+        report.hazardArmed++
+        report.enteredWithHazard++
+        if (stage.outcome === 'cleared') report.clearedWithHazard++
+      } else {
+        report.enteredWithoutHazard++
+        if (stage.outcome === 'cleared') report.clearedWithoutHazard++
+      }
+    }
+  }
+  return { ...report, byReward }
+}
+
+function printRoutes(summaries: readonly PolicySummary[]): void {
+  console.log('')
+  console.log('ROUTES — what each probe did at the seams, and whether the detour was survivable')
+  const header =
+    `  ${pad('policy', 14)}${pad('style', 11)}${padStart('seams', 7)}${padStart('direct', 8)}${padStart('detour', 8)}` +
+    `${padStart('detour%', 9)}${padStart('hazard', 8)}${padStart('clear w/', 10)}${padStart('clear w/o', 11)}${padStart('rewards taken', 24)}`
+  console.log(header)
+  console.log(`  ${'-'.repeat(header.length - 2)}`)
+  for (const summary of summaries) {
+    const r = summary.routes
+    const rewards = Object.entries(r.byReward)
+      .sort((a, b) => b[1] - a[1])
+      .map(([kind, n]) => `${kind} ${n}`)
+      .join(', ')
+    console.log(
+      `  ${pad(summary.policy, 14)}${pad(summary.routeStyle, 11)}${padStart(String(r.seams), 7)}` +
+        `${padStart(String(r.direct), 8)}${padStart(String(r.detour), 8)}` +
+        `${padStart(r.seams === 0 ? '-' : pct(r.detour / r.seams), 9)}` +
+        `${padStart(r.seams === 0 ? '-' : pct(r.hazardArmed / r.seams), 8)}` +
+        `${padStart(r.enteredWithHazard === 0 ? '-' : pct(r.clearedWithHazard / r.enteredWithHazard), 10)}` +
+        `${padStart(r.enteredWithoutHazard === 0 ? '-' : pct(r.clearedWithoutHazard / r.enteredWithoutHazard), 11)}` +
+        `${padStart(rewards === '' ? '-' : rewards.slice(0, 23), 24)}`,
+    )
+  }
+  console.log('')
+  console.log(
+    '  seams = sectors arrived at through a route card (sector one is not one). detour = a hazard accepted',
+  )
+  console.log(
+    '  for a reward; hazard = sectors that actually armed one, which is the exact reading (the reward kind',
+  )
+  console.log(
+    '  is inferred and unreliable when a sector has only one hazard — see COVERAGE). clear w/ and w/o are',
+  )
+  console.log(
+    '  the clear rate of a sector entered WITH a hazard against WITHOUT, pooled over sectors 2-5: the',
+  )
+  console.log(
+    '  "is the world map a trap" number. NOT a controlled comparison — a probe that takes detours also',
+  )
+  console.log('  collects their rewards, and `--route-style` is the switch that separates the two.')
+}
+
 export interface PolicySummary {
   policy: BotName
   measures: string
@@ -1444,6 +1737,8 @@ export interface PolicySummary {
   builds: BuildReport
   /** M5: how far the run got, sector by sector. */
   sectors: SectorReport
+  /** M5: what it did at the seams. */
+  routes: RouteReport
   /** Default world-map appetite of this probe, or the sweep's override. */
   routeStyle: RouteStyle
   /** Runs that reached 'extracted' — a completed five-sector run. */
@@ -1505,6 +1800,7 @@ function summarise(policy: BotName, runs: readonly RunResult[]): PolicySummary {
     economy: summariseEconomy(runs),
     builds: summariseBuilds(runs),
     sectors: summariseSectors(runs),
+    routes: summariseRoutes(runs),
     routeStyle: runs[0]?.routeStyle ?? BOTS[policy].routeStyle,
     fullClearRate:
       runs.length === 0 ? 0 : runs.filter((r) => r.runState === 'extracted').length / runs.length,
@@ -1873,8 +2169,9 @@ function printItems(report: ItemReport, label: string): void {
   console.log(
     `  longest screen open: ${report.maxChoiceTicks} ticks, of which ` +
       `${report.maxChoiceScriptTicks} were the bot's scripted navigation ` +
-      `(budget ${MAX_CHOICE_RESOLUTION_TICKS}; the sim's fallback timeout is 3600 and no policy may reach it — ` +
-      'the surplus is hitstop overlapping a reward screen, which costs nothing)',
+      `(budget ${MAX_CHOICE_RESOLUTION_TICKS}; the sim's fallback timeout is ${CHOICE_TIMEOUT_TICKS} and no policy may ` +
+      'reach it — the surplus is hitstop overlapping a reward screen, which costs nothing. See CHOICE RESOLUTION' +
+      ' above, which covers route and work-order cards too; this line only sees cards that carry offers)',
   )
 }
 
@@ -2541,6 +2838,8 @@ interface Args {
   hulls: boolean
   /** Override every policy's world-map appetite. The ablation switch. */
   routeStyle: RouteStyle | null
+  /** Item ids handed to the flown hull at launch. The item ablation switch. */
+  give: string[]
   help: boolean
 }
 
@@ -2558,6 +2857,7 @@ function parseArgs(argv: readonly string[]): Args {
     hull: null,
     hulls: false,
     routeStyle: null,
+    give: [],
     help: false,
   }
   for (const raw of argv) {
@@ -2587,6 +2887,15 @@ function parseArgs(argv: readonly string[]): Args {
         if (HULLS[value] === undefined) fail(`unknown hull "${value}". Known: ${HULL_ORDER.join(', ')}`)
         args.hull = value
         break
+      case '--give': {
+        const ids = value.split(',').filter((id) => id !== '')
+        if (ids.length === 0) fail('--give needs at least one item id, e.g. --give=repair-nanites')
+        for (const id of ids) {
+          if (!Object.hasOwn(ITEMS, id)) fail(`--give: "${id}" is not in src/content/items.ts`)
+        }
+        args.give = ids
+        break
+      }
       case '--route-style':
         if (!isRouteStyle(value)) fail(`--route-style must be one of ${ROUTE_STYLES.join(', ')}`)
         args.routeStyle = value
@@ -2652,6 +2961,8 @@ function printHelp(): void {
   --hulls               repeat the sweep once per hull; M5's per-hull criterion
   --route-style=STYLE   override every policy's world-map appetite, for ablation
                         (${ROUTE_STYLES.join(', ')})
+  --give=ID[,ID]        hand the flown hull these items at launch; the item ablation
+                        (e.g. --give=repair-nanites against a plain sweep)
   --record-fixture=NAME record one run to tests/replays/NAME.json and verify it
                         (always runs with the World default pool — see COVERAGE)
 
@@ -2700,7 +3011,10 @@ function main(argv: readonly string[]): void {
   }
 
   const observations = emptyObservations()
-  const baseContent = args.singleSector ? SECTOR_ONE_CONTENT : contentForHull(args.hull)
+  const baseContent = withStartingItems(
+    args.singleSector ? SECTOR_ONE_CONTENT : contentForHull(args.hull),
+    args.give,
+  )
   const content = args.noItems
     ? args.singleSector
       ? undefined
@@ -2745,7 +3059,8 @@ function main(argv: readonly string[]): void {
         hull === undefined
           ? (args.singleSector ? SECTOR_ONE_CONTENT : RUN_CONTENT)
           : { ...(args.singleSector ? SECTOR_ONE_CONTENT : RUN_CONTENT), hull }
-      const hullContent = args.noItems ? { ...withHull, items: {}, interactions: [] } : withHull
+      const given = withStartingItems(withHull, args.give)
+      const hullContent = args.noItems ? { ...given, items: {}, interactions: [] } : given
       const runs: RunResult[] = []
       for (let i = 0; i < args.runs; i++) {
         const result = runOnce(hullPolicy, deriveSeed(args.seed, i), {
@@ -2800,6 +3115,7 @@ function main(argv: readonly string[]): void {
   }
 
   const aggregateSectors = summariseSectors(allRuns)
+  const choiceHealth = summariseChoiceHealth(allRuns)
 
   const timing = {
     elapsedMs: Math.round(elapsedMs),
@@ -2827,6 +3143,7 @@ function main(argv: readonly string[]): void {
         hull: args.hull ?? 'lien',
         hullsSwept: hullRows.map((row) => row.hullId),
         routeStyleOverride: args.routeStyle,
+        startingItemsGiven: args.give,
       },
       timing,
       policies: summaries,
@@ -2874,6 +3191,8 @@ function main(argv: readonly string[]): void {
         itemsEnabled: !args.noItems,
         maxChoiceTicks: aggregateItems.maxChoiceTicks,
         choiceResolutionBudgetTicks: MAX_CHOICE_RESOLUTION_TICKS,
+        choiceTimeoutTicks: CHOICE_TIMEOUT_TICKS,
+        choiceHealth,
         notMeasured: [
           'fun',
           'boss variants split out (all time-to-kill figures pool them)',
@@ -2899,7 +3218,8 @@ function main(argv: readonly string[]): void {
   console.log(
     `          run ${args.singleSector ? 'sector one alone' : `${STANDARD_RUN.name} (${STANDARD_RUN.stages.length} sectors)`}  ` +
       `hull ${args.hull ?? 'lien'}${hullRows.length > 0 ? ` (+ ${hullRows.length}-hull sweep)` : ''}  ` +
-      `routes ${args.routeStyle ?? 'per policy'}`,
+      `routes ${args.routeStyle ?? 'per policy'}` +
+      `${args.give.length === 0 ? '' : `  GIVEN ${args.give.join(', ')} at launch`}`,
   )
   console.log('')
   printTable(summaries)
@@ -2923,7 +3243,10 @@ function main(argv: readonly string[]): void {
     }
   }
   printHulls(hullRows)
+  if (!args.singleSector) printRoutes(summaries)
   if (!args.singleSector) printM5ExitCriteria(summaries, aggregateSectors, hullRows)
+  // Before the item tables, because it says whether they can be believed at all.
+  printChoiceHealth(choiceHealth)
   if (!args.noItems) {
     printItems(aggregateItems, `${allRuns.length} runs, all policies pooled`)
     printPickRatesByPolicy(summaries, aggregateItems)

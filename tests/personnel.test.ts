@@ -84,6 +84,7 @@ function viewOf(overrides: Partial<WorldView> = {}): WorldView {
     // fixture should say instead of inheriting a silent placeholder.
     stage: { index: 0, count: 1, sectorId: 'debris-shelf', sectorName: 'Debris Shelf', bossName: null },
     hullName: 'Lien',
+    hullId: 'lien',
     boss: null,
     hazards: [],
     choiceResolve: null,

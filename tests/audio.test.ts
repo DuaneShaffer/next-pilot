@@ -147,6 +147,7 @@ function fakeView(options: {
     pendingChoice: null,
     stage: { index: 0, count: 3, sectorId: 'sector-1', sectorName: 'Outer Yard', bossName: null },
     hullName: 'Lien',
+    hullId: 'lien',
     boss: null,
     hazards: [],
     choiceResolve: null,

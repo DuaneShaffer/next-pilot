@@ -586,6 +586,15 @@ export interface TickableWorld {
    * the only thing it can do about the hull is check that the caller honoured it.
    */
   readonly hullName?: string
+  /**
+   * The hull's id, preferred over `hullName` when present.
+   *
+   * The guard below used to have only the display name to work with, so it compared an
+   * id against a name and passed by coincidence — every shipped hull is named its id
+   * capitalised. Comparing id to id is exact; the name fold stays as a fallback for a
+   * world that only knows its name.
+   */
+  readonly hullId?: string
 }
 
 export interface PlaybackOptions<T extends TickableWorld> {
@@ -600,6 +609,17 @@ export interface PlaybackResult<T extends TickableWorld> {
   /** Ticks actually executed. Less than the replay length only if stopped early. */
   ticks: number
   stoppedEarly: boolean
+}
+
+/**
+ * Fold an id or a display name onto one comparable key.
+ *
+ * `Collateral`, `collateral` and `probe-hull` vs `Probe Hull` are the same hull;
+ * `lien` and `collateral` are not. Only used for the playback check — nothing is
+ * stored in this form.
+ */
+function hullKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '')
 }
 
 export function playback<T extends TickableWorld>(
@@ -617,17 +637,35 @@ export function playback<T extends TickableWorld>(
    * flies the wrong ship and diverges exactly as badly as before the field existed —
    * silently, forty seconds in, looking like a determinism bug.
    *
-   * The check is deliberately loose about *how* a hull is named (id vs display name
-   * is the caller's business) and strict about the one thing that matters: a replay
-   * that names a hull must not be played by a world that reports a different one.
    * Skipped when either side is unknown, because an empty `hullId` legitimately means
-   * "this run chose no hull".
+   * "this run chose no hull" and a fabricated test world need not model hulls at all.
+   *
+   * ## IT IS COMPARING AN ID TO A DISPLAY NAME, AND THAT NEEDS SAYING OUT LOUD
+   *
+   * `replay.hullId` is an id (`collateral`). `TickableWorld.hullName` is what the
+   * world calls itself (`Collateral`) — `World` exposes no id at all. Every shipped
+   * hull happens to have a display name that is its id capitalised, so a direct
+   * comparison passed on all five *by coincidence*, and the first hull whose name was
+   * a different word threw `bad-hull` on a completely correct playback.
+   *
+   * A guard that refuses valid replays is worse than the hole it plugs: the recipient
+   * of a good link is told their run cannot be played. So the comparison normalises
+   * both sides — lowercase, and separators removed — which makes `probe-hull` and
+   * `Probe Hull` the same hull while still separating `lien` from `collateral`.
+   *
+   * THE RESIDUAL LIMITATION, and the real fix: a hull whose display name is not its
+   * id in disguise (`writ` shown as "The Writ") would still be refused. The correct
+   * answer is a `hullId` on `WorldView` so this compares id to id, which is a change
+   * to `src/sim/entities.ts` rather than to this file. Until then the convention is
+   * load-bearing, so it is asserted in `tests/replay.test.ts` against the real roster
+   * rather than left as a hope.
    */
   const named = replay.hullId
-  const flown = world.hullName
+  // Id to id when the world knows its id — exact. Falling back to the display name
+  // means folding both through `hullKey`, which is a convention rather than a fact.
+  const flown = world.hullId ?? world.hullName
   if (named !== '' && flown !== undefined) {
-    const same = flown.toLowerCase() === named.toLowerCase()
-    if (!same) {
+    if (hullKey(flown) !== hullKey(named)) {
       throw new ReplayError(
         'bad-hull',
         `replay names hull "${named}" but playback built "${flown}" — the factory ignored replay.hullId`,

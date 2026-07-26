@@ -201,6 +201,7 @@ function worldView(overrides: Partial<WorldView> = {}): WorldView {
     runState: 'active',
     stage: { index: 2, count: 5, sectorId: 'the-tally', sectorName: 'The Tally', bossName: 'The Bailiff' },
     hullName: 'Lien',
+    hullId: 'lien',
     boss: null,
     hazards: [hazard()],
     // A card is open, so it is counting down to resolving itself. Null here beside a

@@ -17,6 +17,45 @@
  * 2. Everything is under a hard watchdog. A verification tool that can hang
  *    silently is worse than no tool, because unattended work stalls with no
  *    signal that anything is wrong.
+ *
+ * Each shot carries up to three assertions, and they are not redundant:
+ *
+ *   `waitFor`  a predicate polled until it holds, BEFORE any `pressAfter` keys.
+ *              This is how a capture is defined by the state it wants rather than
+ *              by a guess about how long a bot takes to get there.
+ *   `expect`   the same shape of predicate, re-evaluated against the state read
+ *              at the instant of the shutter. It catches the state DRIFTING
+ *              between the wait and the pixel — the bot killing the last enemy
+ *              during `holdMs`, a hazard advancing from warning to active, a
+ *              `pressAfter` key that never landed on the screen it claims. Shots
+ *              driven only by `settleMs` and keypresses had no assertion at all
+ *              before this, which is how "press Down for settings" could quietly
+ *              become a second photograph of the title.
+ *   `pollMs`   how often `waitFor` samples, default 100ms. A state that lasts N
+ *              ticks is N/(60*ff) seconds of wall clock, so a brief state under a
+ *              high `ff` needs a faster shutter than the default.
+ *   `unreachedUntil`  see KNOWN UNREACHED below.
+ *
+ * `expect` is an EXPRESSION over the probe, not a keyword. The previous version
+ * took `'enemies'` or `'dead'` and hand-read `state.enemies`, a field the probe
+ * does not expose — so switching it on would have reported "expected enemies on
+ * screen, found none" over a screen with eight of them. It had also never run,
+ * because no shot ever set it. An expression evaluated over the same generic
+ * probe snapshot the log line prints cannot drift out of step with the probe, and
+ * a typo'd field name throws and is reported as a HARNESS fault rather than
+ * silently failing closed as a game fault.
+ *
+ * KNOWN UNREACHED. Four captures need a run stage no bot policy currently
+ * reaches (see docs/VERIFICATION.md §3 — target clear rate is 20-40%, so most
+ * runs die in sector one or two). Reporting those as failures every single run
+ * trains a reader to skim past the section that also carries real regressions, so
+ * a shot may declare `unreachedUntil: '<reason>'`: its miss is reported in a
+ * separate NOTE block and does not fail the build. The list cannot rot, because a
+ * marked shot that DOES reach its state fails the build asking for the marker to
+ * be deleted. Nothing else is exempt, and this changes no URL and no run — it is
+ * a statement about what the harness currently knows, not a way to make a run
+ * behave differently. A god-mode flag would be the other thing entirely, and
+ * shared seeds and daily contracts depend on a run being honest.
  */
 
 import { createServer } from 'node:http'
@@ -72,15 +111,32 @@ const SHOTS = [
     name: 'hangar-fresh',
     url: `/?seed=${SEED}`,
     pressAfter: ['ArrowLeft'],
+    // The zeroes are the point of the shot, and they are what makes "FIRST
+    // deliberately" load-bearing rather than a comment. Reorder SHOTS and this
+    // fires instead of quietly filing a hangar with seven certifications as the
+    // new player's view.
+    expect: 'screen === "hangar" && certifiedCount === 0 && filedRuns === 0',
   },
-  { name: 'title', url: `/?seed=${SEED}`, settleMs: 500 },
-  { name: 'sortie-idle', url: `/?seed=${SEED}&screen=sortie`, settleMs: 300 },
-  { name: 'sortie-firing', url: `/?seed=${SEED}&screen=sortie`, keys: ['Space'], settleMs: 900 },
+  { name: 'title', url: `/?seed=${SEED}`, settleMs: 500, expect: 'screen === "title"' },
+  {
+    name: 'sortie-idle',
+    url: `/?seed=${SEED}&screen=sortie`,
+    settleMs: 300,
+    expect: 'screen === "sortie" && runState === "active"',
+  },
+  {
+    name: 'sortie-firing',
+    url: `/?seed=${SEED}&screen=sortie`,
+    keys: ['Space'],
+    settleMs: 900,
+    expect: 'screen === "sortie" && runState === "active"',
+  },
   {
     name: 'sortie-moving-firing',
     url: `/?seed=${SEED}&screen=sortie`,
     keys: ['Space', 'ArrowLeft'],
     settleMs: 700,
+    expect: 'screen === "sortie" && runState === "active"',
   },
 
   // Combat and death states are reached by letting a bot policy drive the run
@@ -96,20 +152,33 @@ const SHOTS = [
   {
     name: 'combat-early',
     url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=6`,
-    waitFor: 'enemyCount >= 1',
-    holdMs: 400,
+    // `>= 1` with a 400ms hold used to file an EMPTY PLAYFIELD, verified in the
+    // capture: the first wave of this seed is a single enemy, and 400ms at ff=6 is
+    // 2.4 simulated seconds — ample for an aggressor to kill it. Nothing noticed,
+    // because the intent check below had never run. So the wait asks for a wave
+    // rather than an enemy, and the hold is short enough that killing all of it
+    // before the shutter is not plausible.
+    waitFor: 'enemyCount >= 4',
+    holdMs: 150,
+    expect: 'screen === "sortie" && enemyCount >= 1',
   },
   {
     name: 'combat-mid',
     url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=12`,
     waitFor: 'stats.tick > 3600 && enemyCount >= 2',
     holdMs: 300,
+    expect: 'screen === "sortie" && enemyCount >= 2',
   },
   {
     name: 'combat-dense',
     url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=20`,
     waitFor: 'enemyCount >= 5',
-    holdMs: 200,
+    // Sim drift between the predicate and the shutter is holdMs x ff, so 200ms here
+    // was 4 simulated seconds — long enough for a formation to cross the whole
+    // playfield. Measured: the wait fired at 5 enemies and the capture contained 2.
+    // Halved, and the assertion states what a frame this late can honestly promise.
+    holdMs: 100,
+    expect: 'screen === "sortie" && enemyCount >= 2',
   },
   {
     name: 'hull-critical',
@@ -121,12 +190,16 @@ const SHOTS = [
     // the only check that it renders at all.
     waitFor: 'runState === "active" && integrity <= 28',
     holdMs: 0,
+    // Still alive at the shutter, or the picture is the incident report rather than
+    // the low-integrity rim this capture exists to check.
+    expect: 'screen === "sortie" && runState === "active" && integrity <= 30',
   },
   {
     name: 'incident-report',
     url: `/?seed=${SEED}&screen=sortie&autopilot=random&ff=24`,
     waitFor: 'screen === "incident"',
     holdMs: 500,
+    expect: 'screen === "incident"',
   },
   {
     // A cleared sector. Added after a tester finished sector 1 and was shown a
@@ -136,6 +209,14 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=28`,
     waitFor: 'runState === "extracted"',
     holdMs: 500,
+    expect: 'runState === "extracted"',
+    // `extracted` is set only by clearing the FINAL stage (`world.ts` — the
+    // `stageIndex + 1 >= stages.length` branch), so this needs a whole five-sector
+    // run. Measured on this seed: aggressor at ff=28 dies in SECTOR FOUR at tick
+    // 37032 holding 14 items. So sector clearing works and the last sector does not
+    // — a balance fact, and the fix VERIFICATION §3 already names is a per-capture
+    // seed known to go the distance, or a survival-tuned capture policy.
+    unreachedUntil: 'M6 balance — needs all five sectors; aggressor dies in sector four on this seed',
   },
   {
     // A reward card. Bots resolve a choice in ~6 ticks, so this waits on the state
@@ -144,6 +225,7 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=6&holdchoice=1`,
     waitFor: 'choiceKind === "item"',
     holdMs: 0,
+    expect: 'choiceKind === "item"',
   },
   {
     // A shop, which needs a build and some scrap first, so it is further in.
@@ -151,6 +233,7 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=10&holdchoice=1`,
     waitFor: 'choiceKind === "shop"',
     holdMs: 0,
+    expect: 'choiceKind === "shop"',
   },
   // --- M5: the run past sector one ------------------------------------------
   //
@@ -167,6 +250,16 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=28&holdchoice=1`,
     waitFor: 'choiceKind === "route"',
     holdMs: 0,
+    expect: 'choiceKind === "route"',
+    // NOT a balance problem, and worth fixing properly rather than reseeding:
+    // `holdchoice=1` (main.ts) feeds NEUTRAL_INPUT while ANY card is open, so the
+    // first card of the run — an item card at tick 2358 — stays open forever, the
+    // ship stops flying, and the run dies in sector one with 37 enemies on screen
+    // while the world map it is waiting for is three seams away. Measured exactly
+    // that. Any capture of a LATE card is unreachable by construction under a
+    // whole-run hold; it needs `holdchoice=<kind>`, which is a one-line change in
+    // `src/main.ts:176`.
+    unreachedUntil: 'harness — holdchoice=1 holds the FIRST card, so a late card is unreachable',
   },
   {
     // Sector two, in progress. Proves the panel is describing the run and not the
@@ -175,21 +268,43 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=28`,
     waitFor: 'stageIndex >= 1 && enemyCount >= 2',
     holdMs: 0,
+    expect: 'stageIndex >= 1 && enemyCount >= 1',
   },
   {
     // A hazard mid-warning. This is the single most important second in the game to
     // get right: it is the whole reaction window, and if it is not unmissable here
     // then the hazard is indistinguishable from integrity draining for no reason.
     name: 'hazard-warning',
-    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=20`,
+    // `greedy`, not `aggressor`. This capture could never have worked: hazards are
+    // opted into on the world map, and `BOTS.aggressor` is pinned to
+    // `routeStyle: 'direct'` on purpose — "a benchmark that also takes optional risk
+    // is measuring two things at once" (`sim/bots.ts:899`) — so it declines every
+    // hazard there is. `greedy` "accepts every hazard it is paid for". Reported as a
+    // balance failure for as long as the check has existed; it was the wrong policy.
+    url: `/?seed=${SEED}&screen=sortie&autopilot=greedy&ff=20`,
     waitFor: 'hazardPhase === "warning"',
+    // HAZARD_WARNING_TICKS is 60 — one simulated second, which at ff=20 is FIFTY
+    // MILLISECONDS of wall clock. The default 100ms poll steps straight over the
+    // whole reaction window, so even a run that meets a hazard would usually miss
+    // this state. The most important second in the game needs a faster shutter.
+    pollMs: 20,
     holdMs: 0,
+    // Asserted again at the shutter because `hazardPhase` reports the most urgent
+    // hazard: a warning that has become active between the poll and the capture
+    // files the wrong second.
+    expect: 'hazardPhase === "warning"',
+    unreachedUntil: 'M6 balance — greedy must clear sector one and be offered a hazard route',
   },
   {
     name: 'hazard-active',
-    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=20`,
+    // greedy for the same reason as the warning shot above.
+    url: `/?seed=${SEED}&screen=sortie&autopilot=greedy&ff=20`,
     waitFor: 'hazardPhase === "active"',
+    // 120 ticks = 100ms of wall clock at ff=20, i.e. exactly the default poll.
+    pollMs: 20,
     holdMs: 0,
+    expect: 'hazardPhase === "active"',
+    unreachedUntil: 'M6 balance — greedy must clear sector one and be offered a hazard route',
   },
   {
     // A boss on screen. Waits on the health bar being readable rather than on the
@@ -198,6 +313,7 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=24`,
     waitFor: 'bossName !== null && bossHealth < 0.95',
     holdMs: 0,
+    expect: 'bossName !== null',
   },
   {
     // A LATER boss phase, which is the part that has to announce itself. A capture of
@@ -207,6 +323,7 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=24`,
     waitFor: 'bossPhase >= 1',
     holdMs: 0,
+    expect: 'bossName !== null && bossPhase >= 1',
   },
   {
     // The settings screen, reachable from the title with Down. New pixels: the
@@ -216,6 +333,7 @@ const SHOTS = [
     url: `/?seed=${SEED}`,
     pressAfter: ['ArrowDown'],
     settleMs: 400,
+    expect: 'screen === "settings"',
   },
   {
     // Mid-capture: the row is waiting for a key. A binding UI that can lock the
@@ -224,6 +342,7 @@ const SHOTS = [
     url: `/?seed=${SEED}`,
     pressAfter: ['ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'Enter'],
     settleMs: 400,
+    expect: 'screen === "settings"',
   },
   {
     // Hull selection. Only appears once a certification has widened the pool past
@@ -235,23 +354,27 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=hull-select`,
     waitFor: 'screen === "hull-select"',
     holdMs: 0,
+    expect: 'screen === "hull-select"',
   },
   {
     // Reachable from the title: left to the hangar, right to personnel files.
     name: 'hangar',
     url: `/?seed=${SEED}`,
     pressAfter: ['ArrowLeft'],
+    expect: 'screen === "hangar"',
   },
   {
     name: 'personnel',
     url: `/?seed=${SEED}`,
     pressAfter: ['ArrowRight'],
+    expect: 'screen === "personnel"',
   },
   {
     // Up from the title reaches seed entry, where a shared seed or the daily is flown.
     name: 'seed-entry',
     url: `/?seed=${SEED}`,
     pressAfter: ['ArrowUp'],
+    expect: 'screen === "seed-entry"',
   },
   {
     // The share card sits one press off the incident report, not on the way to the
@@ -260,12 +383,16 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=random&ff=24`,
     waitFor: 'screen === "incident"',
     pressAfter: ['ArrowUp'],
+    expect: 'screen === "share"',
   },
   {
     name: 'pause-menu',
     url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=12`,
     waitFor: 'enemyCount >= 2',
     pressAfter: ['Escape'],
+    // Nothing checked that Escape landed. A browser or an OS that swallows Escape
+    // would have filed a photograph of an unpaused sortie under `pause-menu`.
+    expect: 'screen === "paused"',
   },
   {
     // Third row down is the volume scale, so this frames a selected adjustable
@@ -274,6 +401,7 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=12`,
     waitFor: 'enemyCount >= 2',
     pressAfter: ['Escape', 'ArrowDown', 'ArrowLeft'],
+    expect: 'screen === "paused"',
   },
 ]
 
@@ -335,6 +463,8 @@ async function capture() {
   const browser = await chromium.launch()
   step('browser launched')
   const problems = []
+  /** Misses by shots that declared themselves unreachable. Reported, not fatal. */
+  const unreached = []
 
   try {
     for (const viewport of VIEWPORTS) {
@@ -375,6 +505,7 @@ async function capture() {
 
         for (const key of shot.keys ?? []) await page.keyboard.down(key)
 
+        let waitFailed = false
         if (shot.waitFor) {
           // Poll the live state until the shot's condition holds. Reached via
           // `new Function` over the debug view rather than a fixed sleep, so the
@@ -405,12 +536,27 @@ async function capture() {
                 return Boolean(new Function('v', `with (v) { return (${expression}) }`)(view))
               },
               shot.waitFor,
-              { timeout: WAIT_FOR_TIMEOUT_MS, polling: 100 },
+              // `pollMs` matters more than it looks. A state that lasts N ticks is
+              // only N/(60*ff) seconds of wall clock, so a 60-tick hazard warning at
+              // ff=20 is 50ms and the default poll misses it entirely. A shot that
+              // waits on a brief state must sample faster than the state is long.
+              { timeout: WAIT_FOR_TIMEOUT_MS, polling: shot.pollMs ?? 100 },
             )
           } catch {
-            problems.push(
+            waitFailed = true
+            const message =
               `${shot.name}/${viewport.name}: waitFor never became true ` +
-                `(${shot.waitFor}) — the capture does not show what it claims`,
+              `(${shot.waitFor}) — the capture does not show what it claims`
+            if (shot.unreachedUntil) unreached.push(`${message}\n      ${shot.unreachedUntil}`)
+            else problems.push(message)
+          }
+          if (!waitFailed && shot.unreachedUntil) {
+            // The list of known-unreachable captures is only trustworthy if it
+            // cannot outlive the balance problem that put a shot on it. Reaching
+            // the state is good news that has to be recorded, not absorbed.
+            problems.push(
+              `${shot.name}/${viewport.name}: reached its state despite ` +
+                `unreachedUntil (${shot.unreachedUntil}) — delete the marker`,
             )
           }
           if (shot.holdMs) await page.waitForTimeout(shot.holdMs)
@@ -461,19 +607,36 @@ async function capture() {
         }
 
         // A capture that did not reach the state it is named after is worse than
-        // a missing capture: it looks like evidence while showing nothing. Assert
-        // the intent rather than trusting that the timings worked out.
-        if (shot.expect === 'enemies' && (state?.enemies ?? 0) === 0) {
-          problems.push(
-            `${shot.name}/${viewport.name}: expected enemies on screen, found none — ` +
-              `capture shows nothing useful`,
-          )
-        }
-        if (shot.expect === 'dead' && state?.screen !== 'incident') {
-          problems.push(
-            `${shot.name}/${viewport.name}: expected the incident report, got ` +
-              `screen=${state?.screen} run=${state?.runState}`,
-          )
+        // a missing capture: it looks like evidence while showing nothing. So the
+        // intent is asserted against the state read at the shutter, not against
+        // the state that made `waitFor` true however long ago.
+        //
+        // Skipped when the wait already failed: that is one root cause, and
+        // reporting it twice per capture is how a reader learns to skim.
+        if (shot.expect && !waitFailed) {
+          let held
+          try {
+            // eslint-disable-next-line no-new-func
+            held = Boolean(
+              new Function('v', `with (v) { return (${shot.expect}) }`)(state ?? {}),
+            )
+          } catch (error) {
+            // A predicate naming a field the probe does not expose is a HARNESS
+            // fault. Saying so is the whole difference from the previous version,
+            // which read `state.enemies` — never exposed — and would have
+            // reported every capture as an empty screen.
+            problems.push(
+              `${shot.name}/${viewport.name}: expect (${shot.expect}) could not be ` +
+                `evaluated — ${error.message}. This is a harness bug, not a game state.`,
+            )
+            held = true
+          }
+          if (!held) {
+            problems.push(
+              `${shot.name}/${viewport.name}: expect failed at capture time ` +
+                `(${shot.expect}) — see the state on the log line above`,
+            )
+          }
         }
       }
       await context.close()
@@ -483,7 +646,7 @@ async function capture() {
     server.close()
   }
 
-  return problems
+  return { problems, unreached }
 }
 
 const watchdog = new Promise((_, reject) =>
@@ -494,7 +657,14 @@ const watchdog = new Promise((_, reject) =>
 )
 
 try {
-  const problems = await Promise.race([capture(), watchdog])
+  const { problems, unreached } = await Promise.race([capture(), watchdog])
+  // Printed before the problems and separately from them. A capture nobody can
+  // reach yet is a scheduling fact; a capture that broke today is a regression.
+  // Mixing them is what makes a permanently red report unreadable.
+  if (unreached.length > 0) {
+    console.log(`\nKnown unreached (${unreached.length}) — not failures, see KNOWN UNREACHED:`)
+    for (const note of unreached) console.log(`  - ${note}`)
+  }
   if (problems.length > 0) {
     console.error('\nProblems detected:')
     for (const problem of problems) console.error(`  - ${problem}`)
