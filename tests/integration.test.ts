@@ -15,7 +15,8 @@ import { getEnemy } from '../src/content/enemies'
 import { SECTOR_ONE, SECTORS } from '../src/content/sectors'
 import { createEnemy, updateEnemyMovement } from '../src/sim/enemies'
 import { BOTS } from '../src/sim/bots'
-import { World } from '../src/sim/world'
+import { BASE_WORK_ORDERS, EMPTY_CONTENT, World } from '../src/sim/world'
+import { BASE_POOL } from '../src/content/certifications'
 import type { EnemyDef } from '../src/content/types'
 
 describe('sine frequency means oscillations per second', () => {
@@ -192,5 +193,63 @@ describe('run outcomes are distinguishable', () => {
     // docs/DESIGN.md plans, so it cannot claim progress that is unreachable.
     expect(SECTORS.length).toBeGreaterThan(0)
     expect(SECTORS.map((sector) => sector.id)).toContain(SECTOR_ONE.id)
+  })
+})
+
+describe('certifications reach the simulation', () => {
+  /**
+   * Advance to the first work order, sweeping the playfield each tick.
+   *
+   * Swept because the work-order wave is deep into the sector and an idle pilot is
+   * rammed to death long before reaching it — the test would then be measuring
+   * survival rather than the pool it exists to check.
+   */
+  function firstWorkOrder(world: World): readonly string[] | null {
+    for (let tick = 0; tick < TICK_HZ * 240; tick++) {
+      world.enemies.length = 0
+      world.enemyBullets.length = 0
+      world.tick(NEUTRAL_INPUT)
+      const choice = world.pendingChoice
+      if (choice?.kind === 'work-order') return choice.workOrders
+      // Decline anything else so the run keeps moving.
+      if (choice !== null) {
+        world.tick({ moveX: 0, moveY: 0, fire: false, special: false, focus: false })
+        world.tick({ moveX: 0, moveY: 0, fire: false, special: true, focus: false })
+      }
+    }
+    return null
+  }
+
+  /**
+   * A certification that unlocks a work-order type had authored copy, a passing
+   * reachability test, and no effect whatsoever, because `World` held the list as a
+   * literal. That is the worst kind of dead feature: finished from every angle except
+   * playing it.
+   *
+   * This asserts the coupling neither module can assert alone — content declares the
+   * base pool, the sim consumes an injected list, and nothing but a cross-boundary
+   * test can check they agree.
+   */
+  it('offers exactly the work orders the base pool declares, by default', () => {
+    expect([...BASE_WORK_ORDERS].sort()).toEqual([...BASE_POOL.workOrders].sort())
+  })
+
+  it('offers a certified work-order type once it is in the pool', () => {
+    const widened = [...BASE_WORK_ORDERS, 'vault']
+    const world = new World('WORKORDER123', {
+      items: {},
+      interactions: [],
+      workOrders: widened,
+    })
+    const seen = firstWorkOrder(world)
+    expect(seen, 'no work order opened within the sector').not.toBeNull()
+    expect(seen).toContain('vault')
+  })
+
+  it('falls back to the base list when a run injects no pool', () => {
+    // Sim tests construct worlds without knowing certifications exist; that must keep
+    // working rather than offering an empty choice.
+    const world = new World('WOFALLBACK12', EMPTY_CONTENT)
+    expect(firstWorkOrder(world)).toEqual(BASE_WORK_ORDERS)
   })
 })

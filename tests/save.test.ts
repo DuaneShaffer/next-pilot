@@ -52,10 +52,17 @@ describe('migration', () => {
   })
 
   it('leaves a current-version save intact', () => {
+    // A COMPLETE current-version save. This previously declared the current version
+    // while carrying only v2's fields, so once v3 added stores the coercion correctly
+    // filled them in and the test read that as corruption. A fixture that claims a
+    // version must actually be that version.
     const current = {
       version: CURRENT_VERSION,
       pilotNumber: 12,
       settings: { shake: 0, reduceFlashes: true, masterVolume: 0.5, muted: true },
+      certifications: { unlocked: [], progress: {} },
+      personnel: [],
+      daily: null,
     }
     expect(migrate(current)).toEqual(current)
   })
@@ -156,5 +163,87 @@ describe('legacy key adoption', () => {
 
   it('does nothing when there is no legacy save', () => {
     expect(adoptLegacySave(memoryStorage())).toBeNull()
+  })
+})
+
+describe('migration to v3', () => {
+  /**
+   * THE CHAIN, not just the last hop.
+   *
+   * A v1 save has to reach v3 through v2, and the only way to know that works is to
+   * start from a payload a v1 build actually wrote. Generating the fixture from
+   * today's types would test that the code agrees with itself.
+   */
+  it('carries a real v1 save all the way to v3', () => {
+    const save = migrate(V1_FIXTURE)
+    expect(save.version).toBe(3)
+    // The one thing a v1 player would notice being lost.
+    expect(save.pilotNumber).toBe(37)
+    expect(save.settings).toEqual(DEFAULT_SETTINGS)
+  })
+
+  it('gives a migrated player no progression they did not earn', () => {
+    // Seeding unlocks would hand out progression that was never played for; seeding
+    // personnel files would put fiction into a record of what actually happened.
+    const fromV1 = migrate(V1_FIXTURE)
+    expect(fromV1.certifications.unlocked).toEqual([])
+    expect(fromV1.personnel).toEqual([])
+    expect(fromV1.daily).toBeNull()
+
+    const fromV2 = migrate({ version: 2, pilotNumber: 9, settings: DEFAULT_SETTINGS })
+    expect(fromV2.certifications.unlocked).toEqual([])
+    expect(fromV2.personnel).toEqual([])
+  })
+
+  it('keeps a v2 player their settings', () => {
+    const settings = { shake: 0.25, reduceFlashes: true, masterVolume: 0.5, muted: true }
+    const save = migrate({ version: 2, pilotNumber: 4, settings })
+    expect(save.settings).toEqual(settings)
+    expect(save.pilotNumber).toBe(4)
+  })
+
+  it('round-trips a full v3 save through storage', () => {
+    const storage = memoryStorage()
+    const save = migrate(V1_FIXTURE)
+    const populated: typeof save = {
+      ...save,
+      certifications: { unlocked: [], progress: {} },
+      personnel: [],
+      daily: { date: '2026-07-25', ticks: 900, waveIndex: 6, scrap: 42, outcome: 'lost' },
+    }
+    persistSave(populated, storage)
+    expect(loadSave(storage)).toEqual(populated)
+  })
+
+  it('survives hand-edited garbage in every new store', () => {
+    // Each store is coerced by the module that owns its shape, and none may throw —
+    // a corrupt history must not make the game unopenable.
+    const save = migrate({
+      version: 3,
+      pilotNumber: 5,
+      settings: DEFAULT_SETTINGS,
+      certifications: { unlocked: ['no-such-cert', 42, null], progress: { bogus: 'x' } },
+      personnel: [{ nonsense: true }, null, 7],
+      daily: { date: '2026-13-99', ticks: Number.NaN, waveIndex: -5, outcome: 'exploded' },
+    })
+    expect(save.pilotNumber).toBe(5)
+    expect(save.certifications.unlocked).toEqual([])
+    expect(save.personnel).toEqual([])
+    expect(save.daily).toBeNull()
+  })
+
+  it('drops an unknown certification id rather than resetting the save', () => {
+    // A save written by a build with more certifications must still load. Losing one
+    // unlock is recoverable; losing the whole save is not.
+    const save = migrate({
+      version: 3,
+      pilotNumber: 12,
+      settings: DEFAULT_SETTINGS,
+      certifications: { unlocked: ['from-a-future-build'], progress: {} },
+      personnel: [],
+      daily: null,
+    })
+    expect(save.pilotNumber).toBe(12)
+    expect(save.certifications.unlocked).toEqual([])
   })
 })

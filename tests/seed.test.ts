@@ -5,6 +5,7 @@ import {
   formatSeed,
   generateSeed,
   isValidSeed,
+  looksLikeSeed,
   normalizeSeed,
 } from '../src/core/seed'
 
@@ -79,5 +80,49 @@ describe('daily seed', () => {
       const date = new Date(Date.UTC(2026, 0, 1 + day))
       expect(isValidSeed(dailySeed(date))).toBe(true)
     }
+  })
+})
+
+describe('telling a seed from prose', () => {
+  /**
+   * REGRESSION. `normalizeSeed` is a repair function and repairs too well: it turned
+   * "not a seed at all" into NQTASEEDATAJ, a perfectly valid seed for entirely the
+   * wrong run. Pasting a *share link* into a seed box would likewise have mined
+   * twelve characters out of the hostname.
+   *
+   * Both produce a confidently wrong answer with no error, which is the worst failure
+   * a parser can have. `looksLikeSeed` is the gate that has to be passed first.
+   */
+  it('rejects prose that normalises into a valid-looking seed', () => {
+    expect(isValidSeed(normalizeSeed('not a seed at all'))).toBe(true)
+    // ...which is exactly why the gate exists.
+    expect(looksLikeSeed('not a seed at all')).toBe(false)
+  })
+
+  it('rejects a URL rather than mining characters out of it', () => {
+    for (const url of [
+      'https://duaneshaffer.github.io/next-pilot/?seed=K7F2-9XQM-3RTV',
+      'duaneshaffer.github.io/next-pilot',
+      '?seed=K7F29XQM3RTV',
+    ]) {
+      expect(looksLikeSeed(url), url).toBe(false)
+    }
+  })
+
+  it('accepts what a person would actually paste', () => {
+    for (const text of ['K7F29XQM3RTV', 'K7F2-9XQM-3RTV', '  k7f2-9xqm-3rtv  ', 'K7F29XQM3RTU']) {
+      expect(looksLikeSeed(text), text).toBe(true)
+    }
+  })
+
+  it('rejects material of the wrong length', () => {
+    expect(looksLikeSeed('K7F2')).toBe(false)
+    expect(looksLikeSeed('K7F29XQM3RTVK7F29XQM3RTV')).toBe(false)
+  })
+
+  it('still repairs a seed that genuinely passed the gate', () => {
+    // The gate must not break the ambiguity folding it protects.
+    expect(looksLikeSeed('K7F2-9XQO-3RTL')).toBe(true)
+    expect(isValidSeed(normalizeSeed('K7F2-9XQO-3RTL'))).toBe(true)
   })
 })

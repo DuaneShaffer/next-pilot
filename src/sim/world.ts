@@ -187,9 +187,25 @@ const SHAKE_EPSILON = 0.002
 export interface RunContent {
   items: Readonly<Record<string, ItemDef>>
   interactions: readonly InteractionDef[]
+  /**
+   * Work-order kinds this run may be offered.
+   *
+   * Injected rather than hardcoded so a certification that unlocks a work-order type
+   * actually changes the game. It was a literal `['supply','hazard','repair']` here,
+   * which meant two certifications with authored copy and passing tests could never
+   * have any effect — the kind of dead feature that looks finished from every angle
+   * except playing it.
+   *
+   * Defaults to the base three when omitted, so sim tests need not know about
+   * certifications at all.
+   */
+  workOrders?: readonly string[]
 }
 
 export const EMPTY_CONTENT: RunContent = { items: {}, interactions: [] }
+
+/** The work orders every run has, certified or not. Mirrors BASE_POOL.workOrders. */
+export const BASE_WORK_ORDERS: readonly string[] = ['supply', 'hazard', 'repair']
 
 export class World implements WorldView {
   readonly seed: string
@@ -583,7 +599,12 @@ export class World implements WorldView {
     this.cursor = newCursor()
 
     if (isWorkOrder) {
-      this.pendingChoice = makeChoice('work-order', [], [], ['supply', 'hazard', 'repair'])
+      this.pendingChoice = makeChoice(
+        'work-order',
+        [],
+        [],
+        this.content.workOrders ?? BASE_WORK_ORDERS,
+      )
       return
     }
 

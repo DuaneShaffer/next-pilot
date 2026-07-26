@@ -13,7 +13,28 @@ const GROUP_COUNT = 3
 
 export const SEED_LENGTH = GROUP_SIZE * GROUP_COUNT
 
-/** Strip formatting and case so a seed round-trips through copy/paste and voice. */
+/**
+ * Strip formatting and case so a seed round-trips through copy/paste and voice.
+ *
+ * ## WARNING: this is a repair function, not a parser
+ *
+ * The folding is deliberately aggressive because a seed gets read aloud, retyped off
+ * a screenshot, and OCR'd — `O` really does mean `Q` in those contexts. The cost is
+ * that it will happily manufacture a seed out of anything:
+ *
+ *   normalizeSeed('not a seed at all')  ->  'NQTASEEDATAJ'   // a VALID seed
+ *   normalizeSeed('https://example...') ->  12 chars of hostname
+ *
+ * Both are valid-looking seeds for entirely the wrong run, and both were reachable
+ * from a paste box before this was documented. So:
+ *
+ *   - Use `looksLikeSeed` BEFORE normalising anything a user or a URL supplied.
+ *   - Never normalise a whole pasted string that might be a link; parse the link
+ *     first and normalise only the seed parameter.
+ *
+ * Repairing what is plainly a seed is helpful. Repairing arbitrary prose into a seed
+ * is a silent wrong answer.
+ */
 export function normalizeSeed(input: string): string {
   const cleaned = input
     .toUpperCase()
@@ -36,6 +57,32 @@ export function formatSeed(seed: string): string {
     groups.push(normalized.slice(i, i + GROUP_SIZE))
   }
   return groups.join('-')
+}
+
+/**
+ * Whether `input` is plausibly someone trying to give us a seed at all.
+ *
+ * Checked BEFORE normalising, which is the point: `normalizeSeed` repairs, and
+ * repairing prose produces a confidently wrong run. This rejects the things a seed
+ * never contains — whitespace, punctuation beyond grouping dashes, a URL scheme — and
+ * requires roughly the right amount of usable material.
+ *
+ * Deliberately not the same as `isValidSeed`, which answers "is this a seed" about
+ * an already-normalised string. This answers "was this meant to be one".
+ */
+export function looksLikeSeed(input: string): boolean {
+  const trimmed = input.trim()
+  if (trimmed.length === 0) return false
+  // A link is a link. Parse it as one rather than mining characters out of it.
+  if (/[:/?#=&]/.test(trimmed)) return false
+  // Spaces mean prose. A seed is one token, optionally dash-grouped.
+  if (/\s/.test(trimmed)) return false
+  if (!/^[0-9A-Za-z-]+$/.test(trimmed)) return false
+
+  const bare = trimmed.replace(/-/g, '')
+  // Enough material to be a seed, and not so much that it is something else that
+  // happens to be alphanumeric.
+  return bare.length >= SEED_LENGTH - 2 && bare.length <= SEED_LENGTH + 2
 }
 
 export function isValidSeed(input: string): boolean {

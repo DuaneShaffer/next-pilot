@@ -20,8 +20,17 @@
  * because mutating a type is how progress gets silently destroyed.
  */
 
+import {
+  DEFAULT_CERTIFICATIONS,
+  coerceProgress,
+  coerceUnlockedIds,
+  type CertificationState,
+} from './certifications'
+import { sanitizePersonnelHistory, type PersonnelRecord } from './personnel'
+import { coerceDailyRecord, type DailyRecord } from './seedModes'
+
 const STORAGE_KEY = 'next-pilot/save'
-export const CURRENT_VERSION = 2
+export const CURRENT_VERSION = 3
 
 /** Motion and flash preferences. See docs/UI.md rule 10 — this is accessibility. */
 export interface Settings {
@@ -53,20 +62,46 @@ interface SaveV1 {
   pilotNumber: number
 }
 
-/** Adds settings, introduced with the M2 feel pass. */
+/** Adds settings, introduced with the M2 feel pass. Frozen. */
 interface SaveV2 {
   version: 2
   pilotNumber: number
   settings: Settings
 }
 
-export type Save = SaveV2
-type AnySave = SaveV1 | SaveV2
+/**
+ * Adds meta-progression, introduced with M4.
+ *
+ * Three independent stores, each owned by the module that understands it — this file
+ * persists them and coerces them, and deliberately knows nothing about what a
+ * certification or a personnel record means.
+ */
+interface SaveV3 {
+  version: 3
+  pilotNumber: number
+  settings: Settings
+  certifications: CertificationState
+  /** OLDEST FIRST, capped. See personnel.ts for why the cap is a storage concern. */
+  personnel: readonly PersonnelRecord[]
+  /**
+   * The daily contract most recently flown.
+   *
+   * One entry rather than a history: a record whose date is not today means "not
+   * flown", so it self-invalidates with no cleanup pass and no unbounded growth.
+   */
+  daily: DailyRecord | null
+}
+
+export type Save = SaveV3
+type AnySave = SaveV1 | SaveV2 | SaveV3
 
 export const DEFAULT_SAVE: Save = {
-  version: 2,
+  version: 3,
   pilotNumber: 1,
   settings: { ...DEFAULT_SETTINGS },
+  certifications: DEFAULT_CERTIFICATIONS,
+  personnel: [],
+  daily: null,
 }
 
 /**
@@ -85,6 +120,21 @@ const MIGRATIONS: Record<number, (save: AnySave) => AnySave> = {
       // notably shake ON, matching what they already experienced.
       settings: { ...DEFAULT_SETTINGS },
     } satisfies SaveV2
+  },
+  2: (save) => {
+    const v2 = save as SaveV2
+    return {
+      version: 3,
+      pilotNumber: v2.pilotNumber,
+      settings: v2.settings,
+      // A returning v2 player has certified nothing and filed nobody. Starting them
+      // with unlocks would hand out progression they never earned; starting them with
+      // invented personnel files would put fiction in a history that is meant to be a
+      // record of what actually happened.
+      certifications: DEFAULT_CERTIFICATIONS,
+      personnel: [],
+      daily: null,
+    } satisfies SaveV3
   },
 }
 
@@ -133,11 +183,21 @@ export function migrate(raw: unknown): Save {
     version = save.version
   }
 
-  const current = save as SaveV2
+  const current = save as SaveV3
+  // Every store is coerced by the module that owns its shape. None of them throw on
+  // hand-edited storage, and each reports what it discarded rather than silently
+  // repairing — a save that quietly loses half a history is worse than one that says
+  // it did.
   return {
     version: CURRENT_VERSION,
     pilotNumber: Math.max(1, Math.floor(current.pilotNumber)),
     settings: coerceSettings(current.settings),
+    certifications: {
+      unlocked: coerceUnlockedIds(current.certifications?.unlocked),
+      progress: coerceProgress(current.certifications?.progress),
+    },
+    personnel: sanitizePersonnelHistory(current.personnel).history,
+    daily: coerceDailyRecord(current.daily),
   }
 }
 
