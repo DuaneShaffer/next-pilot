@@ -70,6 +70,37 @@
  * at the *end* of one, after that sector's two item choices and two between-sector
  * shops. A ladder authored at sector entry can never price a fight at sector exit.
  *
+ * ## Fire cadence was priced against the WRONG fight length, and is rescaled here
+ *
+ * Correcting the HP made every fight 1.2x to 2.8x longer. Nothing else changed, so
+ * every boss's damage *per fight* went up by the same factor — and a sweep showed
+ * immediately that this was the binding constraint rather than the HP: with the new
+ * HP and the old weapons, a competent policy's clear rate fell from 27.0% / 28.7% to
+ * 9.7% / 12.7%, and **every one of the extra deaths was at a boss**. Wave deaths were
+ * unchanged (171 -> 170 on one seed); boss deaths went 48 -> 110 and 54 -> 125.
+ *
+ * The reason is that the old numbers had been tuned, implicitly and by nobody, so
+ * that a 10-17 second fight consumed almost exactly the health a median pilot had
+ * left. At that margin any lengthening at all converts survivors into deaths, and the
+ * damage compounds down the run because integrity does not regenerate between
+ * sectors: measured entry health at sector 4 fell 67% -> 54% and at sector 5
+ * 83% -> 60%, which then cost wave survival in sectors the boss change never touched.
+ *
+ * So the last three bosses have every weapon cadence multiplied by 1.35 and every
+ * shot of 8 damage or more reduced by one, and the first two carry a smaller,
+ * per-boss version of the same correction (see the notes on the Repossessor's third
+ * phase and the Auditor's opening). Two deliberate choices inside that:
+ *
+ * - **Cadence first, damage second.** A shot's damage is the number a player feels
+ *   when it lands; the interval is the number they feel as pressure. Stretching the
+ *   interval takes the pressure off without making the boss feel like it is firing
+ *   confetti, and a sparser pattern is *more* legible, which is priority one.
+ * - **Damage per fight is NOT held constant, and should not be.** It still rises
+ *   roughly 1.5x on the last three, because those three were not a threat: measured
+ *   kill rates were 94%, 99% and 99%. Holding the total flat would have kept them
+ *   free. The first two bosses, which were the real walls at 85% and 95%, are the
+ *   ones held near their old totals.
+ *
  * ## Phases are announced, and long enough to be read
  *
  * Every phase carries a `callout`, because an unannounced phase shift is unfair
@@ -212,9 +243,9 @@ const TENANT_OPENING: BossPhaseDef = {
     // grammar is "irregular patterns that punish standing still" and an even ring is
     // the most regular thing a boss can fire.
     count: 9,
-    intervalTicks: 138,
+    intervalTicks: 186,
     bulletSpeed: 96,
-    damage: 9,
+    damage: 8,
     firstDelayTicks: 114,
     windupTicks: 40,
   },
@@ -230,18 +261,18 @@ const TENANT_CREEP: BossPhaseDef = {
     // The sector's thesis in one weapon: a tracker keeps its heading, so it is never
     // unavoidable and always an instruction to move.
     kind: 'tracker',
-    intervalTicks: 66,
+    intervalTicks: 89,
     bulletSpeed: 100,
-    damage: 9,
+    damage: 8,
     firstDelayTicks: 72,
     windupTicks: 30,
   },
   secondary: {
     kind: 'ring',
     count: 7,
-    intervalTicks: 186,
+    intervalTicks: 251,
     bulletSpeed: 88,
-    damage: 8,
+    damage: 7,
     firstDelayTicks: 126,
     windupTicks: 44,
   },
@@ -265,7 +296,7 @@ const TENANT_SPOREBED: BossPhaseDef = {
     // 18 points is 20 degrees apart: at 76 u/s the wall arrives slowly enough to read
     // and the gaps are ~26 units at 75 units of range, against a 5.5-unit hitbox.
     count: 18,
-    intervalTicks: 174,
+    intervalTicks: 235,
     bulletSpeed: 76,
     damage: 7,
     firstDelayTicks: 90,
@@ -275,9 +306,9 @@ const TENANT_SPOREBED: BossPhaseDef = {
     // The fast lance is what stops the slow wall being a free phase: threading the
     // ring while an aimed shot is inbound is the actual ask.
     kind: 'aimed',
-    intervalTicks: 78,
+    intervalTicks: 105,
     bulletSpeed: 150,
-    damage: 10,
+    damage: 9,
     firstDelayTicks: 66,
     windupTicks: 26,
   },
@@ -292,18 +323,18 @@ const TENANT_COLLAPSE: BossPhaseDef = {
     kind: 'spread',
     count: 7,
     spreadDegrees: 70,
-    intervalTicks: 120,
+    intervalTicks: 162,
     bulletSpeed: 118,
-    damage: 8,
+    damage: 7,
     firstDelayTicks: 72,
     windupTicks: 44,
   },
   secondary: {
     kind: 'ring',
     count: 12,
-    intervalTicks: 210,
+    intervalTicks: 284,
     bulletSpeed: 104,
-    damage: 8,
+    damage: 7,
     firstDelayTicks: 138,
     windupTicks: 46,
   },
@@ -322,18 +353,19 @@ const BAILIFF_OPENING: BossPhaseDef = {
   movementParams: { speed: 58, holdYFraction: BAILIFF_HOLD_Y_FRACTION },
   weapon: {
     kind: 'ring',
-    // Twenty points, 18 degrees apart, on a three-second cycle with a 1.17-second
-    // tell. The Kill Grid is "precise laser geometry, telegraphed and unforgiving":
+    // Twenty points, 18 degrees apart, on a four-second cycle with a 1.17-second
+    // tell. The cycle was three seconds when the whole fight was ten (see the
+    // cadence note in this file's header). The Kill Grid is "precise laser geometry, telegraphed and unforgiving":
     // the pattern is completely knowable in advance and completely unsurvivable if
     // ignored, which is a puzzle rather than a reflex test.
     count: 20,
-    intervalTicks: 180,
+    intervalTicks: 243,
     bulletSpeed: 120,
-    damage: 9,
+    damage: 8,
     firstDelayTicks: 132,
     windupTicks: 70,
   },
-  callout: 'Grid armed. Twenty-point ring every 3 s.',
+  callout: 'Grid armed. Twenty-point ring every 4 s.',
 }
 
 const BAILIFF_LATTICE: BossPhaseDef = {
@@ -347,18 +379,18 @@ const BAILIFF_LATTICE: BossPhaseDef = {
     // even-count mistake `enemies.ts` measured on the turret and reverted.
     count: 9,
     spreadDegrees: 80,
-    intervalTicks: 144,
+    intervalTicks: 194,
     bulletSpeed: 132,
-    damage: 8,
+    damage: 7,
     firstDelayTicks: 84,
     windupTicks: 60,
   },
   secondary: {
     kind: 'ring',
     count: 12,
-    intervalTicks: 300,
+    intervalTicks: 405,
     bulletSpeed: 96,
-    damage: 8,
+    damage: 7,
     firstDelayTicks: 168,
     windupTicks: 66,
   },
@@ -368,8 +400,8 @@ const BAILIFF_LATTICE: BossPhaseDef = {
 /**
  * The variant middle: continuous pressure instead of periodic geometry.
  *
- * The base lattice phase is a positional puzzle solved once every 2.4 seconds. The
- * interdiction sweep is a 1.3-second tracker cadence that never lets the pilot settle,
+ * The base lattice phase is a positional puzzle solved once every 3.2 seconds. The
+ * interdiction sweep is a 1.75-second tracker cadence that never lets the pilot settle,
  * with a slow five-shot fan behind it. Same slot, opposite tempo.
  */
 const BAILIFF_INTERDICT: BossPhaseDef = {
@@ -378,9 +410,9 @@ const BAILIFF_INTERDICT: BossPhaseDef = {
   movementParams: { speed: 58, holdYFraction: BAILIFF_HOLD_Y_FRACTION },
   weapon: {
     kind: 'tracker',
-    intervalTicks: 78,
+    intervalTicks: 105,
     bulletSpeed: 108,
-    damage: 8,
+    damage: 7,
     firstDelayTicks: 72,
     windupTicks: 32,
   },
@@ -388,9 +420,9 @@ const BAILIFF_INTERDICT: BossPhaseDef = {
     kind: 'spread',
     count: 5,
     spreadDegrees: 30,
-    intervalTicks: 156,
+    intervalTicks: 211,
     bulletSpeed: 140,
-    damage: 9,
+    damage: 8,
     firstDelayTicks: 108,
     windupTicks: 48,
   },
@@ -409,17 +441,17 @@ const BAILIFF_DESTABILISED: BossPhaseDef = {
     // is threadable at distance and lethal point-blank. That is the correct shape for
     // a final phase: it enforces range on a player who wants the kill.
     count: 24,
-    intervalTicks: 150,
+    intervalTicks: 203,
     bulletSpeed: 130,
-    damage: 9,
+    damage: 8,
     firstDelayTicks: 78,
     windupTicks: 64,
   },
   secondary: {
     kind: 'tracker',
-    intervalTicks: 96,
+    intervalTicks: 130,
     bulletSpeed: 115,
-    damage: 10,
+    damage: 9,
     firstDelayTicks: 120,
     windupTicks: 34,
   },
@@ -441,18 +473,18 @@ const MANIFEST_OPENING: BossPhaseDef = {
     kind: 'spread',
     count: 7,
     spreadDegrees: 60,
-    intervalTicks: 120,
+    intervalTicks: 162,
     bulletSpeed: 130,
-    damage: 9,
+    damage: 8,
     firstDelayTicks: 126,
     windupTicks: 46,
   },
   secondary: {
     kind: 'ring',
     count: 12,
-    intervalTicks: 258,
+    intervalTicks: 348,
     bulletSpeed: 100,
-    damage: 8,
+    damage: 7,
     firstDelayTicks: 174,
     windupTicks: 50,
   },
@@ -466,17 +498,17 @@ const MANIFEST_BREACH: BossPhaseDef = {
   weapon: {
     kind: 'ring',
     count: 18,
-    intervalTicks: 138,
+    intervalTicks: 186,
     bulletSpeed: 112,
-    damage: 9,
+    damage: 8,
     firstDelayTicks: 78,
     windupTicks: 44,
   },
   secondary: {
     kind: 'aimed',
-    intervalTicks: 84,
+    intervalTicks: 113,
     bulletSpeed: 155,
-    damage: 11,
+    damage: 10,
     firstDelayTicks: 108,
     windupTicks: 26,
   },
@@ -487,7 +519,7 @@ const MANIFEST_BREACH: BossPhaseDef = {
  * The certified variant middle. `src/content/certifications.ts` unlocks this by id
  * from the Extraction Certificate and describes it to the player as "the Warden seals
  * the lane in sections", so the phase has to actually do that: an eleven-shot fan
- * across 96 degrees is a wall with gaps, thrown slowly enough (2.8 s, with a 1.03 s
+ * across 96 degrees is a wall with gaps, thrown slowly enough (3.8 s, with a 1.03 s
  * tell) that finding the gap is the whole activity.
  *
  * If this phase is ever retuned into something that is not lane-sealing, the
@@ -501,18 +533,18 @@ const MANIFEST_WARDEN_SEAL: BossPhaseDef = {
     kind: 'spread',
     count: 11,
     spreadDegrees: 96,
-    intervalTicks: 168,
+    intervalTicks: 227,
     bulletSpeed: 120,
-    damage: 8,
+    damage: 7,
     firstDelayTicks: 96,
     windupTicks: 62,
   },
   secondary: {
     kind: 'ring',
     count: 8,
-    intervalTicks: 264,
+    intervalTicks: 356,
     bulletSpeed: 90,
-    damage: 8,
+    damage: 7,
     firstDelayTicks: 156,
     windupTicks: 54,
   },
@@ -525,9 +557,9 @@ const MANIFEST_HOSTILE_CARGO: BossPhaseDef = {
   movementParams: { speed: 52, holdYFraction: MANIFEST_HOLD_Y_FRACTION },
   weapon: {
     kind: 'tracker',
-    intervalTicks: 72,
+    intervalTicks: 97,
     bulletSpeed: 118,
-    damage: 10,
+    damage: 9,
     firstDelayTicks: 84,
     windupTicks: 32,
   },
@@ -535,9 +567,9 @@ const MANIFEST_HOSTILE_CARGO: BossPhaseDef = {
     kind: 'spread',
     count: 9,
     spreadDegrees: 72,
-    intervalTicks: 150,
+    intervalTicks: 203,
     bulletSpeed: 138,
-    damage: 9,
+    damage: 8,
     firstDelayTicks: 120,
     windupTicks: 52,
   },
@@ -552,7 +584,7 @@ const MANIFEST_HOSTILE_CARGO: BossPhaseDef = {
  * later means the fight is never fully solved, which is the whole justification for
  * seeded variants over a fixed script.
  *
- * A 0.8-second aimed cadence at 160 u/s is the fastest sustained fire any boss puts
+ * A 1.08-second aimed cadence at 160 u/s is the fastest sustained fire any boss puts
  * out. It is survivable because it is *aimed* — one shot, one direction, always
  * dodgeable by moving — and because the 20-tick tell is still a third of a second.
  */
@@ -562,18 +594,18 @@ const MANIFEST_LIQUIDATION: BossPhaseDef = {
   movementParams: { speed: 52, holdYFraction: MANIFEST_HOLD_Y_FRACTION },
   weapon: {
     kind: 'aimed',
-    intervalTicks: 48,
+    intervalTicks: 65,
     bulletSpeed: 160,
-    damage: 8,
+    damage: 7,
     firstDelayTicks: 66,
     windupTicks: 20,
   },
   secondary: {
     kind: 'ring',
     count: 16,
-    intervalTicks: 192,
+    intervalTicks: 259,
     bulletSpeed: 104,
-    damage: 9,
+    damage: 8,
     firstDelayTicks: 132,
     windupTicks: 48,
   },
@@ -613,17 +645,17 @@ const MANIFEST_CLOSING: BossPhaseDef = {
     // moving through the playfield, so the ring plus the boss's own body is already
     // most of the difficulty.
     count: 16,
-    intervalTicks: 126,
+    intervalTicks: 170,
     bulletSpeed: 128,
-    damage: 10,
+    damage: 9,
     firstDelayTicks: 72,
     windupTicks: 42,
   },
   secondary: {
     kind: 'tracker',
-    intervalTicks: 72,
+    intervalTicks: 97,
     bulletSpeed: 120,
-    damage: 10,
+    damage: 9,
     firstDelayTicks: 108,
     windupTicks: 30,
   },

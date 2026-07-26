@@ -72,11 +72,20 @@ import {
   movePauseSelection,
 } from './ui/pauseMenu'
 import { drawTitleScreen } from './ui/titleScreen'
+import { loadBindings, persistBindings } from './meta/keybinds'
+import {
+  createSettingsState,
+  drawSettingsScreen,
+  markSaved,
+  settingsReduce,
+  type SettingsState,
+} from './ui/settings'
 
 const VERSION = 'v0.2.0 · m2'
 
 type Screen =
   | 'title'
+  | 'settings'
   | 'hull-select'
   | 'sortie'
   | 'paused'
@@ -221,6 +230,28 @@ function main(): void {
   let menuTick = 0
   let pauseSelection = 0
   let hangarSelection = 0
+  /**
+   * Key bindings, in their own store.
+   *
+   * Separate from the save on purpose: bindings are a property of the keyboard in
+   * front of you rather than of your progress, a corrupt keymap must not cost a
+   * player their pilot history (`loadSave` falls back to defaults on any corruption),
+   * and "reset my keys" must not sit next to "reset my progress".
+   */
+  let bindings = loadBindings()
+  keyboard.setBindings(bindings)
+  keyboard.setAutoFire(save.settings.autoFire)
+  let settingsState: SettingsState | null = null
+  /** Where ESC from the settings screen returns to. */
+  let settingsReturn: Screen = 'title'
+
+  function openSettings(from: Screen): void {
+    settingsReturn = from
+    settingsState = createSettingsState(save.settings, bindings)
+    screen = 'settings'
+    keyboard.clearPressed()
+  }
+
   /** The hulls this sortie offers, drawn once from the run seed. */
   let hullOffer: readonly string[] = []
   let hullSelection = 0
@@ -562,6 +593,9 @@ function main(): void {
       if (item.id === 'resume') {
         audio.confirm()
         setPaused(false)
+      } else if (item.id === 'settings') {
+        audio.confirm()
+        openSettings('paused')
       } else if (item.id === 'abandon') {
         audio.cancel()
         abandonSortie()
@@ -572,6 +606,21 @@ function main(): void {
 
   const loop = new FixedLoop({
     tick(): void {
+      /*
+       * The input context, set before anything reads the keyboard.
+       *
+       * Auto-fire is gated on this, and the gate is load-bearing rather than tidy: a
+       * trigger that never releases can never produce the rising edge a confirm
+       * needs, and `HELD_CONFIRM_DWELL_TICKS` would then auto-confirm option 0 on
+       * every reward card 0.8 seconds after it opened. Mobile pick rates would become
+       * a constant and the same seed would play out differently depending on a
+       * setting. `src/core/touch.ts` makes the identical distinction for the same
+       * reason.
+       */
+      keyboard.setContext(
+        screen === 'sortie' ? (world.pendingChoice !== null ? 'choice' : 'sortie') : 'menu',
+      )
+
       if (screen === 'title') {
         menuTick++
         titleStars.update(0.35)
@@ -597,6 +646,14 @@ function main(): void {
           audio.confirm()
           seedEntry = EMPTY_SEED_ENTRY
           screen = 'seed-entry'
+        }
+        // Down is the only free direction: up is seed entry, left the hangar, right
+        // personnel. Settings must be reachable BEFORE a run — otherwise configuring
+        // your keys means launching a permadeath sortie with the keys you were trying
+        // to change.
+        if (keyboard.consumePressed('down')) {
+          audio.confirm()
+          openSettings('title')
         }
         return
       }
@@ -646,6 +703,57 @@ function main(): void {
           audio.cancel()
           screen = 'incident'
         }
+        return
+      }
+
+      if (screen === 'settings' && settingsState) {
+        let next = settingsReduce(settingsState, { kind: 'tick' })
+
+        if (next.capturing !== null) {
+          /*
+           * Raw codes bypass the action tables entirely while capturing, and that
+           * circularity is the whole point: reading the binding you are trying to
+           * change is what makes a bad keymap unrepairable.
+           */
+          if (!keyboard.capturing) {
+            keyboard.captureNextCode((code) => {
+              if (settingsState) settingsState = settingsReduce(settingsState, { kind: 'code', code })
+            })
+          }
+        } else {
+          if (keyboard.consumePressed('up')) next = settingsReduce(next, { kind: 'move', delta: -1 })
+          if (keyboard.consumePressed('down')) next = settingsReduce(next, { kind: 'move', delta: 1 })
+          if (keyboard.consumePressed('left')) next = settingsReduce(next, { kind: 'adjust', delta: -1 })
+          if (keyboard.consumePressed('right')) next = settingsReduce(next, { kind: 'adjust', delta: 1 })
+          if (keyboard.consumePressed('confirm')) next = settingsReduce(next, { kind: 'confirm' })
+          if (keyboard.consumePressed('cancel') || keyboard.consumePressed('pause')) {
+            next = settingsReduce(next, { kind: 'cancel' })
+          }
+        }
+
+        if (next.dirty) {
+          save.settings = next.settings
+          bindings = next.bindings
+          keyboard.setBindings(bindings)
+          keyboard.setAutoFire(next.settings.autoFire)
+          applyAudioSettings(save.settings)
+          persistSave(save)
+          persistBindings(bindings)
+          audio.confirm()
+          next = markSaved(next)
+        }
+
+        if (next.exit) {
+          audio.cancel()
+          settingsState = null
+          screen = settingsReturn
+          menuTick = 0
+          keyboard.clearPressed()
+          loop.resetClock()
+          return
+        }
+
+        settingsState = next
         return
       }
 
@@ -758,6 +866,11 @@ function main(): void {
           copied: copiedChoice,
           tick: menuTick,
         })
+        return
+      }
+
+      if (screen === 'settings' && settingsState) {
+        drawSettingsScreen(ctx, settingsState)
         return
       }
 

@@ -209,6 +209,23 @@ const SHOTS = [
     holdMs: 0,
   },
   {
+    // The settings screen, reachable from the title with Down. New pixels: the
+    // keybinding rows and the taller pause card have never been looked at, and
+    // CLAUDE.md's definition of done says that is not verification.
+    name: 'settings',
+    url: `/?seed=${SEED}`,
+    pressAfter: ['ArrowDown'],
+    settleMs: 400,
+  },
+  {
+    // Mid-capture: the row is waiting for a key. A binding UI that can lock the
+    // player out of the menu that fixes it is a trap, so this state matters.
+    name: 'settings-capture',
+    url: `/?seed=${SEED}`,
+    pressAfter: ['ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'ArrowDown', 'Enter'],
+    settleMs: 400,
+  },
+  {
     // Hull selection. Only appears once a certification has widened the pool past
     // the Lien, which is why it sits AFTER the shots that file runs — the browser
     // context carries localStorage forward, so by here the save has certifications.

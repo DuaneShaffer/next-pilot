@@ -298,7 +298,21 @@ from a diff:
   was loaded.
 - **A test that stopped measuring.** The build-focused bot probe expects to assemble two named
   items; at 14 items it did so often, at 40 it never does. The probe was silently no longer an
-  instrument.
+  instrument. (It was worse than a pool-size problem: the probe drove `SINGLE_SECTOR_RUN`, which
+  was the whole game when it was written and is now one fifth of it. 12 offer slots per run
+  against 36.)
+- **The world map never happened in a single bot run.** The bots' `ChoiceResolver` read a card's
+  option count from `offers.length`; a route card carries its options in `routes` with `offers`
+  empty. So every policy saw a zero-option screen and skipped — and the simulation resolves a
+  skipped route as "take the direct approach". Nothing crashed, nothing stalled, and every sweep
+  measured a game with no hazards in it.
+- **A field can exist and still be decoration.** `Replay` gained `hullId`, but `playback` took a
+  `(seed) => World` factory, so a caller that ignored it flew the wrong ship and diverged exactly
+  as badly as before — and `main.ts` *was* that caller. Fixed by verification rather than
+  convention: the factory takes the hull and `playback` throws if the world reports a different
+  one. `choiceSelection` had the same shape — it existed on `World`, was play-affecting (the dwell
+  confirms whatever is highlighted), and was invisible to the state hash because it was not on
+  `WorldView`.
 
 ## M6 — Polish and balance
 
