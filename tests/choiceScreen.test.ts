@@ -149,10 +149,21 @@ describe('mechanism first (UI rule 4)', () => {
      * `harmonic-lance` and `buckshot-manifold` each carry an `effects` entry AND a stat,
      * so the card must keep the sentence (a row cannot say "passes through 2 extra
      * enemies") while a row also prints the stat. Rewriting their prose to drop the
-     * figure was tried and reverted: `src/ui/hangar.ts` shows the same sentence with no
-     * resolved table under it, and `tests/items.test.ts` rightly requires an item to
-     * state the numbers it applies. Closing this properly means giving the hangar
-     * resolved rows too — recorded, not bodged. The list must not grow without that
+     * figure was tried and reverted, for two reasons worth keeping straight.
+     *
+     * `tests/items.test.ts` rightly requires an item to state the numbers it applies —
+     * that guard predates the resolved rows and still protects the authored spec. And
+     * `src/ui/hullSelect.ts:673` prints an item's `mechanism` verbatim for a hull's
+     * STARTING ITEM, with no resolved table under it, so a figure cut from the prose
+     * would simply vanish there. (An earlier version of this note said the HANGAR was
+     * that second consumer. It is not — the hangar shows certifications and never reads
+     * `ItemDef.mechanism`. Grep before trusting a file reference in a comment, including
+     * this one.)
+     *
+     * Only `repair-nanites` is a starting item today, so neither item below is currently
+     * reachable through that path — but the path is what makes the prose a spec rather
+     * than card copy, and it is one hull away from mattering. Closing this properly means
+     * resolved rows on the starting-item line too. The list must not grow without that
      * work, which is what naming it here enforces.
      */
     const KNOWN_DUPLICATES: readonly string[] = ['harmonic-lance', 'buckshot-manifold']
