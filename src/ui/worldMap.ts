@@ -42,7 +42,9 @@
  * hazard descriptions (a rule 4 failure) or to let the boxes overlap. Instead each
  * route keeps a two-line row carrying its name, hazard count, hazard *names*, and
  * reward chip, and the pane below shows the full brief for whichever row the cursor
- * is on. The pane is sized for the worst route on offer, not the selected one, so
+ * is on. **When every detour accepts the same hazard** — three of the four seams in the
+ * shipped run — the name is hoisted into one line above the stack instead and the rows
+ * spend that line on what each one pays; see `SHARED_HAZARD_LABEL`. The pane is sized for the worst route on offer, not the selected one, so
  * its rectangle does not move or resize as the cursor moves — no text on this screen
  * shifts when you press left, and text that moves is text you have to re-read.
  *
@@ -182,6 +184,32 @@ export const NO_HAZARD_ROW_TEXT = 'No hazards will be active on this leg.'
 export const NO_HAZARD_PANE_TEXT =
   'No hazards will be active. One only becomes live if the route you take accepts it.'
 
+/**
+ * THE ONE PRICE, STATED ONCE.
+ *
+ * `buildRoutes` gives both priced routes the same hazard whenever the next sector only
+ * has one — which is three of the four seams in the shipped run. The rows used to
+ * print that hazard's name twice, once per route, and two differently-named options
+ * listing an identical cost does not read as "same price, different payout": it reads
+ * as the screen having drawn the same row twice. Reported as a bug; it was not one.
+ *
+ * So when every detour on the card accepts the same hazard, the cost is hoisted out of
+ * the rows and stated once above them, and the rows spend their second line on what
+ * each one PAYS instead. The card then says what is actually true — one price, three
+ * payouts — and the rows differ from each other on the axis the choice is really made
+ * on. This is the same device the header already uses for a fact the routes agree on
+ * (see `VARIES_TEXT`, which is its inverse).
+ *
+ * DELIBERATELY NOT IN `MAP_STRINGS`. Every key there needs a matching container in
+ * `tests/textFits.test.ts`'s placement table, and these two are not measured the way
+ * that sweep measures: the tail is composed with a hazard name at runtime and
+ * truncated against whatever the label left, so what has to be proved is "the label
+ * fits and the composite is truncated", not "this literal fits a fixed box".
+ * `tests/worldMap.test.ts` asserts exactly that against the real container width.
+ */
+export const SHARED_HAZARD_LABEL = 'SAME HAZARD, EVERY DETOUR'
+export const SHARED_HAZARD_TAIL = 'only the payout differs'
+
 export const HAZARD_WELL_LABEL = 'ACCEPTED HAZARDS'
 /** The same well when the route accepts none. Stated, so the absence is deliberate. */
 export const NO_HAZARD_WELL_LABEL = 'NO HAZARDS'
@@ -190,7 +218,14 @@ export const REWARD_WELL_LABEL = 'ON ARRIVAL'
 export const BRIEF_LABEL = 'ROUTE BRIEF'
 
 export const FOOTER_CONTROLS_LEFT = '←  →  select'
-export const FOOTER_CONTROLS_RIGHT = 'SPACE / Z  confirm      X  decline'
+/**
+ * ENTER, not SPACE and not Z.
+ *
+ * Accepting is `InputSnapshot.confirm` now, whose codes deliberately exclude the fire
+ * bindings — "the selection screens must not use the fire key to accept responses". A
+ * footer naming the trigger names a key that does nothing on this screen.
+ */
+export const FOOTER_CONTROLS_RIGHT = 'ENTER  confirm      X  decline'
 /**
  * What declining does, which is NOT "nothing".
  *
@@ -205,9 +240,6 @@ export const FOOTER_CONTROLS_RIGHT = 'SPACE / Z  confirm      X  decline'
  */
 export const FOOTER_HINT =
   'Declining flies the direct approach: no hazards accepted, no bonus paid.'
-export const FOOTER_HINT_AWAITING =
-  'Release fire to choose — holding it confirms the highlighted route.'
-
 /**
  * Shown in place of a route's name when the simulation sends an empty one.
  *
@@ -255,7 +287,6 @@ export const MAP_STRINGS = {
   controlsLeft: FOOTER_CONTROLS_LEFT,
   controlsRight: FOOTER_CONTROLS_RIGHT,
   hint: FOOTER_HINT,
-  hintAwaiting: FOOTER_HINT_AWAITING,
   unnamedRoute: UNNAMED_ROUTE_TEXT,
 } as const
 
@@ -348,6 +379,12 @@ export interface WorldMapLayout {
   selected: number
   header: readonly TextLine[]
   track: TrackLayout
+  /**
+   * The one-price banner above the rows, or null when the routes accept different
+   * hazards. `names` is carried separately so a test can assert *which* hazard was
+   * hoisted without parsing the rendered line.
+   */
+  sharedHazard: { names: string; lines: readonly TextLine[] } | null
   rows: readonly RouteRowLayout[]
   detail: DetailLayout
   footer: readonly TextLine[]
@@ -371,13 +408,6 @@ export interface WorldMapLayoutInput {
   selected: number
   /** Ticks the choice has been open, for the selection pulse. */
   tick: number
-  /**
-   * True while the trigger has been held for every tick since the card opened.
-   *
-   * Drives the "release fire to choose" hint. Without it the card looks frozen to
-   * anyone who was firing when it appeared, which is nearly everyone.
-   */
-  awaitingRelease?: boolean
   measure?: Measure
 }
 
@@ -448,6 +478,28 @@ function sharedValue<T>(values: readonly T[]): { shared: true; value: T } | { sh
   if (values.length === 0 || first === undefined) return { shared: false }
   for (const value of values) if (value !== first) return { shared: false }
   return { shared: true, value: first }
+}
+
+/**
+ * The hazard list every route on this card accepts, or null when they differ.
+ *
+ * Returns null unless at least TWO routes carry hazards and all of them carry the same
+ * ones: with one priced route there is nothing to mistake for a duplicate, and with
+ * different hazards the rows are already telling the player something they need. The
+ * direct route is ignored here rather than counted as a disagreement — it accepts
+ * nothing, which is stated by its own `[no hazards]` tag.
+ *
+ * Compared by name list, because names are what the row prints and what the player
+ * would compare. Ids would be the tighter key, but a card showing two identically
+ * *named* hazards has the reported problem whether or not their ids match.
+ */
+export function sharedHazardNames(routes: readonly RouteOption[]): string | null {
+  const priced = routes.filter((route) => route.hazards.length > 0)
+  if (priced.length < 2) return null
+  const keys = priced.map((route) => route.hazards.map((hazard) => hazard.name).join(', '))
+  const shared = sharedValue(keys)
+  if (!shared.shared || shared.value === '') return null
+  return shared.value
 }
 
 /**
@@ -700,23 +752,44 @@ export function layoutWorldMap(input: WorldMapLayoutInput): WorldMapLayout {
 
   y += RULE_GAP - 4
   rules.push({ x: MAP_CONTENT_X, y, w: MAP_CONTENT_W, h: 1 })
-  const rowsTop = y + RULE_GAP
+
+  const rowsTopBase = y + RULE_GAP
 
   // --- footer geometry, reserved before the rows so nothing can grow into it ---
   const footerTop = CARD_BOTTOM - PAD - FOOTER_H
   rules.push({ x: MAP_CONTENT_X, y: footerTop - 6, w: MAP_CONTENT_W, h: 1 })
 
+  /**
+   * Whether this card has one price to hoist, and what it costs in height.
+   *
+   * Only a CANDIDATE here: the banner is the first thing dropped when the card runs
+   * out of room, decided with the degradation cascade below. It cannot be paid for out
+   * of the hazard well — a note explaining the price must never be the reason the price
+   * itself gets trimmed.
+   */
+  const sharedCandidate = sharedHazardNames(routes)
+  const SHARED_NOTE_H = SUB_LH + 6
+
   // --- rows ------------------------------------------------------------------
   //
   // Fixed height, and the same height whether selected or not, so the stack never
   // reflows under the cursor.
-  const rowContents = routes.map((route) => {
+  const buildRowContents = (shared: string | null) => routes.map((route) => {
     const hazardCount = route.hazards.length
     const chip = rewardChip(route.reward)
     const names = route.hazards.map((hazard) => hazard.name).join(', ')
     const prefix = destination.shared ? '' : `To ${route.sectorName}. `
+    // With the price hoisted, the row's one spare line goes to what this route PAYS —
+    // `rewardText` verbatim, the simulation's own sentence, never a paraphrase. That
+    // makes all three payouts comparable without moving the cursor, which is the whole
+    // reason for hoisting: repeating one hazard three times crowded out the only thing
+    // the rows actually differ on.
     const summary =
-      hazardCount === 0 ? `${prefix}${NO_HAZARD_ROW_TEXT}` : `${prefix}Hazards: ${names}`
+      shared !== null
+        ? `${prefix}${route.rewardText}`
+        : hazardCount === 0
+          ? `${prefix}${NO_HAZARD_ROW_TEXT}`
+          : `${prefix}Hazards: ${names}`
     const tag = hazardTag(hazardCount)
     // Name, hazard tag, and reward chip share the title line, so the name is
     // truncated against what is actually beside it rather than against the row
@@ -790,15 +863,66 @@ export function layoutWorldMap(input: WorldMapLayoutInput): WorldMapLayout {
     WELL_PAD * 2 +
     PANE_PAD
 
-  const available = footerTop - RULE_GAP - rowsTop
+  const availableWith = (withNote: boolean): number =>
+    footerTop - RULE_GAP - rowsTopBase - (withNote ? SHARED_NOTE_H : 0)
   const stackHeight = (degrade: number): number =>
-    rowContents.length * rowHeight(degrade) + Math.max(0, rowContents.length - 1) * ROW_GAP
-  const fits = (degrade: number): boolean =>
+    routes.length * rowHeight(degrade) + Math.max(0, routes.length - 1) * ROW_GAP
+  const fitsWith = (degrade: number, withNote: boolean): boolean =>
     stackHeight(degrade) + RULE_GAP + paneWanted + (showsPaneLabel(degrade) ? SUB_LH : 0) <=
-    available
+    availableWith(withNote)
 
+  /*
+   * THE BANNER DEGRADES BEFORE THE MECHANISM DOES, AND AFTER THE ROWS DO.
+   *
+   * Order matters both ways. It is dropped only once the rows have already given up
+   * their label row and their second line, because at that point the banner is the ONLY
+   * place outside the pane that names what the detours cost — dropping it earlier would
+   * take the price off the card to save a label. And it is dropped before `fitHazards`
+   * starts cutting hazard descriptions, because a note *about* the price must never be
+   * the reason the price is trimmed. Nothing the sim can produce reaches this: it takes
+   * three routes carrying four 900-character hazards each.
+   */
+  let withNote = sharedCandidate !== null
   let degrade = 0
-  while (degrade < 2 && rowContents.length > 0 && !fits(degrade)) degrade++
+  while (degrade < 2 && routes.length > 0 && !fitsWith(degrade, withNote)) degrade++
+  if (withNote && routes.length > 0 && !fitsWith(degrade, true)) {
+    withNote = false
+    degrade = 0
+    while (degrade < 2 && !fitsWith(degrade, false)) degrade++
+  }
+
+  const shared = withNote ? sharedCandidate : null
+  const rowContents = buildRowContents(shared)
+  const rowsTop = rowsTopBase + (withNote ? SHARED_NOTE_H : 0)
+  const available = availableWith(withNote)
+
+  const sharedLines: TextLine[] = []
+  if (shared !== null) {
+    const label = line(
+      SHARED_HAZARD_LABEL,
+      MAP_CONTENT_X,
+      rowsTopBase + 1,
+      LABEL_SIZE,
+      // `caution` — this is the risky half of the card, stated once. Never `danger`:
+      // nothing on a map can hurt anyone this instant (rule 3).
+      Palette.caution,
+      { weight: 600, tracking: 1.4 },
+    )
+    sharedLines.push(label)
+    const tailX = label.x + label.width + 10
+    sharedLines.push(
+      line(
+        // Truncated against what is actually beside it: a sector could name a hazard
+        // long enough to push this off the card, and a price clipped by the card edge is
+        // the failure this note exists to fix.
+        truncateToWidth(`${shared} · ${SHARED_HAZARD_TAIL}`, CONTENT_RIGHT - tailX, SUB_SIZE, measure),
+        tailX,
+        rowsTopBase,
+        SUB_SIZE,
+        Palette.text,
+      ),
+    )
+  }
 
   // Space left over once the rows and the pane have what they need is spread, in
   // this order and each capped: into the rows themselves, then between them, then as
@@ -1108,15 +1232,8 @@ export function layoutWorldMap(input: WorldMapLayoutInput): WorldMapLayout {
       tracking: 0.6,
     }),
   )
-  const awaiting = input.awaitingRelease === true
   footer.push(
-    line(
-      awaiting ? FOOTER_HINT_AWAITING : FOOTER_HINT,
-      MAP_CONTENT_X,
-      footerTop + 4 + SUB_LH,
-      LABEL_SIZE,
-      awaiting ? Palette.caution : Palette.textFaint,
-    ),
+    line(FOOTER_HINT, MAP_CONTENT_X, footerTop + 4 + SUB_LH, LABEL_SIZE, Palette.textFaint),
   )
 
   // Slow, shallow, and never dark: ~0.86 Hz, opacity 0.07..0.21. Rule 10 is a hard
@@ -1138,6 +1255,7 @@ export function layoutWorldMap(input: WorldMapLayoutInput): WorldMapLayout {
     selected,
     header,
     track: { box: trackBox, pips, lines: trackLines, flown, current: target, ahead },
+    sharedHazard: shared === null ? null : { names: shared, lines: sharedLines },
     rows,
     detail: {
       box: paneBox,
@@ -1168,8 +1286,6 @@ export interface WorldMapOptions {
   selected: number
   /** Ticks the choice has been open, for the selection pulse. */
   tick: number
-  /** True while the trigger has been held for every tick since the card opened. */
-  awaitingRelease?: boolean
 }
 
 function paintLines(ctx: CanvasRenderingContext2D, lines: readonly TextLine[]): void {
@@ -1218,6 +1334,8 @@ export function drawWorldMapLayout(
     }
   }
   paintLines(ctx, layout.track.lines)
+
+  if (layout.sharedHazard) paintLines(ctx, layout.sharedHazard.lines)
 
   for (const row of layout.rows) {
     const { box } = row
@@ -1284,7 +1402,6 @@ export function drawWorldMap(
     stage: view.stage,
     selected: opts.selected,
     tick: opts.tick,
-    ...(opts.awaitingRelease === undefined ? {} : { awaitingRelease: opts.awaitingRelease }),
     // Measured against the real font, so wrapping is exact rather than estimated.
     measure: (text, size, weight, tracking) =>
       measureText(ctx, text, {

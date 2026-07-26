@@ -26,9 +26,38 @@ export interface Hull extends Interpolated {
   /** Structural integrity. At zero the pilot is lost and the run ends. */
   integrity: number
   maxIntegrity: number
-  /** Absorbs damage before integrity does. Does not regenerate in M1. */
+  /**
+   * Absorbs damage before integrity does, and recovers after a lull.
+   *
+   * Always a whole number, so the panel can print it directly. The fractional part
+   * of recovery lives in `shieldRegenProgress` instead.
+   */
   shield: number
   maxShield: number
+  /**
+   * Banked progress toward the next shield point, in [0, TICK_HZ).
+   *
+   * Measured in per-second units rather than as a fraction of a point: one tick banks
+   * `shieldRegenPerSecond` and one point costs `TICK_HZ`. See `tickShieldRegen` for why
+   * — the fractional form loses whole points to binary rounding at integer rates.
+   *
+   * AUTHORITATIVE STATE, not a display value — it is hashed into the regression
+   * digest and a divergence here changes when the next point lands. Kept separate
+   * from `shield` because a fractional `shield` would be read by the HUD and printed
+   * unrounded, which is a defect this project has already shipped once.
+   */
+  shieldRegenProgress: number
+  /** Ticks of suppression remaining before recovery resumes. Reset by any damage. */
+  shieldRegenBlockedTicks: number
+  /**
+   * Shield points recovery may still draw in this sector. Refilled on sector entry.
+   *
+   * This is the field that makes recovery balanceable — it bounds the total by progress
+   * instead of by elapsed time. It is also the number the HUD must show: a recovery the
+   * player cannot budget is one they cannot plan a disengage around, and planning the
+   * disengage is the entire mechanic.
+   */
+  shieldReserve: number
   /** Ticks of invulnerability remaining after taking a hit. */
   invulnTicks: number
   /** Collision radius. Deliberately smaller than the drawn hull — see damage.ts. */
@@ -369,19 +398,20 @@ export interface WorldView {
   readonly hazards: readonly HazardView[]
 
   /**
-   * How an open choice will resolve itself if the player does nothing, and when.
+   * How long the open choice has been open. Null when no choice is open.
    *
-   * Null when no choice is open. Every card in this game resolves without input
-   * eventually — a held trigger confirms the highlighted option after a dwell, and an
-   * untouched card times out — and until this existed, NOTHING on screen said so.
+   * NOTHING RESOLVES A CARD BUT THE PLAYER, which is why this is the only field left
+   * here. It used to be a countdown, and there used to be two things to count down to:
+   * a 20-second timeout that skipped any open card, and a 48-tick dwell that confirmed
+   * the highlighted option for anyone still holding the fire key. Both existed because
+   * confirm WAS the fire key; `InputSnapshot.confirm` is its own action now, so both are
+   * gone and a card waits as long as the player wants. See `src/sim/progression.ts`.
    *
-   * Both mechanisms are good and both were added for good reasons (see
-   * HELD_CONFIRM_DWELL_TICKS, which fixed a soft freeze a tester actually hit). The
-   * defect was that they were invisible: a card that decides for you while you are
-   * still reading it is the interface making a permadeath choice on your behalf
-   * without warning. Surfaced on the view rather than recomputed per screen so all
-   * four card kinds say the same thing — four screens each inventing their own
-   * countdown is how they end up disagreeing.
+   * Kept, rather than deleted with them, because an observer cannot otherwise tell one
+   * card from the next: a seam opens three cards in three ticks with no null gap, and
+   * this counter resetting is the only signal that says the card was swapped.
+   * `src/sim/bots.ts` and `tools/playtest.ts` both read it, and the harness's stall
+   * bound is measured in it.
    */
   readonly choiceResolve: ChoiceResolveView | null
 
@@ -402,16 +432,25 @@ export interface WorldView {
   readonly choiceSelection: number
 }
 
-/** What an open choice will do on its own, and how long is left. */
+/**
+ * How long an open choice has been open.
+ *
+ * ONE FIELD, AND NO `action`. It carried `action: 'confirm' | 'skip'` plus
+ * `ticksRemaining` and `totalTicks` while the sim resolved cards by itself; every
+ * screen that drew that countdown was drawing a deadline on a permadeath decision, and
+ * every one of those deadlines is gone. A field that named an outcome nothing will
+ * reach is worse than no field — this project has shipped that shape three times.
+ */
 export interface ChoiceResolveView {
   /**
-   * `confirm` — the trigger is held and the dwell will take the highlighted option.
-   * `skip` — nobody has touched anything and the card will decline itself.
+   * Ticks this card has been open. Counts UP, and only on ticks the sim did not
+   * discard to hitstop.
+   *
+   * NOT a countdown to anything and not to be turned back into one. It exists so an
+   * observer can tell this card from the next one at a seam. See
+   * `ChoiceCursor.openTicks`.
    */
-  action: 'confirm' | 'skip'
-  ticksRemaining: number
-  /** Length of the window this is counting down, so a bar can show progress. */
-  totalTicks: number
+  openTicks: number
 }
 
 // ---------------------------------------------------------------------------

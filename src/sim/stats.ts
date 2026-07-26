@@ -53,6 +53,54 @@ export const STATS: Readonly<Record<StatKey, StatSpec>> = {
   hullSpeed: { base: 210, min: 60, max: 620 },
   maxIntegrity: { base: 100, min: 1, max: 999 },
   maxShield: { base: 40, min: 0, max: 999 },
+  /**
+   * Shield points per second of not being hit. 4/s refills the base 40 pool in ten
+   * seconds of calm — but only while the sector's reserve lasts, which is what makes a
+   * rate this visible safe to ship. See `shieldReservePerSector`.
+   *
+   * Floored at 0 so a curse can switch recovery off entirely — that is a real
+   * drawback rather than a softlock, because the shield still absorbs. The cap is about
+   * legibility rather than safety: the reserve bounds the TOTAL, so a higher rate only
+   * changes how quickly a fixed budget arrives.
+   */
+  shieldRegenPerSecond: { base: 4, min: 0, max: 40 },
+  /**
+   * Ticks of quiet required before recovery starts. 150 ticks is 2.5 seconds.
+   *
+   * Floored at 60 (one second) rather than 0, and that floor is load-bearing: the
+   * invulnerability window is 45 ticks, so a delay below it would tick recovery
+   * between two hits of a sustained stream and convert the shield into flat damage
+   * reduction. The floor keeps the delay strictly longer than the window however
+   * many items stack on it.
+   */
+  shieldRegenDelayTicks: { base: 150, min: 60, max: 900, lowerIsBetter: true },
+  /**
+   * Shield points recovery may draw per sector. 15 is a bit over a third of the pool.
+   *
+   * MEASURED, not chosen. Every figure below is the `aggressor` policy's clear rate over
+   * 60 five-sector runs, against a 15% baseline with recovery switched off and the M5
+   * exit band of 20-40%:
+   *
+   *   no reserve, 4/s, 2.5s delay     76%      unbounded — the naive implementation
+   *   no reserve, 4/s, 15s delay      60%      the delay is not the lever
+   *   no reserve, 1/s                 75%
+   *   no reserve, 0.25/s              48%
+   *   no reserve, 0.1/s               30%      in band, but invisible: 6.5 min per pool
+   *   reserve 30/sector               43%
+   *   reserve 20/sector               42%
+   *   reserve 15/sector               35%      <- shipped
+   *   reserve 10/sector               28%
+   *
+   * The two rows worth understanding together are `0.1/s` and `reserve 20`: both allow
+   * ~100 points across a run, and the reserve version is 12pp stronger. That is the
+   * mechanic working — the same total is worth more when it arrives where the player
+   * chooses rather than smeared across the clock — and it is why the reserve can be
+   * spent at a visible 4/s instead of a rate nobody would notice.
+   *
+   * Floored at 0: a curse may take the reserve away entirely, which switches recovery
+   * off without touching the pool that absorbs.
+   */
+  shieldReservePerSector: { base: 15, min: 0, max: 400 },
   scrapMultiplier: { base: 1, min: 0, max: 20 },
   pickupRadius: { base: 34, min: 8, max: 260 },
   /** Focus speed multiplier. Above 1 would make focusing *faster*, so it is capped. */

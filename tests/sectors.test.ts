@@ -496,6 +496,30 @@ describe('the standard run', () => {
     expect((RUN_STAGES[RUN_STAGES.length - 1]?.hazardIds.length as number)).toBeGreaterThan(1)
   })
 
+  it('gives most legs exactly one hazard, which is what the route card has to present', () => {
+    /*
+     * FINDING #33, RECORDED AS A FACT ABOUT THE CONTENT.
+     *
+     * `buildRoutes` puts the SAME hazard on both priced routes when a stage has only
+     * one to draw from. That was documented as an acceptable edge case ("the choice is
+     * purely the reward"), and the count below is why it is not an edge case at all:
+     * three of the four seams a run flies are it. The world map therefore states a
+     * shared price once above the rows rather than once per row — see
+     * `sharedHazardNames` in `src/ui/worldMap.ts` and its tests.
+     *
+     * If content ever gives every hazarded sector two or more, that presentation stops
+     * being the common path and this test is the place that says so.
+     */
+    const hazarded = RUN_STAGES.filter((stage) => stage.hazardIds.length > 0)
+    const single = hazarded.filter((stage) => stage.hazardIds.length === 1)
+    expect(hazarded).toHaveLength(4)
+    expect(single.map((stage) => stage.sectorId)).toEqual([
+      'the-tally',
+      'bloomfield',
+      'kill-grid',
+    ])
+  })
+
   it('does not silently claim a boss that no table can be checked against', () => {
     // `RUN_STAGES` still names no boss, and that is deliberate: bosses live in a file
     // this one does not import, so an id written here could not be verified from here.

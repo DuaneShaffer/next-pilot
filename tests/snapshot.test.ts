@@ -46,6 +46,9 @@ function hull(overrides: Partial<Hull> = {}): Hull {
     maxIntegrity: 100,
     shield: 40,
     maxShield: 40,
+    shieldRegenProgress: 0,
+    shieldRegenBlockedTicks: 0,
+    shieldReserve: 20,
     invulnTicks: 0,
     radius: 7,
     ...overrides,
@@ -204,10 +207,10 @@ function worldView(overrides: Partial<WorldView> = {}): WorldView {
     hullId: 'lien',
     boss: null,
     hazards: [hazard()],
-    // A card is open, so it is counting down to resolving itself. Null here beside a
+    // A card is open, so it reports how long it has been open. Null here beside a
     // non-null `pendingChoice` would be an incoherent baseline, and a mutation test
     // against an impossible state proves less than it looks.
-    choiceResolve: { action: 'skip', ticksRemaining: 240, totalTicks: 600 },
+    choiceResolve: { openTicks: 360 },
     choiceSelection: 1,
     hull: hull(),
     playerBullets: [piercing()],
@@ -292,6 +295,23 @@ describe('the play-affecting digest covers what M5 added', () => {
     ['hazard.phase', worldView({ hazards: [hazard({ phase: 'active' })] })],
     ['hazard.ticksToChange', worldView({ hazards: [hazard({ ticksToChange: 32 })] })],
 
+    // --- shield recovery: all three fields steer the NEXT tick ----------------
+    //
+    // The reason all three are here rather than just `shieldReserve`: two worlds can
+    // agree on `shield` and still diverge a few ticks later if they disagree on banked
+    // progress (when the next point lands), on suppression (whether recovery is running
+    // at all), or on the reserve (whether it can run again). Omitting any one of them is
+    // the same class of defect finding R3 caught in the pierce state — a digest too
+    // narrow to see state the simulation reads, which makes the whole corpus go green on
+    // a real regression.
+    ['hull.shieldRegenProgress', worldView({ hull: hull({ shieldRegenProgress: 30 }) })],
+    ['hull.shieldRegenBlockedTicks', worldView({ hull: hull({ shieldRegenBlockedTicks: 90 }) })],
+    ['hull.shieldReserve', worldView({ hull: hull({ shieldReserve: 19 }) })],
+    // A spent reserve and a full one with the same current shield must not collide —
+    // this is the pair that decides whether the pilot recovers for the rest of the
+    // sector, and it is invisible in `shield` alone.
+    ['reserve spent vs unspent', worldView({ hull: hull({ shieldReserve: 0 }) })],
+
     // --- the hull issued and what is fitted -----------------------------------
     ['hullName', worldView({ hullName: 'Surety' })],
     ['inventory emptied', worldView({ inventory: [] })],
@@ -326,17 +346,22 @@ describe('the play-affecting digest covers what M5 added', () => {
     ['hitUids absent', worldView({ playerBullets: [bulletWithout('hitUids')] })],
     ['hitUids emptied', worldView({ playerBullets: [piercing({ hitUids: [] })] })],
 
-    // --- how an open card resolves itself, and when -----------------------------
-    // The digest's only view of the choice cursor: `openTicks` and `awaitingRelease`
-    // are not on WorldView, so without these two a run one tick from auto-confirming
-    // hashes the same as one that just opened the card.
-    ['choiceResolve.action', worldView({ choiceResolve: { action: 'confirm', ticksRemaining: 240, totalTicks: 600 } })],
-    ['choiceResolve.ticksRemaining', worldView({ choiceResolve: { action: 'skip', ticksRemaining: 239, totalTicks: 600 } })],
-    // The highlighted option decides WHICH item an auto-confirm takes, so two runs
-    // on one card with different selections take different items. Before this was on
-    // the view they hashed identically — a divergence the corpus could not see.
+    // --- the open card ----------------------------------------------------------
+    //
+    // `choiceResolve.openTicks` USED TO BE HERE and has moved to the cosmetic list
+    // below. It belonged here while cards resolved themselves — a run one tick from an
+    // auto-confirm took a different item from one that had just opened the card, with no
+    // input either way. Cards no longer do that: the timeout is gone and confirm is a
+    // dedicated action rather than the fire key, so `openTicks` decides nothing. Nothing
+    // in `src/sim/**` reads it; only `bots.ts` does, as an observer.
+    //
+    // Moving it OUT of the regression hash is a real loss of coverage and is recorded as
+    // such rather than waved through. It is justified only because the thing it was
+    // covering cannot happen any more. If self-resolution ever returns, this entry
+    // returns with it.
+    //
+    // The highlighted option still decides which item a confirm takes, so it stays.
     ['choiceSelection', worldView({ choiceSelection: 2 })],
-    ['choiceResolve cleared', worldView({ choiceResolve: null })],
   ]
 
   it.each(mutations)('%s changes the regression hash', (_label, mutated) => {
@@ -434,7 +459,7 @@ describe('the cosmetic digest keeps presentation state out of the corpus', () =>
     ['enemy hit flash', worldView({ enemies: [enemy({ hitFlashTicks: 4 }), bossEnemy()] })],
     // The countdown bar's denominator, constant per action. Same call as
     // `telegraphTotal`: a progress denominator nothing branches on.
-    ['choiceResolve.totalTicks', worldView({ choiceResolve: { action: 'skip', ticksRemaining: 240, totalTicks: 599 } })],
+    ['choiceResolve.openTicks (cosmetic list)', worldView({ choiceResolve: { openTicks: 359 } })],
   ]
 
   it.each(cosmeticOnly)('%s is excluded from the regression hash but still reported', (_label, mutated) => {

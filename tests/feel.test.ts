@@ -22,6 +22,7 @@ import { drawScene } from '../src/render/scene'
 import { Starfield } from '../src/render/starfield'
 import {
   createFeelState,
+  drawFeelShells,
   feelTick,
   labelOpacity,
   labelPosition,
@@ -30,6 +31,7 @@ import {
   MAX_SPARKS,
   resetFeelState,
   shakeOffset,
+  SHELL_LIFETIME,
   type FeelState,
 } from '../src/render/feel'
 import { PLAYFIELD_H, PLAYFIELD_W } from '../src/core/space'
@@ -167,6 +169,9 @@ function worldFixture(shake: number, freezeTicks: number): WorldView {
     maxIntegrity: 100,
     shield: 12,
     maxShield: 40,
+    shieldRegenProgress: 0,
+    shieldRegenBlockedTicks: 0,
+    shieldReserve: 0,
     invulnTicks: 20,
     radius: 5,
   }
@@ -609,5 +614,92 @@ describe('no NaN reaches the canvas', () => {
     // Fades in rather than appearing at full brightness.
     expect(labelOpacity(0)).toBeLessThan(1)
     expect(labelOpacity(0.3)).toBe(1)
+  })
+})
+
+/**
+ * Ejected brass.
+ *
+ * The whole effect says one thing — "that came out of your gun" — so the only
+ * property worth pinning is that the case is drawn AT the gun. It was not: the
+ * shells borrowed `clampX`/`clampY`, whose 20-30 unit insets exist to keep a text
+ * label off the edge, so at the leftmost hull the sim permits every case was pinned
+ * 19 units inboard of the ship, both barrels on the same pixel. Invisible in a diff,
+ * invisible in a mid-playfield screenshot, and only ever wrong at the edges — which
+ * is where a shooter's pilot spends most of a dodge.
+ *
+ * MUTATION-VERIFIED: restoring `clampX`/`clampY` in `drawFeelShells` fails
+ * "ejects at the gun even when the ship is against a playfield wall" (both axes).
+ */
+describe('ejected shells', () => {
+  /** Where `drawFeelShells` actually puts the brass. One shell in flight, so one translate. */
+  function shellAt(x: number, y: number, alpha = 0): { x: number; y: number } {
+    const state = createFeelState()
+    feelTick(state, [{ kind: 'player-shot', x, y }], 0)
+    const { ctx, calls } = stubContext()
+    drawFeelShells(ctx, state, alpha)
+    const moves = calls.filter((c) => c.name === 'translate')
+    expect(moves.length, 'exactly one live shell was expected').toBe(1)
+    assertNoNaN(calls)
+    const [tx, ty] = moves[0]?.args ?? []
+    expect(typeof tx).toBe('number')
+    expect(typeof ty).toBe('number')
+    return { x: tx as number, y: ty as number }
+  }
+
+  it('ejects at the gun even when the ship is against a playfield wall', () => {
+    // The eject offset is 5 units sideways out of the muzzle, so anything beyond a
+    // hull half-width is the case having been moved by something other than physics.
+    const tolerance = 6
+    const midfield = shellAt(PLAYFIELD_W / 2, PLAYFIELD_H / 2)
+    expect(Math.abs(midfield.x - PLAYFIELD_W / 2)).toBeLessThanOrEqual(tolerance)
+
+    for (const x of [0, PLAYFIELD_W]) {
+      const shell = shellAt(x, PLAYFIELD_H / 2)
+      expect(Math.abs(shell.x - x), `shell drawn at ${shell.x} for a gun at ${x}`).toBeLessThanOrEqual(
+        tolerance,
+      )
+    }
+    for (const y of [0, PLAYFIELD_H]) {
+      const shell = shellAt(PLAYFIELD_W / 2, y)
+      expect(Math.abs(shell.y - y), `shell drawn at ${shell.y} for a gun at ${y}`).toBeLessThanOrEqual(
+        tolerance,
+      )
+    }
+  })
+
+  it('stays out of the instrument panel column whatever the shell holds', () => {
+    // The rect is still enforced, just not the label inset: the panel is drawn by the
+    // caller and not on every screen, so brass past the right edge would land on a
+    // readout. Includes a corrupted pool entry, because a NaN translate draws nothing
+    // and looks exactly like an effect that was never wired up.
+    const state = createFeelState()
+    feelTick(state, [{ kind: 'player-shot', x: PLAYFIELD_W - 1, y: PLAYFIELD_H - 1 }], 0)
+    const live = state.shells.find((s) => s.age < SHELL_LIFETIME)
+    expect(live).toBeDefined()
+    if (live) {
+      live.x = Number.NaN
+      live.vx = Number.POSITIVE_INFINITY
+      live.y = 1e9
+      live.spin = Number.NaN
+    }
+    const { ctx, calls } = stubContext()
+    drawFeelShells(ctx, state, 0.5)
+    assertNoNaN(calls)
+    for (const move of calls.filter((c) => c.name === 'translate')) {
+      const [tx, ty] = move.args
+      expect(tx as number).toBeGreaterThanOrEqual(0)
+      expect(tx as number).toBeLessThanOrEqual(PLAYFIELD_W)
+      expect(ty as number).toBeGreaterThanOrEqual(0)
+      expect(ty as number).toBeLessThanOrEqual(PLAYFIELD_H)
+    }
+  })
+
+  it('follows the case between ticks rather than snapping to the tick', () => {
+    // The render alpha has to still reach the position, or the case ticks along at
+    // 60Hz on a 144Hz display while every other moving thing interpolates.
+    const early = shellAt(200, 400, 0)
+    const late = shellAt(200, 400, 1)
+    expect(late.x).not.toBe(early.x)
   })
 })

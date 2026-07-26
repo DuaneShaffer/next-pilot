@@ -128,8 +128,20 @@ import type {
  *   5. `Bullet.pierceRemaining` and `.hitUids` into `playerBullets` — how many
  *      targets an in-flight round may still pass through, and which it has already
  *      hit. Review finding R3.
+ *   6. Shield recovery into `hull` — `shieldRegenProgress` (banked progress toward the
+ *      next point), `shieldRegenBlockedTicks` (suppression left after a hit), and
+ *      `shieldReserve` (what the sector has left to give). All three steer the next
+ *      tick, and two worlds agreeing on `shield` alone can diverge on any of them.
+ *
+ *      This generation also NARROWS, which is a first and is worth flagging:
+ *      `choiceResolve` left `run` entirely and its `openTicks` moved to `cosmetic`.
+ *      Generation 3 added it to cover a card's pending self-resolution, and cards no
+ *      longer resolve themselves — the timeout is gone and confirm is a dedicated
+ *      action rather than the fire key, so nothing is left for the digest to see.
+ *      A narrowing is a real loss of coverage and is only acceptable because the
+ *      behaviour it covered cannot occur; if self-resolution returns, so does the row.
  */
-export const DIGEST_GENERATION = 5
+export const DIGEST_GENERATION = 6
 
 /**
  * Tags for optional sub-objects.
@@ -247,6 +259,15 @@ function hashHull(hull: Readonly<Hull>): string {
     .num(hull.maxIntegrity)
     .num(hull.shield)
     .num(hull.maxShield)
+    // Both recovery fields are hashed because the NEXT tick reads both: two worlds
+    // agreeing on `shield` but disagreeing on banked progress or on how much
+    // suppression is left will diverge a few ticks later. This is the same class of
+    // omission as the pierce state that finding R3 caught — play-affecting state the
+    // digest could not see, which made the whole replay corpus green on a real
+    // regression.
+    .num(hull.shieldRegenProgress)
+    .num(hull.shieldRegenBlockedTicks)
+    .num(hull.shieldReserve)
     .num(hull.invulnTicks)
     .num(hull.radius)
   return h.digest()
@@ -470,22 +491,21 @@ function hashRun(view: WorldView): string {
     }
   }
 
-  // How an open card resolves itself, and when.
+  // THE CHOICE CURSOR IS NO LONGER PART OF THIS DIGEST, and the reason is a narrowing of
+  // what the sim can do rather than a narrowing of the guard.
   //
-  // THIS IS THE DIGEST'S ONLY VIEW OF THE CHOICE CURSOR. Every card resolves without
-  // input eventually — a held trigger confirms after a dwell, an untouched card times
-  // out — and `ChoiceCursor.openTicks` and `.awaitingRelease` are what decide which
-  // and when. Neither is on `WorldView`, so before this the digest could see that a
-  // card was open but not that one run was a tick from auto-confirming and the other
-  // had just opened. Those are different futures.
+  // It used to hash the pending self-resolution: which action a held trigger or an
+  // expiring timeout was about to take, and how many ticks were left before it did. That
+  // was genuinely play-affecting — two runs on the same card, one a tick from
+  // auto-confirming, took different items with no input at all. Cards no longer resolve
+  // themselves: the timeout is gone and confirm is a dedicated action rather than the
+  // fire key, so there is no pending resolution to diverge on.
   //
-  // `totalTicks` is the bar's denominator, a constant per action, and stays cosmetic.
-  const resolve = view.choiceResolve
-  if (resolve === null) {
-    h.u32(0xffffffff)
-  } else {
-    h.u32(0x00000001).str(resolve.action).num(resolve.ticksRemaining)
-  }
+  // What remains on `choiceResolve` is `openTicks`, and nothing in `src/sim/**` reads it
+  // to decide anything — only `bots.ts` reads it, as an observer telling one card from
+  // the next. It is therefore COSMETIC and lives in `hashCosmetic`, where a divergence
+  // is still reported but does not fail the corpus. Which option is highlighted is the
+  // part that still decides the run, and that is `choiceSelection` below.
   // The highlighted option. An auto-confirm takes whatever is under the cursor, so
   // two runs on one card with different selections take different ITEMS — the most
   // consequential divergence a card can produce, and until `choiceSelection` reached
@@ -526,7 +546,8 @@ function hashCosmetic(view: WorldView): string {
   }
   h.u32(view.hazards.length)
   for (const hazard of view.hazards) h.num(hazard.progress)
-  h.num(view.choiceResolve?.totalTicks ?? -1)
+  // -1 for no card open. See the note in `hashRun` for why this is cosmetic now.
+  h.num(view.choiceResolve?.openTicks ?? -1)
   h.num(view.cosmetic.shake)
   h.u32(view.events.length)
   for (const event of view.events) hashEvent(h, event)

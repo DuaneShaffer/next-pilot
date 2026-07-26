@@ -20,7 +20,6 @@ import { World, type RunContent } from '../src/sim/world'
 import { HAZARD_ACTIVE_TICKS, HAZARD_WARNING_TICKS, INTERDICTION_SPEED_FACTOR } from '../src/sim/hazards'
 import { bossPhaseDefId } from '../src/sim/bosses'
 import { FREEZE_MAX_TICKS } from '../src/sim/damage'
-import { CHOICE_TIMEOUT_TICKS, HELD_CONFIRM_DWELL_TICKS } from '../src/sim/progression'
 import { BOSSES } from '../src/content/bosses'
 import { HAZARDS } from '../src/content/hazards'
 import { HULLS } from '../src/content/hulls'
@@ -149,9 +148,35 @@ function contentFor(run: RunDef, sectors: SectorDef[], extra: Partial<RunContent
 // --- driving -----------------------------------------------------------------
 
 const IDLE: InputSnapshot = { ...NEUTRAL_INPUT }
-/** Alternating fire, so a card's rising-edge confirm is always reachable. */
+/**
+ * Alternating CONFIRM, so a card's rising accept edge is always reachable.
+ *
+ * `confirm`, not `fire`: a card stopped reading the trigger when accepting became its
+ * own action ("the selection screens must not use the fire key to accept responses"). A
+ * driver that pulses fire at a card resolves nothing, and since nothing times a card out
+ * any more, the run parks on it until this file's tick cap — which shows up as a seam
+ * test failing on `stage.index`, not as anything about input.
+ */
 function blipInput(tick: number): InputSnapshot {
-  return { ...NEUTRAL_INPUT, fire: tick % 4 < 2 }
+  return { ...NEUTRAL_INPUT, fire: true, confirm: tick % 4 < 2 }
+}
+
+/**
+ * Alternating CONFIRM and DECLINE, so a card that cannot be *accepted* still resolves.
+ *
+ * Needed since the choice timeout was removed: a transit shop whose every option costs
+ * more than the pilot is carrying refuses every confirm (deliberately — the option is
+ * greyed out and a button that pretends to work is worse), and nothing closes it on the
+ * player's behalf any more. Declining is the only way out.
+ */
+function blipOrDecline(tick: number): InputSnapshot {
+  const phase = tick % 8
+  return {
+    ...NEUTRAL_INPUT,
+    fire: true,
+    confirm: phase < 2,
+    special: phase >= 4 && phase < 6,
+  }
 }
 
 interface RunLog {
@@ -242,7 +267,9 @@ describe('stage progression', () => {
 
     // Take a wound in sector 1, so the seam has something to fail to preserve.
     world.hull.integrity = 61
-    run(world, 30 * TICK_HZ, blipInput, (w) => w.stage.index === 1)
+    // `blipOrDecline` rather than `blipInput`: this run's only item is priced above the
+    // pilot's zero scrap, so the transit shop can only be got past by declining it.
+    run(world, 30 * TICK_HZ, blipOrDecline, (w) => w.stage.index === 1)
 
     expect(world.stage.index).toBe(1)
     expect(world.inventory.map((i) => i.defId)).toContain('plate')
@@ -325,7 +352,7 @@ describe('the world map', () => {
     const navigate = (): InputSnapshot => {
       tick++
       if (tick < 4) return { ...NEUTRAL_INPUT, moveX: tick === 2 ? 1 : 0 }
-      return { ...NEUTRAL_INPUT, fire: tick % 4 < 2 }
+      return { ...NEUTRAL_INPUT, confirm: tick % 4 < 2 }
     }
     run(world, 30 * TICK_HZ, navigate, (w) => w.stage.index === 1)
     expect(world.stage.index).toBe(1)
@@ -349,49 +376,58 @@ describe('the world map', () => {
     expect(world.hazards).toEqual([])
   })
 
-  it('pays exactly the scrap a route promised, ignoring any multiplier', () => {
-    // A card reading "+180 scrap" must pay 180. Routing it through `awardScrap` would
-    // let a scrap-multiplier item silently make the screen a liar.
-    const world = new World('PAY5CRAP1234', contentFor(twoStageRun([CORROSION.id]), [emptySector('a', 1), emptySector('b', 2)]))
-    run(world, 5 * TICK_HZ, () => IDLE)
-    const routes = world.pendingChoice?.routes ?? []
-    const scrapRoute = routes.findIndex((r) => r.reward.kind === 'scrap')
-    if (scrapRoute < 0) return // this seed rolled repair; the seeded variant is covered below
-
-    const before = world.stats.scrap
-    const reward = routes[scrapRoute]?.reward
-    const amount = reward?.kind === 'scrap' ? reward.amount : 0
-    let tick = 0
-    const pick = (): InputSnapshot => {
-      tick++
-      if (tick <= scrapRoute * 2) return { ...NEUTRAL_INPUT, moveX: tick % 2 === 1 ? 1 : 0 }
-      return { ...NEUTRAL_INPUT, fire: tick % 4 < 2 }
+  it('never offers a route that pays scrap, because the economy could not price one', () => {
+    /*
+     * THIS TEST REPLACES A VACUOUS ONE, and the way it went vacuous is the point.
+     *
+     * It used to read "pays exactly the scrap a route promised, ignoring any multiplier"
+     * and opened with `if (scrapRoute < 0) return` — a guard for the seeds that rolled a
+     * repair instead. When scrap was removed as a route payout, `buildRoutes` stopped
+     * producing one at all, so that early return fired every single time and the test
+     * passed by doing nothing. It kept a name that described a promise the game no longer
+     * makes, which is worse than no test: a reader grepping for scrap-payout coverage
+     * finds it and stops looking.
+     *
+     * So it now asserts the thing that IS true, across enough seeds that a stray
+     * re-enable cannot hide in a draw. `payRouteReward`'s `scrap` branch survives because
+     * `RouteReward` keeps the variant on the bench (see "Route rewards are priced off the
+     * panel" in docs/DESIGN.md) — it is unreachable from the builder, and this is what
+     * says so out loud.
+     */
+    const seeds = ['PAY5CRAP1234', 'PAY5CRAP2345', 'PAY5CRAP3456', 'PAY5CRAP4567']
+    let routesSeen = 0
+    for (const seed of seeds) {
+      const world = new World(seed, contentFor(twoStageRun([CORROSION.id]), [emptySector('a', 1), emptySector('b', 2)]))
+      run(world, 5 * TICK_HZ, () => IDLE)
+      const routes = world.pendingChoice?.routes ?? []
+      routesSeen += routes.length
+      for (const route of routes) {
+        expect(route.reward.kind, `${seed} offered a ${route.reward.kind} route`).not.toBe('scrap')
+      }
     }
-    run(world, 30 * TICK_HZ, pick, (w) => w.stage.index === 1)
-    expect(world.stats.scrap - before).toBe(amount)
-    expect(routes[scrapRoute]?.rewardText).toContain(String(amount))
+    // Without this the loop above passes on zero routes, which is the same shape of
+    // nothing the old version was doing.
+    expect(routesSeen).toBeGreaterThanOrEqual(seeds.length * 2)
   })
 })
 
-// --- the held trigger, one layer down ----------------------------------------
+// --- the trigger is not an accept key ----------------------------------------
 
-describe('a held trigger can never make a transition card unresponsive', () => {
+describe('a card ignores the fire key, and waits for the player', () => {
   /**
-   * THE SECOND SOFT FREEZE, found reviewing the fix for the first.
+   * REPORTED FROM PLAY: "the selection screens must not use the fire key to accept
+   * responses", and "the shops shouldn't close automatically, that's annoying."
    *
-   * `HELD_CONFIRM_DWELL_TICKS` exists because a player holding fire — the normal
-   * state in a shmup — got a card that ignored them for a minute. The dwell confirms
-   * option 0 on their behalf after 48 ticks.
+   * Both complaints were the same defect seen from two sides. Accepting was a rising
+   * `fire` edge, and in a shmup the trigger is always held — so a card could not be
+   * accepted at all until the player released, which read as a freeze. Two mechanisms
+   * were bolted on to cover it: a 48-tick dwell that confirmed the highlighted option
+   * for anyone still holding fire, and a 20-second timeout that declined any card
+   * nobody touched. Both decided a permadeath choice on the player's behalf.
    *
-   * But a between-sector shop can price option 0 above what the pilot is carrying.
-   * The world refuses the confirm, the card stays open, nothing changed, so the next
-   * tick dwell-confirms again and is refused again — for the full 20-second timeout.
-   * An unresponsive card, reached by the mechanism added to prevent unresponsive
-   * cards.
-   *
-   * The rule: a *rescue* that cannot complete becomes a decline. A deliberate press
-   * on an unaffordable option must still do nothing, because that player can see the
-   * option is greyed out and can navigate somewhere else.
+   * `InputSnapshot.confirm` replaces all of it. These tests pin the three properties
+   * that fall out: fire does nothing, nothing resolves on time alone, and confirm
+   * resolves immediately.
    */
   const expensive = {
     gold: {
@@ -419,48 +455,74 @@ describe('a held trigger can never make a transition card unresponsive', () => {
     expect(Math.min(...(world.pendingChoice?.costs ?? [0]))).toBeGreaterThan(0)
   })
 
-  it('declines it rather than looping, and the run continues', () => {
+  it('does nothing at all while the trigger is held down', () => {
+    // A full minute of the input a shmup player is permanently supplying. The card must
+    // neither confirm (the old dwell) nor decline (the old timeout): it waits.
     const world = atTransitionShop()
     const HOLD: InputSnapshot = { ...NEUTRAL_INPUT, fire: true }
 
-    // Well past the dwell, nowhere near the 20s timeout. If the card were looping,
-    // the run would still be sitting on it here.
-    for (let i = 0; i < HELD_CONFIRM_DWELL_TICKS * 3 && world.runState === 'active'; i++) {
-      world.tick(HOLD)
-      if (world.stage.index === 1) break
-    }
-    expect(world.pendingChoice).toBeNull()
-    expect(world.stage.index).toBe(1)
-    expect(world.stats.tick).toBeLessThan(CHOICE_TIMEOUT_TICKS)
+    for (let i = 0; i < 60 * TICK_HZ; i++) world.tick(HOLD)
+
+    expect(world.pendingChoice?.kind).toBe('shop')
+    expect(world.stage.index).toBe(0)
+    expect(world.runState).toBe('active')
+    expect(world.inventory).toHaveLength(0)
   })
 
-  it('tells an observer what it is about to do, and when', () => {
-    // A card that decides for you while you are still reading it is the interface
-    // making a permadeath choice on your behalf. Both automatic outcomes are good and
-    // both exist for good reasons; the defect was that neither was visible. This is
-    // the field every card screen renders from, so all four count the same thing.
+  it('leaves an untouched card open for as long as the player wants', () => {
+    // The same claim for a player holding nothing, which is what the 20-second timeout
+    // actually reached: somebody reading the card. Three times the old timeout, so a
+    // reinstated backstop at any plausible duration fails here.
     const world = atTransitionShop()
-    const HOLD: InputSnapshot = { ...NEUTRAL_INPUT, fire: true }
+    const openedAt = world.stats.tick
 
-    // Trigger held since the card opened: the dwell will confirm, and it is counting.
-    world.tick(HOLD)
-    const held = world.choiceResolve
-    expect(held?.action).toBe('confirm')
-    expect(held?.totalTicks).toBe(HELD_CONFIRM_DWELL_TICKS)
-    expect(held?.ticksRemaining).toBeLessThan(HELD_CONFIRM_DWELL_TICKS)
-    expect(held?.ticksRemaining).toBeGreaterThan(0)
+    for (let i = 0; i < 60 * TICK_HZ; i++) world.tick(IDLE)
 
-    // Release once and the dwell is cancelled for good; the only automatic outcome
-    // left is the much longer timeout, and the readout must switch to describing it.
+    expect(world.pendingChoice?.kind).toBe('shop')
+    expect(world.stage.index).toBe(0)
+    expect(world.runState).toBe('active')
+    // And the one thing the view still reports is the count, which keeps counting.
+    expect(world.choiceResolve?.openTicks).toBe(world.stats.tick - openedAt)
+  })
+
+  it('accepts on a confirm press, on the tick it is pressed', () => {
+    // MUTATION-CHECKED: swapping `input.confirm` back to `input.fire` in `updateCursor`
+    // fails this and the two tests above it.
+    const world = atTransitionShop()
+    const CONFIRM: InputSnapshot = { ...NEUTRAL_INPUT, confirm: true }
+
+    // Held fire throughout, to prove it is the confirm press and not the trigger doing
+    // the work. The cursor treats every button as already-held on the tick a card opens,
+    // so the first confirm tick is the rising edge.
+    world.tick({ ...NEUTRAL_INPUT, fire: true })
+    expect(world.pendingChoice?.kind).toBe('shop')
+    world.tick({ ...CONFIRM, fire: true })
+
+    // Every option is unaffordable, so the accepted card is a no-op and the shop stays
+    // open — which is the other half of the design (an option the pilot cannot pay for
+    // must not be silently declined for them). The run has NOT been advanced by a
+    // rescue, and that is the assertion.
+    expect(world.pendingChoice?.kind).toBe('shop')
+    expect(world.stage.index).toBe(0)
+
+    // Declining is the way out of a shop nobody can buy from, and it works on the press.
     world.tick(IDLE)
-    const released = world.choiceResolve
-    expect(released?.action).toBe('skip')
-    expect(released?.totalTicks).toBe(CHOICE_TIMEOUT_TICKS)
+    world.tick({ ...NEUTRAL_INPUT, special: true })
+    expect(world.pendingChoice).toBeNull()
+    expect(world.stage.index).toBe(1)
+  })
 
-    // And it counts down rather than sitting still.
-    const before = world.choiceResolve?.ticksRemaining ?? 0
-    world.tick(IDLE)
-    expect(world.choiceResolve?.ticksRemaining).toBeLessThan(before)
+  it('accepts an affordable option on the confirm press, and pays for it', () => {
+    const world = atTransitionShop()
+    world.stats.scrap = 10_000
+    const CONFIRM: InputSnapshot = { ...NEUTRAL_INPUT, confirm: true }
+
+    world.tick({ ...NEUTRAL_INPUT, fire: true })
+    world.tick({ ...CONFIRM, fire: true })
+
+    expect(world.pendingChoice).toBeNull()
+    expect(world.inventory.map((entry) => entry.defId)).toEqual(['gold'])
+    expect(world.stats.scrap).toBeLessThan(10_000)
   })
 
   it('reports nothing when no card is open', () => {
@@ -468,19 +530,17 @@ describe('a held trigger can never make a transition card unresponsive', () => {
     expect(world.choiceResolve).toBeNull()
   })
 
-  it('but a deliberate press on an unaffordable option still does nothing', () => {
-    // The other half of the rule. This player can see the option is greyed out; the
-    // game must not decline on their behalf while they are looking at it.
+  it('refuses repeated confirm presses on an unaffordable option, without declining', () => {
+    // The other half of the rule. This player can see the option is greyed out; the game
+    // must neither buy what they cannot pay for nor decline on their behalf while they
+    // are looking at it. Twenty rising accept edges, and the card is still up.
     const world = atTransitionShop()
-    let tick = 0
-    for (let i = 0; i < HELD_CONFIRM_DWELL_TICKS - 4 && world.runState === 'active'; i++) {
-      // Release-then-press every few ticks: a rising edge each time, and the release
-      // permanently cancels the dwell rescue.
-      tick++
-      world.tick({ ...NEUTRAL_INPUT, fire: tick % 3 === 0 })
+    for (let tick = 1; tick <= 60 && world.runState === 'active'; tick++) {
+      world.tick({ ...NEUTRAL_INPUT, fire: true, confirm: tick % 3 === 0 })
     }
     expect(world.pendingChoice?.kind).toBe('shop')
     expect(world.stage.index).toBe(0)
+    expect(world.inventory).toHaveLength(0)
   })
 })
 
@@ -498,7 +558,7 @@ describe('hazards', () => {
       () => {
         tick++
         if (tick < 4) return { ...NEUTRAL_INPUT, moveX: tick === 2 ? 1 : 0 }
-        return { ...NEUTRAL_INPUT, fire: tick % 4 < 2 }
+        return { ...NEUTRAL_INPUT, confirm: tick % 4 < 2 }
       },
       (w) => w.stage.index === 1,
     )
@@ -671,7 +731,7 @@ describe('hazards', () => {
     run(world, 30 * TICK_HZ, () => {
       tick++
       if (tick < 4) return { ...NEUTRAL_INPUT, moveX: tick === 2 ? 1 : 0 }
-      return { ...NEUTRAL_INPUT, fire: tick % 4 < 2 }
+      return { ...NEUTRAL_INPUT, confirm: tick % 4 < 2 }
     }, (w) => w.stage.index === 1)
 
     const fires: number[] = []

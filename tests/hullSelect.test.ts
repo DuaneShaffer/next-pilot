@@ -40,6 +40,10 @@
  *   the candidate `sort` by `hullRank` removed — fails "does not depend on the order
  *   the pool arrives in".
  *
+ *   `compareToBaseline` skipping `hullSpeed` — fails "draws a table row for every stat a
+ *   hull moves", which is the half of the R12 guard that lives here: hull prose no
+ *   longer states figures, so a stat the table drops is a figure that is nowhere.
+ *
  * Two mutations that did NOT fail anything are recorded because they found dead code
  * rather than a weak test: `known.add(LIEN_ID)` and an `Object.hasOwn` guard that
  * `HULL_ORDER.indexOf` was already making redundant. Both were removed, and
@@ -375,6 +379,94 @@ describe('compareToBaseline', () => {
     expect(HULL_SELECT_STANDFIRST).toContain(String(STATS.hullSpeed.base))
     expect(HULL_SELECT_STANDFIRST).toContain(String(dps))
   })
+
+  it('states the Lien card baseline with the live values', () => {
+    // The Lien has no trade table, so this line is its table — and it is derived for
+    // the same reason the rows are. Hull prose states no figures at all now, so if this
+    // string stopped quoting `STATS` the one hull the whole content set is tuned against
+    // would state none of its own numbers anywhere on the screen.
+    expect(HULL_BASELINE_TEXT).toContain(String(STATS.maxIntegrity.base))
+    expect(HULL_BASELINE_TEXT).toContain(String(STATS.maxShield.base))
+    expect(HULL_BASELINE_TEXT).toContain(String(shotsPerSecond(STATS.fireIntervalTicks.base)))
+    expect(HULL_BASELINE_TEXT).toContain(String(STATS.projectileDamage.base))
+    // Rule 2: every number carries its unit.
+    for (const unit of ['integrity', 'shield', 'shots/s', 'dmg']) {
+      expect(HULL_BASELINE_TEXT, unit).toContain(unit)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// the other half of the R12 guard
+// ---------------------------------------------------------------------------
+
+describe('the card prints every figure the prose gave up', () => {
+  /**
+   * `tests/hulls.test.ts` fails if a hull's authored prose states a figure, because a
+   * hand-written number is the one that goes stale when the hull is rebalanced —
+   * `docs/ROADMAP.md` R12, three times over. That guard is only half safe on its own:
+   * cutting a number out of a sentence and printing it nowhere would pass it while
+   * leaving the player with a card that says a hull is "thin" and never says how thin.
+   *
+   * So this is the complement. Every stat a hull moves, every credit of starting scrap
+   * and both composite figures have to be on the card, drawn, in a line the layout
+   * actually emits. The two tests together say: the figures moved, they did not go.
+   */
+
+  it('draws a table row for every stat a hull moves', () => {
+    for (const id of HULL_ORDER) {
+      const def = getHull(id)
+      const card = layout({ offer: [id] }).cards[0]
+      expect(card, id).toBeDefined()
+      const drawn = (card?.lines ?? []).map((entry) => entry.text)
+
+      for (const stat of new Set(def.stats.map((m) => m.stat))) {
+        // A stat the modifiers move but the bounds swallow would be legitimately
+        // absent; `tests/hulls.test.ts` rejects that content separately.
+        expect(resolveStat(stat, def.stats), `${id}: ${stat} is a no-op`).not.toBe(STATS[stat].base)
+        const row = [...(card?.costRows ?? []), ...(card?.gainRows ?? [])].find(
+          (entry) => entry.stat === stat,
+        )
+        expect(row, `${id}: ${stat} moved and no row on the card states it`).toBeDefined()
+        expect(drawn, `${id}: the ${stat} row is not drawn`).toContain(row?.text)
+        // The row is the figure's only home now, so it has to carry one.
+        expect(row?.text, `${id}: the ${stat} row states no number`).toMatch(/\d/)
+        expect(drawn.some((text) => text.includes(row?.deltaText ?? 'no delta')), `${id}: ${stat} delta`)
+          .toBe(true)
+      }
+    }
+  })
+
+  it('draws the starting scrap figure for every hull that is funded', () => {
+    for (const id of HULL_ORDER) {
+      const def = getHull(id)
+      if (def.startingScrap === undefined) continue
+      const card = layout({ offer: [id] }).cards[0]
+      expect(card?.startingLines.join(' '), `${id}: starting scrap`).toContain(
+        String(def.startingScrap),
+      )
+    }
+  })
+
+  it('draws the net line for every hull that is not the baseline', () => {
+    // Effective health and output are the two figures the prose used to sum up and the
+    // per-stat rows cannot: integrity and shield are separate rows, and dmg/s is a
+    // product of two of them.
+    for (const id of HULL_ORDER) {
+      const card = layout({ offer: [id] }).cards[0]
+      if (id === LIEN_ID) {
+        expect(card?.netLines, id).toEqual([])
+        continue
+      }
+      const net = (card?.netLines ?? []).join(' ')
+      expect(net, `${id}: no net line`).toMatch(/\d/)
+      expect(net, `${id}: net line omits effective hp`).toContain('effective hp')
+      expect(net, `${id}: net line omits output`).toContain('dmg/s')
+      for (const text of card?.netLines ?? []) {
+        expect((card?.lines ?? []).map((entry) => entry.text), `${id}: net not drawn`).toContain(text)
+      }
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -569,26 +661,101 @@ describe('the card holds its content', () => {
 })
 
 describe('degradation and defects', () => {
+  /**
+   * A trio built to reach the tightest degradation level, rather than whichever real
+   * hulls happen to be wordiest this week.
+   *
+   * THIS USED TO BE PINNED TO A REAL OFFER AND IT BROKE TWICE. First when Surety's
+   * mechanism lost a clause, then when hull prose stopped stating figures at all and
+   * every real trio started fitting at level 1 — the cascade was still correct and the
+   * test still failed, which is a test measuring the content rather than the screen.
+   * Level 2 exists for a hull wordier or busier than today's roster, so the way to
+   * assert it is to hand the layout one. The real roster is covered by the containment
+   * suite above, which walks every offer that `offerHulls` can produce.
+   */
+  const CROWDED_OFFER = ['crowded-a', 'crowded-b', 'crowded-c']
+
+  interface CrowdedSpec {
+    /** Words of mechanism. The one part of a card the cascade may never drop. */
+    mech: number
+    /** Words of flavour, or 0 for none. What level 1 gives up. */
+    flavour: number
+    /** Trade-table rows. */
+    stats: number
+    scrap: boolean
+  }
+
+  /** Every stat the fixture can move, in cost/gain order so both columns fill. */
+  const CROWDED_STATS: HullDef['stats'] = [
+    { stat: 'maxIntegrity', kind: 'add', value: -20 },
+    { stat: 'maxShield', kind: 'add', value: 30 },
+    { stat: 'hullSpeed', kind: 'add', value: -30 },
+  ]
+
+  /** Three identical synthetic hulls, all holding a real relic so level 2 has work. */
+  function crowdedHulls(spec: CrowdedSpec): Readonly<Record<string, HullDef>> {
+    const out: Record<string, HullDef> = {}
+    for (const id of CROWDED_OFFER) {
+      out[id] = {
+        id,
+        name: id,
+        mechanism: `${Array.from({ length: spec.mech }, () => 'padding').join(' ')}.`,
+        ...(spec.flavour > 0
+          ? { flavour: `${Array.from({ length: spec.flavour }, () => 'flavour').join(' ')}.` }
+          : {}),
+        stats: CROWDED_STATS.slice(0, spec.stats),
+        startingItems: ['repair-nanites'],
+        ...(spec.scrap ? { startingScrap: 120 } : {}),
+      }
+    }
+    return out
+  }
+
+  /**
+   * The first synthetic offer that fits at exactly the degradation level asked for.
+   *
+   * SEARCHED, NOT HAND-TUNED, and that is the whole reason this fixture exists. These
+   * tests used to name a real trio and broke twice for reasons that were not defects:
+   * once when Surety's mechanism lost a clause, and again when hull prose stopped
+   * stating figures and every real offer started fitting a level higher. Both times the
+   * cascade was correct and the test was measuring the content. Searching a small grid
+   * for a card of the required height asserts the *screen's* behaviour and cannot rot
+   * that way; if a level becomes unreachable at any card size, that is a real finding
+   * and this fails saying so.
+   */
+  function fittingAtLevel(target: 0 | 1 | 2): HullSelectLayout {
+    for (const scrap of [false, true]) {
+      for (const stats of [2, 3]) {
+        for (let mech = 2; mech <= 60; mech++) {
+          for (const flavour of [0, 4, 10, 20, 30]) {
+            const result = layout({
+              offer: CROWDED_OFFER,
+              hulls: crowdedHulls({ mech, flavour, stats, scrap }),
+            })
+            if (!result.overflow && result.degrade === target) return result
+          }
+        }
+      }
+    }
+    throw new Error(`no synthetic offer fits at degradation level ${target}`)
+  }
+
   it('drops flavour before anything else when space runs out', () => {
-    // Rule 4 makes flavour the only omittable part of a card, so it goes first.
-    const crowded = layout({ offer: ['surety', 'probate', 'collateral'] })
-    expect(crowded.overflow).toBe(false)
-    expect(crowded.degrade).toBeGreaterThan(0)
-    for (const card of crowded.cards) expect(card.flavourLines).toEqual([])
+    // Rule 4 makes flavour the only omittable part of a card, so it goes first — and
+    // level 1 stops there: the relic's own sentence, which level 2 takes, is still on
+    // the card.
+    const flavoured = fittingAtLevel(1)
+    for (const card of flavoured.cards) {
+      expect(card.flavourLines, card.id).toEqual([])
+      expect(card.startingLines.length, `${card.id} lost its relic text at level 1`)
+        .toBeGreaterThan(1)
+    }
   })
 
   it('never drops the mechanism, the trade table or the net line', () => {
-    // The parts that make the card inform rather than sell. Asserted at the tightest
-    // level the cascade has, against an offer that reaches it.
-    //
-    // WHICH TRIO REACHES LEVEL 2 IS A FUNCTION OF HOW LONG THE HULL PROSE IS, so it
-    // moves when a hull is retuned: this was arrears/probate/surety until Surety's
-    // mechanism lost a clause (its flat +1 damage was removed on a sweep) and the trio
-    // started fitting at level 1. The assertion is about what level 2 must still
-    // contain, so the offer is chosen to reach level 2 rather than pinned to a trio.
-    const tightest = layout({ offer: ['arrears', 'probate', 'collateral'] })
-    expect(tightest.overflow).toBe(false)
-    expect(tightest.degrade).toBe(2)
+    // The parts that make the card inform rather than sell, asserted at the tightest
+    // level the cascade has.
+    const tightest = fittingAtLevel(2)
     for (const card of tightest.cards) {
       expect(card.mechanismLines.length, card.id).toBeGreaterThan(0)
       expect(card.costRows.length, card.id).toBeGreaterThan(0)
@@ -601,18 +768,30 @@ describe('degradation and defects', () => {
     // Level 2 gives up the relic's mechanism sentence and NEVER its name or tier —
     // "you are holding something and I will not say what" is the betrayal the brief
     // names, and it would be worse than the sentence being missing.
-    const tightest = layout({ offer: ['arrears', 'probate', 'collateral'] })
-    expect(tightest.degrade).toBe(2)
-    const probate = tightest.cards.find((card) => card.id === 'probate')
     const nanites = ITEMS['repair-nanites']
-    expect(probate?.startingLines.join(' ')).toContain(nanites?.name ?? '')
-    expect(probate?.startingLines.join(' ')).toContain(`[${nanites?.tier}]`)
-    // And the sentence is present at level 0, so this is a cascade rather than a cut.
-    const roomy = layout({ offer: ['probate'] })
-    expect(roomy.degrade).toBe(0)
-    expect(roomy.cards[0]?.startingLines.length).toBeGreaterThan(
-      probate?.startingLines.length ?? 0,
+    const tightest = fittingAtLevel(2)
+    for (const card of tightest.cards) {
+      expect(card.startingLines.join(' '), card.id).toContain(nanites?.name ?? '')
+      expect(card.startingLines.join(' '), card.id).toContain(`[${nanites?.tier}]`)
+    }
+    // And the sentence is there when there is room, so this is a cascade, not a cut.
+    const roomy = fittingAtLevel(0)
+    expect(roomy.cards[0]?.startingLines.length ?? 0).toBeGreaterThan(
+      tightest.cards[0]?.startingLines.length ?? 0,
     )
+  })
+
+  it('never asks the real roster to give up its relic text', () => {
+    // The side a player actually sees. Level 1 — flavour dropped — is a legitimate
+    // outcome for a crowded offer; level 2 means a real card is withholding what a
+    // starting relic does, and nothing in today's roster should be that tall. If this
+    // fails, a hull's prose or its trade table has grown at the other cards' expense.
+    for (const offer of everyOffer()) {
+      const result = layout({ offer })
+      expect(result.overflow, offer.join(',')).toBe(false)
+      expect(result.degrade, `${offer.join(',')} degrades to ${result.degrade}`)
+        .toBeLessThanOrEqual(1)
+    }
   })
 
   it('keeps starting scrap at every degradation level', () => {

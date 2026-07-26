@@ -19,8 +19,6 @@ import { Rng } from '../src/core/rng'
 import type { InteractionDef, ItemDef, ItemTier } from '../src/content/types'
 import type { HeldItem, ItemOffer } from '../src/sim/entities'
 import {
-  CHOICE_TIMEOUT_TICKS,
-  HELD_CONFIRM_DWELL_TICKS,
   OFFER_COUNT,
   buildOffers,
   makeChoice,
@@ -38,7 +36,14 @@ function input(over: Partial<InputSnapshot> = {}): InputSnapshot {
 }
 
 const IDLE = NEUTRAL_INPUT
-const FIRE = input({ fire: true })
+/**
+ * The accept press: `confirm`, never `fire`.
+ *
+ * A card does not read the trigger — "the selection screens must not use the fire key to
+ * accept responses" — so `input({ fire: true })` is now indistinguishable from IDLE as far
+ * as this cursor is concerned. `HOLDING_FIRE` below exists to assert exactly that.
+ */
+const CONFIRM = input({ confirm: true })
 const SPECIAL = input({ special: true })
 const LEFT = input({ moveX: -1 })
 const RIGHT = input({ moveX: 1 })
@@ -62,13 +67,8 @@ function held(...defIds: string[]): HeldItem[] {
   return defIds.map((defId, index) => ({ defId, acquiredAtTick: index * 10, count: 1 }))
 }
 
-const HOLDING_FIRE: InputSnapshot = {
-  moveX: 0,
-  moveY: 0,
-  fire: true,
-  special: false,
-  focus: false,
-}
+/** The trigger, held. A card must be completely blind to it. */
+const HOLDING_FIRE: InputSnapshot = input({ fire: true })
 
 function offer(defId: string): ItemOffer {
   return { defId, tier: 'common', interactionText: [] }
@@ -90,45 +90,50 @@ function repeat(snapshot: InputSnapshot, ticks: number): InputSnapshot[] {
 // --- confirming and skipping -------------------------------------------------
 
 /**
- * The rising-edge rule.
+ * The rising-edge rule, and the key it reads.
  *
- * This is the single most load-bearing behaviour in the file. The player is
- * almost certainly holding the trigger at the moment a wave dies and a reward
- * opens, so a held button that counted as a press would confirm the first option
- * on the first tick — the reward screen would flash past before it could be read,
- * and the pick would be made by whichever option the draw happened to put first.
- * Interface clarity is priority 1 in CLAUDE.md; a screen the player never sees is
- * the worst possible failure of it.
+ * ACCEPTING IS `confirm`, NOT `fire`. Reported from play: "the selection screens must not
+ * use the fire key to accept responses." The trigger is held permanently in a shmup, so
+ * an accept action bound to it could not be pressed *on* a card at all — it was already
+ * down — and every workaround for that (a 48-tick dwell that confirmed for the player, a
+ * 20-second timeout that declined for them) had the interface making the choice.
+ *
+ * The rising edge still matters, for the seam rather than for the trigger: a seam opens
+ * the next card in the same tick the previous one was accepted, so a level-triggered read
+ * would take option 0 of the two cards behind it before the player could lift a finger.
  */
 describe('choice cursor — confirming', () => {
-  it('does not confirm from a held trigger before the card can be read', () => {
-    /**
-     * UPDATED at the soft-freeze fix. This previously asserted that a held trigger
-     * NEVER confirms, which was the whole bug: a player holding fire — the normal
-     * state in a shmup — got a card that ignored them for a minute.
-     *
-     * The property worth keeping is that a card cannot flash past unread, so the
-     * assertion is now about the dwell rather than about never.
-     */
+  it('ignores the fire key completely, however long it is held', () => {
+    // The whole point of the change. Not "waits for a dwell", not "resolves eventually":
+    // a card cannot see the trigger. A minute of it, so a reinstated dwell fails here.
     const cursor = newCursor()
-    const before = drive(cursor, repeat(FIRE, HELD_CONFIRM_DWELL_TICKS - 1), OFFER_COUNT)
-    for (const action of before) expect(action.kind).toBe('none')
-    // And the dwell is long enough to actually read three options.
-    expect(HELD_CONFIRM_DWELL_TICKS).toBeGreaterThanOrEqual(30)
+    for (const action of drive(cursor, repeat(HOLDING_FIRE, 60 * 60), OFFER_COUNT)) {
+      expect(action.kind).toBe('none')
+    }
+  })
+
+  it('does not confirm from a confirm key that was already down', () => {
+    // The seam case: a card that opens under a still-held accept key must not take
+    // option 0 before it has been on screen for a single readable tick.
+    const cursor = newCursor()
+    for (const action of drive(cursor, repeat(CONFIRM, 30), OFFER_COUNT)) {
+      expect(action.kind).toBe('none')
+    }
   })
 
   it('confirms on the first press after a release', () => {
     const cursor = newCursor()
-    expect(updateCursor(cursor, FIRE, OFFER_COUNT).kind).toBe('none')
+    expect(updateCursor(cursor, CONFIRM, OFFER_COUNT).kind).toBe('none')
     expect(updateCursor(cursor, IDLE, OFFER_COUNT).kind).toBe('none')
-    expect(updateCursor(cursor, FIRE, OFFER_COUNT)).toEqual({
-      kind: 'confirm',
-      index: 0,
-      // A deliberate press, not the held-trigger rescue. The distinction is
-      // load-bearing: only a rescue may decline an unaffordable option on the
-      // player's behalf. See ChoiceAction.fromDwell.
-      fromDwell: false,
-    })
+    expect(updateCursor(cursor, CONFIRM, OFFER_COUNT)).toEqual({ kind: 'confirm', index: 0 })
+  })
+
+  it('confirms immediately when the key was not down as the card opened', () => {
+    // The normal case, and the one the old design could not deliver: one press, one
+    // accept, no waiting for anything.
+    const cursor = newCursor()
+    drive(cursor, [IDLE], OFFER_COUNT)
+    expect(updateCursor(cursor, CONFIRM, OFFER_COUNT)).toEqual({ kind: 'confirm', index: 0 })
   })
 
   it('confirms once per press, not once per held tick', () => {
@@ -137,21 +142,20 @@ describe('choice cursor — confirming', () => {
     // relying on that.
     const cursor = newCursor()
     drive(cursor, [IDLE], OFFER_COUNT)
-    const actions = drive(cursor, repeat(FIRE, 30), OFFER_COUNT)
+    const actions = drive(cursor, repeat(CONFIRM, 30), OFFER_COUNT)
     expect(actions.filter((a) => a.kind === 'confirm')).toHaveLength(1)
-    expect(actions[0]).toEqual({ kind: 'confirm', index: 0, fromDwell: false })
+    expect(actions[0]).toEqual({ kind: 'confirm', index: 0 })
   })
 
   it('confirms the option the same tick moved to', () => {
     // Movement is applied before the confirm is read, so a player who flicks right
-    // and presses fire on the same tick gets the option they flicked to — not the
+    // and presses accept on the same tick gets the option they flicked to — not the
     // one they were on a tick earlier.
     const cursor = newCursor()
     drive(cursor, [IDLE], OFFER_COUNT)
-    expect(updateCursor(cursor, input({ moveX: 1, fire: true }), OFFER_COUNT)).toEqual({
+    expect(updateCursor(cursor, input({ moveX: 1, confirm: true }), OFFER_COUNT)).toEqual({
       kind: 'confirm',
       index: 1,
-      fromDwell: false,
     })
   })
 
@@ -159,7 +163,7 @@ describe('choice cursor — confirming', () => {
     // An empty offer list must not resolve to "took option 0" — there is no option 0.
     const cursor = newCursor()
     drive(cursor, [IDLE], 0)
-    expect(updateCursor(cursor, FIRE, 0).kind).toBe('none')
+    expect(updateCursor(cursor, CONFIRM, 0).kind).toBe('none')
   })
 })
 
@@ -263,54 +267,47 @@ describe('choice cursor — selection', () => {
   })
 })
 
-// --- the deadlock guard ------------------------------------------------------
+// --- no timeout --------------------------------------------------------------
 
 /**
- * The timeout is a SAFETY NET, not the intended path.
+ * A CARD NEVER CLOSES ITSELF. Reported from play: "the shops shouldn't close
+ * automatically, that's annoying."
  *
- * Because confirming needs a rising edge, anyone who never releases the trigger
- * waits forever and the run simply stops. An aggressive bot policy that holds
- * fire constantly deadlocked its run exactly this way — which is a hang, in a
- * harness whose whole job is to run thousands of unattended sorties.
+ * Two rules used to close one: `CHOICE_TIMEOUT_TICKS = 20 * 60` declined any open card
+ * after twenty seconds, and a 48-tick dwell confirmed the highlighted option for anyone
+ * still holding the fire key. Both existed because accepting WAS the fire key, so a card
+ * opened under a held trigger could not be accepted at all — and what the timeout
+ * actually reached, once the dwell covered that, was a player holding nothing: somebody
+ * reading the card, which is what the screen is for.
  *
- * So the tick it fires is asserted exactly. Too early and it steals a real
- * decision from a player who is reading the card; too late (or never) and the
- * deadlock is back.
+ * A paused run is not a deadlock. These tests are what stops either rule coming back.
  */
-describe('choice timeout', () => {
-  it('auto-skips on exactly CHOICE_TIMEOUT_TICKS, and not a tick before', () => {
+describe('a choice never resolves itself on time alone', () => {
+  /** Three times the old 20-second timeout, so any plausible reinstatement fails. */
+  const A_LONG_TIME = 60 * 60
+
+  it('never resolves an untouched card, however long it is left', () => {
     const cursor = newCursor()
-    for (let tick = 1; tick < CHOICE_TIMEOUT_TICKS; tick++) {
+    for (let tick = 1; tick <= A_LONG_TIME; tick++) {
       expect(updateCursor(cursor, IDLE, OFFER_COUNT).kind, `tick ${tick}`).toBe('none')
     }
-    expect(updateCursor(cursor, IDLE, OFFER_COUNT)).toEqual({ kind: 'skip' })
   })
 
-  it('resolves a never-released trigger by confirming, long before the timeout', () => {
-    /**
-     * UPDATED at the soft-freeze fix. The timeout used to be the only thing that
-     * rescued this case, 60 seconds later — which is what the tester experienced as
-     * a freeze. The dwell now resolves it in under a second, and the timeout has
-     * become a true backstop that healthy input never reaches.
-     */
-    const cursor = newCursor()
-    const actions = drive(cursor, repeat(FIRE, CHOICE_TIMEOUT_TICKS), OFFER_COUNT)
-    const firstResolved = actions.findIndex((a) => a.kind !== 'none')
-    expect(firstResolved).toBeGreaterThan(0)
-    expect(firstResolved).toBeLessThan(HELD_CONFIRM_DWELL_TICKS + 2)
-    expect(actions[firstResolved]?.kind).toBe('confirm')
+  it('never resolves a card under any held input', () => {
+    // Every button, held for a minute each. The old design had two escapes from this
+    // state and both of them decided the card; there must now be none.
+    for (const stuck of [HOLDING_FIRE, CONFIRM, SPECIAL, LEFT, RIGHT]) {
+      const cursor = newCursor()
+      for (const action of drive(cursor, repeat(stuck, A_LONG_TIME), OFFER_COUNT)) {
+        expect(action.kind, `held ${JSON.stringify(stuck)}`).toBe('none')
+      }
+    }
   })
 
-  it('is long enough to be a backstop rather than a timer', () => {
-    // A reward screen with a visible countdown is a different design. This must
-    // outlast any real decision — but it was 60s, and 60s of an apparently frozen
-    // game is indistinguishable from a crash. Shortened once the dwell made it
-    // genuinely unreachable by normal input.
-    expect(CHOICE_TIMEOUT_TICKS).toBeGreaterThanOrEqual(15 * 60)
-    expect(CHOICE_TIMEOUT_TICKS).toBeGreaterThan(HELD_CONFIRM_DWELL_TICKS * 4)
-  })
-
-  it('counts open ticks, not presses', () => {
+  it('still counts open ticks, because an observer reads them', () => {
+    // Nothing in the sim branches on this any more; `WorldView.choiceResolve.openTicks`
+    // is how a bot or the playtest harness tells this card from the next one at a seam,
+    // and the harness's stall bound is measured in it.
     const cursor = newCursor()
     expect(cursor.openTicks).toBe(0)
     drive(cursor, repeat(IDLE, 42), OFFER_COUNT)
@@ -519,63 +516,65 @@ describe('makeChoice', () => {
   })
 })
 
-describe('a held trigger can never make the card unresponsive', () => {
+describe('the trigger is not an accept key', () => {
   /**
-   * REGRESSION — a tester reported "the occasional soft freeze".
+   * REGRESSION, TWICE OVER.
    *
-   * Confirming required a rising fire edge, so a player holding the trigger when a
-   * reward opened sat looking at a card that ignored the button they were pressing
-   * until a 60-second timeout. In a shmup the trigger is always held, so this was
-   * the normal case rather than an edge case, and nothing on screen explained it.
+   * A tester reported "the occasional soft freeze": accepting required a rising fire
+   * edge, so a player holding the trigger when a reward opened sat looking at a card
+   * that ignored the button they were pressing. The first fix was a dwell that confirmed
+   * the highlighted option after 48 ticks, which fixed the freeze by making the
+   * interface pick for them — and on touch, where auto-fire never releases, that was
+   * every card on the platform.
    *
-   * The rising edge still matters — without it a card flashes past unread — so the
-   * fix is a dwell rather than a removal, and these tests pin both halves.
+   * The real fix was to stop reading the trigger. "The selection screens must not use
+   * the fire key to accept responses."
    */
-  it('does not confirm instantly for a trigger already held', () => {
+  it('does not confirm from a held trigger, ever', () => {
     const cursor = newCursor()
-    for (let tick = 0; tick < HELD_CONFIRM_DWELL_TICKS - 1; tick++) {
-      expect(updateCursor(cursor, HOLDING_FIRE, 3).kind, `tick ${tick}`).toBe('none')
+    for (const action of drive(cursor, repeat(HOLDING_FIRE, 60 * 60), 3)) {
+      expect(action.kind).toBe('none')
     }
   })
 
-  it('confirms a held trigger once the dwell has passed', () => {
+  it('does not confirm from a pulsed trigger either', () => {
+    // Rising fire edges, over and over. The edge was the whole mechanism before; now the
+    // key simply is not read, so pressing it a hundred times must change nothing.
     const cursor = newCursor()
-    let action = updateCursor(cursor, HOLDING_FIRE, 3)
-    for (let tick = 1; tick < HELD_CONFIRM_DWELL_TICKS; tick++) {
-      action = updateCursor(cursor, HOLDING_FIRE, 3)
+    for (let tick = 0; tick < 300; tick++) {
+      const action = updateCursor(cursor, tick % 2 === 0 ? HOLDING_FIRE : IDLE, 3)
+      expect(action.kind, `tick ${tick}`).toBe('none')
     }
-    // Resolves in well under a second, and far inside the timeout — the game never
-    // appears to stop responding.
-    expect(action.kind).toBe('confirm')
-    expect(HELD_CONFIRM_DWELL_TICKS).toBeLessThan(CHOICE_TIMEOUT_TICKS / 4)
   })
 
-  it('reports that it is waiting for a release, so the screen can say so', () => {
+  it('confirms from the accept key while the trigger is held down', () => {
+    // The case that used to be impossible: a player who is still shooting can accept.
     const cursor = newCursor()
-    updateCursor(cursor, HOLDING_FIRE, 3)
-    expect(cursor.awaitingRelease).toBe(true)
-    updateCursor(cursor, NEUTRAL_INPUT, 3)
-    expect(cursor.awaitingRelease).toBe(false)
+    drive(cursor, [HOLDING_FIRE], 3)
+    expect(updateCursor(cursor, input({ fire: true, confirm: true }), 3)).toEqual({
+      kind: 'confirm',
+      index: 0,
+    })
   })
 
-  it('still confirms immediately on a deliberate release-and-press', () => {
-    // A player who releases must not be made to wait out a dwell they never needed.
+  it('declines from the decline key while the trigger is held down', () => {
     const cursor = newCursor()
-    updateCursor(cursor, HOLDING_FIRE, 3)
-    updateCursor(cursor, NEUTRAL_INPUT, 3)
-    expect(updateCursor(cursor, HOLDING_FIRE, 3).kind).toBe('confirm')
+    drive(cursor, [HOLDING_FIRE], 3)
+    expect(updateCursor(cursor, input({ fire: true, special: true }), 3)).toEqual({ kind: 'skip' })
   })
 
-  it('never leaves a card open longer than the timeout under any input', () => {
-    // Belt and braces: whatever the player does, the run resumes.
-    for (const input of [HOLDING_FIRE, NEUTRAL_INPUT]) {
-      const cursor = newCursor()
-      let resolved = false
-      for (let tick = 0; tick < CHOICE_TIMEOUT_TICKS + 2 && !resolved; tick++) {
-        if (updateCursor(cursor, input, 3).kind !== 'none') resolved = true
-      }
-      expect(resolved, `unresolved for input fire=${input.fire}`).toBe(true)
-    }
+  it('navigates while the trigger is held down', () => {
+    // Movement used to cancel the dwell rescue, which meant a player who navigated with
+    // the trigger down could not resolve the card at all. Nothing interacts now.
+    const cursor = newCursor()
+    drive(cursor, [HOLDING_FIRE], 3)
+    updateCursor(cursor, input({ fire: true, moveX: 1 }), 3)
+    expect(cursor.index).toBe(1)
+    updateCursor(cursor, input({ fire: true }), 3)
+    expect(updateCursor(cursor, input({ fire: true, confirm: true }), 3)).toEqual({
+      kind: 'confirm',
+      index: 1,
+    })
   })
 })
 
@@ -614,7 +613,7 @@ describe('an unaffordable option cannot be selected', () => {
     for (const key of [RIGHT, LEFT, RIGHT, RIGHT, LEFT]) {
       updateCursor(cursor, key, 3, AFFORDABLE)
       updateCursor(cursor, IDLE, 3, AFFORDABLE)
-      const action = updateCursor(cursor, FIRE, 3, AFFORDABLE)
+      const action = updateCursor(cursor, CONFIRM, 3, AFFORDABLE)
       if (action.kind === 'confirm') {
         expect(AFFORDABLE[action.index], `confirmed unaffordable index ${action.index}`).toBe(true)
       }

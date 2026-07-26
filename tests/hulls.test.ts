@@ -31,8 +31,8 @@ import type { HullDef, StatKey, StatModifier } from '../src/content/types'
  * - A modifier the stat bounds swallow reads correctly on the card and does nothing.
  * - A hull that floors fire rate or speed is not a trade-off, it is a broken build the
  *   player chose on purpose because the card made it sound clever.
- * - A mechanism line with no numbers is flavour wearing a mechanism's clothes —
- *   `docs/UI.md` rule 4.
+ * - A figure written into a hull's prose is a figure that survives the rebalance that
+ *   invalidates it. See "authored prose states no figures" below.
  *
  * MUTATION-VERIFIED. Each test named below was confirmed to fail against a deliberate
  * break of the content, and the content reverted:
@@ -45,8 +45,12 @@ import type { HullDef, StatKey, StatModifier } from '../src/content/types'
  *        — Probate's mul 0.72 changed to 1.0 fails it.
  *   "leaves every stat inside the range that keeps a hull flyable"
  *        — Surety's -55 hull speed deepened to -120 fails it.
- *   "states every number it applies in the mechanism, not the flavour"
- *        — changing Arrears' +42 speed to +40 without editing the text fails it.
+ *   "states no figure in the mechanism or the flavour"
+ *        — putting "+42 hull speed, 210 to 252" back into Arrears' mechanism fails it,
+ *          reporting the tokens it found.
+ *   "keeps the allowlist honest: real hulls, live entries, no laundered stats"
+ *        — allowlisting "42", "210" and "252" to keep that sentence fails it instead,
+ *          which is the property that stops the allowlist being an off switch.
  *   "names every starting item it grants in the mechanism line"
  *        — removing "Repair Nanites" from Probate's text fails it.
  */
@@ -222,14 +226,14 @@ describe('the anti-strictly-better rule', () => {
     expect(lien.startingScrap ?? 0).toBe(0)
   })
 
-  it('describes Lien with the live values from the stat table', () => {
-    // Ties the sentence to the data. If someone retunes the base hull speed, this
-    // fails rather than leaving a card that confidently states the old number.
-    const lien = getHull(LIEN_ID)
-    for (const stat of ['maxIntegrity', 'maxShield', 'hullSpeed', 'projectileDamage'] as const) {
-      expect(lien.mechanism, stat).toContain(numeral(STATS[stat].base))
-    }
-    expect(lien.mechanism).toContain(numeral(shotsPerSecond(STATS.fireIntervalTicks.base)))
+  it('describes Lien as the reference the other cards quote', () => {
+    // Lien's card is the one card with an empty trade table, so its sentence has to
+    // say *why* it is empty or the card reads as one that failed to load. It used to
+    // do that by restating the stat bases, which put four hand-written numbers one
+    // header away from the same four numbers computed — see the prose guard below.
+    // The bases are now quoted only by `HULL_SELECT_STANDFIRST`, which derives them,
+    // and `tests/hullSelect.test.ts` holds that sentence to the live table.
+    expect(getHull(LIEN_ID).mechanism).toMatch(/baseline|measured against/i)
   })
 })
 
@@ -308,13 +312,151 @@ describe('stat modifiers', () => {
   })
 })
 
-describe('mechanism text — UI.md rule 4', () => {
-  it('states every hull mechanism with at least one digit', () => {
-    // The rule 4 check. A hull card read under time pressure has to answer "what am I
-    // flying", and a mood does not answer it.
-    for (const [key, def] of hullEntries) expect(def.mechanism, key).toMatch(/\d/)
+describe('authored prose states no figures', () => {
+  /**
+   * THE R12 GUARD, FOR HULLS.
+   *
+   * `docs/ROADMAP.md` R12: three certification cards promised numbers their hulls no
+   * longer had, because the hull was rebalanced and the hand-written card was not.
+   * `content/bosses.ts` carries five stale HP comments for the same reason. Hull prose
+   * was next in line and was already duplicating: every hull's `mechanism` restated
+   * the exact figures the selection card computes from `resolveStat` one header below
+   * it, so a balance change updated the derived table and left the sentence selling
+   * the previous hull.
+   *
+   * The fix is not "keep them in sync" — nothing can check that for prose in general.
+   * It is that authored prose does not state figures at all. The table is computed and
+   * cannot go stale; the sentence says what the hull is for, which no retune
+   * invalidates. This test is what makes that stick: a new hull whose blurb quotes its
+   * own numbers fails here, loudly, naming the token.
+   *
+   * `tests/hullSelect.test.ts` guards the other direction — every figure the prose
+   * gave up must be printed by the card — so this is a move, not a deletion.
+   */
+
+  /** Digits and the symbols that only ever appear beside one. */
+  const FIGURE_TOKENS = /[\d%]|→/g
+
+  /**
+   * Spelled-out figures, because "twenty shots per second" goes stale exactly as fast
+   * as "20" does and a digit scan cannot see it.
+   *
+   * `one`, `two`, `first` and `second` are deliberately absent: they are ordinary
+   * English ("every hit lands on integrity from the first one") and no stat value is
+   * small enough for them to restate usefully. The multiplier and fraction words are
+   * here because they are how a stat gets quoted without a numeral — "half the pickup
+   * area" is a figure, and it is wrong the moment the radius moves.
+   */
+  const FIGURE_WORDS = [
+    'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+    'fifteen', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety',
+    'hundred', 'thousand', 'percent', 'half', 'halves', 'quarter', 'third', 'thirds',
+    'double', 'doubled', 'doubles', 'triple', 'twice',
+  ] as const
+
+  /**
+   * Figures a hull's prose is allowed to state, per hull id, each with its reason.
+   *
+   * EMPTY, AND THE MECHANISM IS THE POINT. A number that is genuinely not a stat — a
+   * sector index, a hull's designation, a count of something the table does not print
+   * — belongs here with a sentence saying which. What it cannot do is launder a stat
+   * value: the tests below reject an entry that matches any number this hull's own
+   * modifiers, starting scrap or effective health resolve to, so allowlisting "252" to
+   * keep "210 to 252" in the prose fails instead of passing.
+   */
+  const PROSE_FIGURE_ALLOWLIST: Readonly<Record<string, readonly { text: string; why: string }[]>> =
+    {}
+
+  /** Everything a player reads on the card that a human typed. */
+  function prose(def: HullDef): string {
+    return `${def.mechanism} ${def.flavour ?? ''}`
+  }
+
+  /** The prose with its allowlisted figures removed, so only defects are left. */
+  function scannable(def: HullDef): string {
+    let text = prose(def)
+    for (const entry of PROSE_FIGURE_ALLOWLIST[def.id] ?? []) {
+      text = text.split(entry.text).join(' ')
+    }
+    return text
+  }
+
+  /** Every figure the card computes for this hull, as strings, for the launder check. */
+  function derivedFigures(def: HullDef): string[] {
+    const out: string[] = []
+    for (const m of def.stats) out.push(...salientNumbers(m))
+    if (def.startingScrap !== undefined) out.push(numeral(def.startingScrap))
+    const integrity = resolveStat('maxIntegrity', def.stats)
+    const shield = resolveStat('maxShield', def.stats)
+    out.push(numeral(integrity), numeral(shield), numeral(integrity + shield))
+    out.push(
+      numeral(
+        resolveStat('projectileDamage', def.stats) *
+          shotsPerSecond(resolveStat('fireIntervalTicks', def.stats)),
+      ),
+    )
+    return out
+  }
+
+  it('states no figure in the mechanism or the flavour', () => {
+    for (const [key, def] of hullEntries) {
+      const found = scannable(def).match(FIGURE_TOKENS) ?? []
+      expect(
+        found,
+        `${key} states figures in its prose (${found.join('')}). The card computes them ` +
+          `from STATS/resolveStat — say what the hull is FOR instead.`,
+      ).toEqual([])
+    }
   })
 
+  it('states no spelled-out figure either', () => {
+    for (const [key, def] of hullEntries) {
+      const text = scannable(def).toLowerCase()
+      for (const word of FIGURE_WORDS) {
+        expect(
+          new RegExp(`\\b${word}\\b`).test(text),
+          `${key} spells out a figure ("${word}") the card already computes`,
+        ).toBe(false)
+      }
+    }
+  })
+
+  it('keeps the allowlist honest: real hulls, live entries, no laundered stats', () => {
+    for (const [id, entries] of Object.entries(PROSE_FIGURE_ALLOWLIST)) {
+      const def = HULLS[id]
+      expect(def, `${id} is allowlisted and is not a hull`).toBeDefined()
+      if (!def) continue
+      const derived = new Set(derivedFigures(def))
+      for (const entry of entries) {
+        // A dead entry is an exemption nobody can audit: it reads as a live claim
+        // about prose that no longer says it.
+        expect(prose(def), `${id} allowlists "${entry.text}", which its prose does not say`)
+          .toContain(entry.text)
+        expect(entry.why.length, `${id} allowlists "${entry.text}" with no reason`)
+          .toBeGreaterThan(20)
+        // THE LAUNDERING GUARD. Without it the allowlist is an off switch.
+        expect(
+          derived.has(entry.text),
+          `${id} allowlists "${entry.text}", which is one of its own resolved stat ` +
+            `values — that is the duplication this guard exists to stop`,
+        ).toBe(false)
+      }
+    }
+  })
+
+  it('says something a table cannot, rather than nothing at all', () => {
+    // The failure mode of cutting the numbers out: a card with no character left. A
+    // blurb that has stopped describing the hull is worse than one with a redundant
+    // figure in it, so the floor is a real sentence about intent, not a stub.
+    for (const [key, def] of hullEntries) {
+      const words = def.mechanism.trim().split(/\s+/)
+      expect(words.length, `${key}: "${def.mechanism}" is too thin to say anything`)
+        .toBeGreaterThanOrEqual(12)
+    }
+  })
+})
+
+describe('mechanism text — UI.md rule 4', () => {
   it('never leaves a mechanism empty or fragmentary', () => {
     for (const [key, def] of hullEntries) {
       const text = def.mechanism.trim()
@@ -324,25 +466,13 @@ describe('mechanism text — UI.md rule 4', () => {
     }
   })
 
-  it('states every number it applies in the mechanism, not the flavour', () => {
-    // Only ever reads `mechanism`, which is what makes "flavour is never
-    // load-bearing" enforceable rather than aspirational.
-    for (const [key, def] of hullEntries) {
-      for (const m of def.stats) {
-        const stated = salientNumbers(m).some((n) => def.mechanism.includes(n))
-        expect(stated, `${key}: ${m.stat} ${m.kind} ${m.value}`).toBe(true)
-      }
-      if (def.startingScrap !== undefined) {
-        expect(def.mechanism, `${key}: startingScrap`).toContain(numeral(def.startingScrap))
-      }
-    }
-  })
-
-  it('keeps numbers out of the flavour line entirely', () => {
+  it('never ships an empty flavour line', () => {
+    // Present-or-absent, never blank: an empty string still costs the card a row in
+    // the degradation cascade. Figures are handled by the prose guard above, which
+    // reads flavour and mechanism together.
     for (const [key, def] of hullEntries) {
       if (def.flavour === undefined) continue
       expect(def.flavour.trim().length, key).toBeGreaterThan(0)
-      expect(def.flavour, key).not.toMatch(/\d/)
     }
   })
 
@@ -354,7 +484,7 @@ describe('mechanism text — UI.md rule 4', () => {
       for (const id of def.startingItems ?? []) {
         const item = ITEMS[id]
         expect(item, `${key} grants unknown item ${id}`).toBeDefined()
-        expect(def.mechanism, `${key} does not name ${id}`).toContain(item?.name ?? ' ')
+        expect(def.mechanism, `${key} does not name ${id}`).toContain(item?.name ?? 'no item on file')
       }
     }
   })

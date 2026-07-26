@@ -28,7 +28,14 @@ import {
   shouldShowHullSelect,
 } from './ui/hullSelect'
 import { createAudioDirector } from './audio'
-import { adoptLegacySave, loadSave, persistSave, type Save, type Settings } from './meta/save'
+import {
+  adoptLegacySave,
+  loadSave,
+  loadSaveWithReport,
+  persistSave,
+  type Save,
+  type Settings,
+} from './meta/save'
 import { Viewport } from './render/layout'
 import { createFeelState, feelTick, resetFeelState } from './render/feel'
 import { drawPanel, type PanelState } from './render/panel'
@@ -79,6 +86,7 @@ import {
   movePauseSelection,
 } from './ui/pauseMenu'
 import { drawTitleScreen } from './ui/titleScreen'
+import { describeSaveLoss, type SaveNotice } from './ui/saveNotice'
 import { loadBindings, persistBindings } from './meta/keybinds'
 import {
   createSettingsState,
@@ -239,7 +247,21 @@ function main(): void {
   const options = readUrlOptions(resolved.mode.seed)
   // Adopt the v1 storage key before a normal load, so a returning player's pilot
   // count survives. See the note in meta/save.ts about versioned keys.
-  const save: Save = adoptLegacySave() ?? loadSave()
+  const adopted = adoptLegacySave()
+  /**
+   * THE REPORTING LOAD, not `loadSave()`.
+   *
+   * `loadSave` throws the report away, which its own header says is only for callers
+   * with nowhere to show it. This one has somewhere: the title screen. Before this,
+   * every field of `SaveLoadReport` was computed and discarded, so a save that could
+   * not be read silently became a fresh game — a pilot with thirty sorties behind them
+   * opened the game at #001 with an empty hangar and nothing said why.
+   *
+   * Read after adoption on purpose: `adoptLegacySave` writes the migrated v1 payload
+   * under the current key, so this sees it and reports it as the clean load it is.
+   */
+  const loaded = loadSaveWithReport()
+  const save: Save = adopted ?? loaded.save
 
   const viewport = new Viewport(canvas)
   const keyboard = new Keyboard()
@@ -276,6 +298,33 @@ function main(): void {
   let menuTick = 0
   let pauseSelection = 0
   let hangarSelection = 0
+  /**
+   * What loading the save cost, until the player acknowledges it.
+   *
+   * SESSION-LOCAL, and deliberately not persisted. "I have seen this" is not part of a
+   * player's progress, and adding a field to the save to hold it would mean a new
+   * numbered interface, a migration and a fixture test (CLAUDE.md) to record a fact
+   * that stops mattering the moment the notice is dismissed.
+   *
+   * The honest consequence: reload without flying, with the same unreadable bytes still
+   * in storage, and it is reported again — because it is still true. Flying one sortie
+   * calls `persistSave` and writes a readable file, after which there is nothing to
+   * report. What must not happen, and does not, is it coming back inside a session
+   * after being dismissed.
+   */
+  let saveNotice: SaveNotice | null = describeSaveLoss(loaded.report)
+  /**
+   * Personnel entries this session lost, for the personnel screen's own footer notice.
+   *
+   * `drawPersonnelScreen` has taken `skipped` and `dropped` since it was written, and
+   * this file passed literal zeroes — so `personnelSkippedText` and
+   * `personnelDroppedText` could never appear on the screen a player goes to in order
+   * to look at the history the loss is about. The title notice says it happened; this
+   * says it about the list itself. Seeded from the load, and added to when a filing
+   * evicts an older file mid-session.
+   */
+  const personnelSkipped = loaded.report.personnelSkipped
+  let personnelDropped = loaded.report.personnelDropped.length
   /**
    * Key bindings, in their own store.
    *
@@ -478,6 +527,9 @@ function main(): void {
       }),
     )
     save.personnel = appended.history
+    // `appendPersonnelRecord` returns what the cap forced out precisely so the caller
+    // can say so, and this discarded it. The screen already has a line for it.
+    personnelDropped += appended.dropped.length
 
     // A daily contract is recorded so it cannot be re-rolled by quitting until the
     // first wave looks survivable. `abandoned` exists for exactly that reason.
@@ -731,13 +783,11 @@ function main(): void {
       /*
        * The input context, set before anything reads the keyboard.
        *
-       * Auto-fire is gated on this, and the gate is load-bearing rather than tidy: a
-       * trigger that never releases can never produce the rising edge a confirm
-       * needs, and `HELD_CONFIRM_DWELL_TICKS` would then auto-confirm option 0 on
-       * every reward card 0.8 seconds after it opened. Mobile pick rates would become
-       * a constant and the same seed would play out differently depending on a
-       * setting. `src/core/touch.ts` makes the identical distinction for the same
-       * reason.
+       * Auto-fire is gated on this. It used to be load-bearing for a much larger
+       * reason — a held trigger confirmed reward cards, so auto-fire on a card took
+       * option 0 by itself — and accepting is its own action now, so the gate is back
+       * to meaning what it says: nothing off a sortie shoots. `src/core/touch.ts`
+       * makes the identical distinction.
        */
       keyboard.setContext(
         screen === 'sortie' ? (world.pendingChoice !== null ? 'choice' : 'sortie') : 'menu',
@@ -746,6 +796,13 @@ function main(): void {
       if (screen === 'title') {
         menuTick++
         titleStars.update(0.35)
+        // ESC acknowledges the save-loss notice, and only when one is up — the
+        // short-circuit matters, or an idle Escape on the title would play a cancel
+        // sound for nothing. Nothing else on this screen uses cancel.
+        if (saveNotice !== null && keyboard.consumePressed('cancel')) {
+          audio.cancel()
+          saveNotice = null
+        }
         if (keyboard.consumePressed('confirm')) {
           audio.confirm()
           beginSortie()
@@ -777,6 +834,10 @@ function main(): void {
           audio.confirm()
           openSettings('title')
         }
+        // Leaving the title acknowledges it too: whichever way they went, they read it
+        // or chose to get on with the game, and a notice that returns after a trip to
+        // the hangar is a notice that has stopped being information.
+        if (screen !== 'title') saveNotice = null
         return
       }
 
@@ -969,6 +1030,7 @@ function main(): void {
           pilotNumber: save.pilotNumber,
           tick: menuTick,
           version: VERSION,
+          notice: saveNotice,
         })
         return
       }
@@ -1035,8 +1097,8 @@ function main(): void {
             enemies: Object.fromEntries(Object.values(ENEMIES).map((e) => [e.id, e.name])),
             sectors: Object.fromEntries(SECTORS.map((s) => [s.id, s.name])),
           },
-          skipped: 0,
-          dropped: 0,
+          skipped: personnelSkipped,
+          dropped: personnelDropped,
         })
         return
       }
@@ -1102,7 +1164,6 @@ function main(): void {
           selected: world.choiceSelection,
           tick: world.stats.tick,
           items: ITEMS,
-          awaitingRelease: world.choiceAwaitingRelease,
         })
         if (screen !== 'paused') return
       }

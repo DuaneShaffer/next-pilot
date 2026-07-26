@@ -35,6 +35,7 @@ import { SIM_VERSION } from '../src/meta/simVersion'
 import {
   DAILY_ARCHIVE_DAYS,
   MAX_REPLAY_PARAM_CHARS,
+  REJECTION_PRECEDENCE,
   RUN_PARAM,
   URL_SAFE_CHARS,
   buildDailyLink,
@@ -116,7 +117,7 @@ function resolve(
 /** A replay of held inputs — the case RLE was designed for. */
 function heldReplay(ticks: number, seed = SEED_A): Replay {
   const recorder = new ReplayRecorder(seed)
-  const held: InputSnapshot = { moveX: 1, moveY: 0, fire: true, special: false, focus: false }
+  const held: InputSnapshot = { moveX: 1, moveY: 0, fire: true, special: false, focus: false, confirm: false }
   for (let i = 0; i < ticks; i++) recorder.record(held)
   return recorder.toReplay()
 }
@@ -310,6 +311,101 @@ describe('precedence, pinned', () => {
     expect(mode.kind).toBe('replay')
     expect(mode.purist).toBe(true)
     expect(rejections).toEqual(['daily-overridden-by-replay', 'seed-overridden-by-replay'])
+  })
+
+  /**
+   * The published order of `rejections`, and which sentence the player gets.
+   *
+   * `ResolvedRun.rejections` is documented as "in precedence order, most significant
+   * first" and `notice` as coming "from the most significant rejection". Neither was
+   * true: rejections were collected in PARSE order, and the seed is parsed first so a
+   * rejected replay can fall back to it. A link with a damaged replay and a junk seed
+   * therefore told the pilot about the seed and never mentioned that the shared run —
+   * the entire reason the link was sent — had arrived cut in half.
+   *
+   * MUTATION-VERIFIED: dropping the sort in `resolveRunMode`'s `resolved()` fails
+   * "orders two simultaneous rejections by precedence, not by parse order" and
+   * "keeps the notice on the most significant rejection".
+   */
+  it('orders two simultaneous rejections by precedence, not by parse order', () => {
+    // Parse order here is seed, then replay. Precedence is the other way round.
+    const { mode, rejections } = resolve({
+      [RUN_PARAM.seed]: 'nope',
+      [RUN_PARAM.replay]: 'not-a-replay',
+    })
+    expect(mode.kind).toBe('free')
+    expect(rejections).toEqual(['replay-malformed', 'seed-invalid'])
+
+    // And the daily tier sits between the two.
+    const withDaily = resolve({ [RUN_PARAM.seed]: 'nope', [RUN_PARAM.daily]: 'yesterday' })
+    expect(withDaily.mode.kind).toBe('daily')
+    expect(withDaily.rejections).toEqual(['daily-date-invalid', 'seed-invalid'])
+
+    const allThree = resolve({
+      [RUN_PARAM.seed]: 'nope',
+      [RUN_PARAM.daily]: 'yesterday',
+      [RUN_PARAM.replay]: 'x'.repeat(MAX_REPLAY_PARAM_CHARS + 1),
+    })
+    expect(allThree.rejections).toEqual([
+      'replay-oversize',
+      'daily-date-invalid',
+      'seed-invalid',
+    ])
+  })
+
+  it('keeps the notice on the most significant rejection', () => {
+    // One sentence, and it has to be about the thing that decided the run. Telling a
+    // recipient their seed was malformed while silently discarding the replay they
+    // were sent is a notice that answers a question nobody asked.
+    const { notice } = resolve({
+      [RUN_PARAM.seed]: 'nope',
+      [RUN_PARAM.replay]: 'not-a-replay',
+    })
+    expect(notice).toMatch(/damaged/)
+    expect(notice).not.toMatch(/12 characters/)
+
+    const oversize = resolve({
+      [RUN_PARAM.seed]: 'nope',
+      [RUN_PARAM.daily]: 'yesterday',
+      [RUN_PARAM.replay]: 'x'.repeat(MAX_REPLAY_PARAM_CHARS + 1),
+    })
+    expect(oversize.notice).toMatch(/far longer than any real run/)
+  })
+
+  it('publishes every rejection in precedence order, for every combination', () => {
+    // The general form of the two cases above, over the same grid the totality test
+    // uses: whatever the URL says, `rejections` comes out sorted by the table. A new
+    // rejection reason inserted in the wrong branch cannot slip past this.
+    const rank = (reason: string): number => REJECTION_PRECEDENCE.indexOf(reason as never)
+    expect(new Set(REJECTION_PRECEDENCE).size).toBe(REJECTION_PRECEDENCE.length)
+
+    const oversize = 'x'.repeat(MAX_REPLAY_PARAM_CHARS + 1)
+    const encoded = encodeReplay(heldReplay(60))
+    let seenMultiple = 0
+    for (const replay of [null, '', encoded, 'not-a-replay', oversize]) {
+      for (const daily of [null, '1', '2026-07-01', 'yesterday', '2099-01-01']) {
+        for (const seed of [null, SEED_A, 'nope']) {
+          const params = new URLSearchParams()
+          if (replay !== null) params.set(RUN_PARAM.replay, replay)
+          if (daily !== null) params.set(RUN_PARAM.daily, daily)
+          if (seed !== null) params.set(RUN_PARAM.seed, seed)
+          const { rejections } = resolveRunMode({
+            params,
+            now: NOON,
+            dailyRecord: null,
+            randomSeed: () => SEED_B,
+          })
+          if (rejections.length > 1) seenMultiple++
+          const ranks = rejections.map(rank)
+          expect(ranks, `${params.toString()} -> ${rejections.join(', ')}`).toEqual(
+            [...ranks].sort((a, b) => a - b),
+          )
+          for (const r of ranks) expect(r).toBeGreaterThanOrEqual(0)
+        }
+      }
+    }
+    // The grid has to actually exercise the ordering, or this test cannot fail.
+    expect(seenMultiple).toBeGreaterThan(4)
   })
 
   it('is total: every combination of the four params resolves to exactly one mode', () => {
@@ -711,8 +807,8 @@ describe('replay link length policy, from real encoded runs', () => {
     // ~2.67 encoded chars per tick, because every tick is its own RLE run. Thirty
     // seconds of this already exceeds the limit.
     const recorder = new ReplayRecorder(SEED_A)
-    const a: InputSnapshot = { moveX: 1, moveY: 0, fire: true, special: false, focus: false }
-    const b: InputSnapshot = { moveX: -1, moveY: 0, fire: false, special: false, focus: false }
+    const a: InputSnapshot = { moveX: 1, moveY: 0, fire: true, special: false, focus: false, confirm: false }
+    const b: InputSnapshot = { moveX: -1, moveY: 0, fire: false, special: false, focus: false, confirm: false }
     expect(packInput(a)).not.toBe(packInput(b))
     for (let tick = 0; tick < 1800; tick++) recorder.record(tick % 2 === 0 ? a : b)
     const share = shareReplay(BASE, recorder.toReplay())

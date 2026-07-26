@@ -44,6 +44,33 @@ import { hashWorld } from './snapshot'
  *
  * ## History
  *
+ * **3 — the shield recharges, cards stop resolving themselves, and confirm leaves the
+ * trigger.** Four independent behaviour changes landed together, and one of them also
+ * moves the wire format, so this version is the *only* one so far where an old replay
+ * fails to decode rather than decoding into the wrong run. That is the safe failure and
+ * it is worth noting as an accident of timing rather than a design improvement.
+ *
+ *   - **`confirm` is its own `InputSnapshot` action** and takes bit 7 of the packed
+ *     input byte. `REPLAY_FORMAT_VERSION` moves 3 → 4 with it, so a v3 replay is
+ *     REFUSED rather than misread. Selection screens no longer accept on `fire`.
+ *   - **Cards no longer resolve themselves.** `CHOICE_TIMEOUT_TICKS` (20 s) and the
+ *     48-tick held-trigger dwell are both gone, along with `awaitingRelease`. An old
+ *     replay's inputs assumed a card would close on its own; now it waits. Every seam
+ *     after the first therefore lands somewhere different.
+ *   - **The shield recovers**, from a per-sector reserve (`shieldReservePerSector`,
+ *     base 15) at 4/second after 2.5 seconds without a hit. A straight change to how
+ *     much damage every run can absorb — measured to move a competent policy's clear
+ *     rate from 15% to 33%. Three new `StatKey`s and three new `Hull` fields, all
+ *     hashed.
+ *   - **No route pays scrap**, and the repair route pays 60% of maximum integrity
+ *     instead of 35%. `buildRoutes` consumes one fewer roll off the `route` stream,
+ *     which shifts every subsequent route decision on the same seed.
+ *
+ * The canonical probe below sees the first three of those and cannot see the fourth: it
+ * runs 1,800 ticks of single-sector content and never reaches a seam. Same caveat as
+ * version 2, same conclusion — the probe is evidence that *something* moved, never that
+ * nothing did.
+ *
  * **2 — M5, the multi-sector run.** The textbook dangerous case: every M4 replay
  * still decodes perfectly and plays back a run nobody flew.
  *
@@ -84,7 +111,7 @@ import { hashWorld } from './snapshot'
  *
  * **1 — M0 through M4.** Single sector, no bosses, no hazards.
  */
-export const SIM_VERSION = 2
+export const SIM_VERSION = 3
 
 /** Seed for the canonical run. Arbitrary but fixed forever. */
 export const CANONICAL_SEED = 'K7F29XQM3RTV'
@@ -108,6 +135,11 @@ export function canonicalInputs(): InputSnapshot[] {
       moveY: phase % 37 === 0 ? -1 : 0,
       // Released periodically so the weapon's release path is exercised too.
       fire: phase % 50 !== 0,
+      // Pulsed on a DIFFERENT period from `fire`, deliberately. Confirm is its own
+      // action now rather than a second reading of the trigger, so a script that moved
+      // them together would never exercise the case the split exists for: firing while a
+      // card is open without resolving it.
+      confirm: phase % 71 === 0,
       special: false,
       focus: phase > 100,
     })

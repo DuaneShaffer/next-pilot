@@ -80,10 +80,10 @@
  * an UNEVEN split forces a longer fight than the design asked for — the Deep
  * Manifest's closing act was 18% of its health, which on its own demanded a 33-second
  * fight before any other consideration. Every boss's thresholds are therefore
- * near-equal acts now (1/.63/.32, 1/.60/.30, 1/.66/.33 twice, 1/.75/.50/.25). That
- * buys back 25 seconds of run time and costs nothing a player can perceive: every
- * phase still clears six seconds, and no phase is conspicuously shorter than its
- * neighbours.
+ * equal acts now: 1/.66/.33 for the four three-phase bosses, 1/.75/.50/.25 for the Deep
+ * Manifest. That buys back 25 seconds of run time and costs nothing a player can
+ * perceive: every phase still clears `MIN_PHASE_SECONDS`, and no phase is conspicuously
+ * shorter than its neighbours.
  *
  * ## Weapons: cadence unchanged, per-shot damage cut on the first two bosses only
  *
@@ -118,8 +118,8 @@
  * permitted over the playfield by rule 1, which is a licence to be legible, not to be
  * clever.
  *
- * The thresholds are chosen so **no phase is shorter than 6 seconds** at the stated
- * output. A phase the player cannot finish reading is noise wearing a mechanic's
+ * The thresholds are chosen so **no phase is shorter than `MIN_PHASE_SECONDS`** at the
+ * stated output. A phase the player cannot finish reading is noise wearing a mechanic's
  * clothes, and `tests/bosses.test.ts` computes each phase's span in seconds and
  * enforces the floor.
  *
@@ -733,13 +733,18 @@ export const BOSSES: Record<string, BossDef> = {
   /**
    * SECTOR 1 — Debris Shelf. "Sparse, slow projectiles. Teaches pattern reading."
    *
-   * 2000 HP is 20.0 seconds at the measured 100 dps a pilot leaves sector 1 with —
-   * the band's exact floor, and the shortest fight in the game, because it is the
-   * first boss the player has ever seen. Was 1700 against an assumed 80, which
-   * measured 17.2 s and 16.9 s over two 300-run sweeps. Every weapon
-   * on it is a *position* problem rather than an aim problem: a slow ring, then a
-   * ring from a moving source, then a fan. Nothing here is faster than 130 u/s, so
-   * the 210 u/s hull out-runs all of it and every death is legible as a mistake —
+   * 1700 HP is 17.0 seconds at the measured 100 dps a pilot leaves sector 1 with —
+   * half a second over `BOSS_TTK_BAND`'s floor, and the shortest fight in the game,
+   * because it is the first boss the player has ever seen. Two 300-run sweeps measured
+   * it at 17.2 s and 16.9 s, which is what makes the 100 a measurement rather than the
+   * assumed 80 this number was first authored against. The assumption moved and the HP
+   * did not, deliberately: the raise that would put this fight back at the band's old
+   * 20-second floor was built and measured, and it cost about ten points of clear rate.
+   * `BOSS_TTK_BAND` is where that decision lives; do not re-derive it from here.
+   *
+   * Every weapon on it is a *position* problem rather than an aim problem: a slow ring,
+   * then a ring from a moving source, then a fan. Nothing here is faster than 130 u/s,
+   * so the 210 u/s hull out-runs all of it and every death is legible as a mistake —
    * the same promise the sector's regular enemies make.
    *
    * Contact damage 30 sits under `SECTOR_ONE_MAX_CONTACT_DAMAGE` (35), which is a
@@ -864,7 +869,7 @@ export const BOSSES: Record<string, BossDef> = {
    * SECTOR 2 — The Tally. "Corporate convoy lanes. Turrets and escorts, high scrap
    * yield. Greed vs safety."
    *
-   * 3605 HP is 20.6 seconds at the measured 175 dps a pilot leaves sector 2 with.
+   * 3060 HP is 17.5 seconds at the measured 175 dps a pilot leaves sector 2 with.
    * Was 2600 against an assumed 100 and measured 15.6 s and 14.4 s — the sector-2
    * boss was a SHORTER fight than the sector-1 boss, which inverts the whole ladder. The
    * fight is built out of the sector's own two enemy types read at boss scale: the
@@ -971,7 +976,7 @@ export const BOSSES: Record<string, BossDef> = {
    * SECTOR 3 — Bloomfield. "Something organic has taken a dead station. Corrosive,
    * spreading, irregular patterns that punish standing still."
    *
-   * 7200 HP is 22.5 seconds at the measured 320 dps. Was 3400 against an assumed
+   * 5760 HP is 18.0 seconds at the measured 320 dps. Was 3400 against an assumed
    * 120: sector 3 is where the assumed ladder first goes badly wrong, because it is
    * the second of four item choices compounding on each other. The old fight measured
    * 10.3 s and 11.2 s — three phases, each authored to be readable, in the time one
@@ -979,9 +984,10 @@ export const BOSSES: Record<string, BossDef> = {
    * in the game and the `mine` silhouette is the only round one available, which is
    * as close to organic as `EnemyShape` currently reaches.
    *
-   * The first boss with a variant. Both middles are eleven seconds long and they ask
-   * opposite questions — keep moving, or stop and thread — so the coin flip changes
-   * what the player is practising rather than how hard it is.
+   * The first boss with a variant. Both middles cover the same third of the health bar,
+   * so both are the same six seconds long, and they ask opposite questions — keep
+   * moving, or stop and thread — so the coin flip changes what the player is
+   * practising rather than how hard it is.
    */
   tenant: {
     id: 'tenant',
@@ -1005,7 +1011,7 @@ export const BOSSES: Record<string, BossDef> = {
    * SECTOR 4 — Kill Grid. "Automated defence net. Precise laser geometry, telegraphed
    * and unforgiving. Positional, almost puzzle-like."
    *
-   * 9600 HP is 24.0 seconds at the measured 400 dps. Was 4200 against an assumed 140
+   * 7400 HP is 18.5 seconds at the measured 400 dps. Was 4200 against an assumed 140
    * and measured 10.1 s and 10.8 s. This is the fight the correction is worth the
    * most to: a boss whose entire character is "every telegraph is over a second long"
    * needs to outlast several telegraph cycles, and at ten seconds it did not. Every telegraph on this boss is at least a
@@ -1039,7 +1045,7 @@ export const BOSSES: Record<string, BossDef> = {
   /**
    * SECTOR 5 — The Deep Manifest. "The wreck you were actually sent for."
    *
-   * 14430 HP is 26.0 seconds at the measured 555 dps. It is the longest single
+   * 12210 HP is 22.0 seconds at the measured 555 dps. It is the longest single
    * engagement in the game and it is deliberate — it is the run's destination.
    *
    * The previous comment here said all of that about 5800 HP at 160 dps, called it
@@ -1047,7 +1053,8 @@ export const BOSSES: Record<string, BossDef> = {
    * it was "the number most likely to be wrong, and the one a sweep should look at
    * first". The sweep looked: 10.4 s and 10.6 s, the equal shortest fight in the run.
    *
-   * Four phases rather than three, at 6.5 s each. Two variants,
+   * Four phases rather than three, at 5.5 s each — exactly `MIN_PHASE_SECONDS`, which
+   * is why the run's longest fight is still not a long one. Two variants,
    * replacing *different* slots: once a player has met the Warden they know the
    * second act can change, so the Liquidator moves the surprise to the third and the
    * fight never settles into a solved script.

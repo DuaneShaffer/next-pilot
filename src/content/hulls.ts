@@ -22,6 +22,27 @@
  * summed, then muls, then the stat's own bounds), so "Plating Shim on a Probate" has
  * exactly one answer and it does not depend on which arrived first.
  *
+ * ## `mechanism` STATES NO FIGURES, AND THAT IS THE POINT
+ *
+ * Every hull's prose used to restate the numbers the selection card already computes:
+ * "+42 hull speed, 210 to 252" in a sentence, directly above a table row reading
+ * `Hull speed 210 → 252 u/s (+42)`. One fact in two places, one of them hand-written.
+ * That is not a tidiness complaint — it is the exact failure `docs/ROADMAP.md` records
+ * as R12 (three certification cards selling hulls that had been rebalanced underneath
+ * them) and as five stale HP comments in `content/bosses.ts`. A balance change edits
+ * `stats`, the table follows because it is derived from `resolveStat`, and the sentence
+ * keeps advertising the hull that used to exist.
+ *
+ * So the division is fixed: **the card's table owns every figure, and `mechanism` owns
+ * what a table cannot say** — what the hull is for, how it wants to be flown, and which
+ * mechanics its stat line interacts with (`Collateral` taking every hit on integrity,
+ * `Surety`'s armour all sitting in the layer that absorbs first, `Probate`'s relic
+ * refilling the pool the write-down shrank). `tests/hulls.test.ts` enforces the first
+ * half by failing on any number-like token in a hull's prose, with an allowlist that
+ * cannot be used to launder a stat value back in; `tests/hullSelect.test.ts` enforces
+ * the second half by requiring the card to print every figure the prose gave up, so
+ * nothing was dropped rather than moved.
+ *
  * ## Three of the eight are NOT here, and that is deliberate
  *
  * `Escrow`, `Indemnity`, and `Writ` are defined by mechanics the simulation does not
@@ -139,7 +160,7 @@ export const HULLS: Record<string, HullDef> = {
     id: LIEN_ID,
     name: 'Lien',
     mechanism:
-      'Company baseline: 100 integrity, 40 shield, 210 units per second, and 20 shots per second at 4 damage.',
+      'Company baseline. Nothing has been forfeited on it and nothing is owed against it, which is the whole of its character.',
     flavour: 'Issued by default. Recovered by default.',
     stats: [],
   },
@@ -199,7 +220,7 @@ export const HULLS: Record<string, HullDef> = {
     id: 'arrears',
     name: 'Arrears',
     mechanism:
-      '+42 hull speed, 210 to 252, and 320 scrap in hand at launch. Max integrity 100 to 80 and max shield 40 to 30, so effective health falls 140 to 110.',
+      'Fast and funded, and thin enough to feel it: flies out of trouble rather than tanking it, and shops before it has earned.',
     flavour: 'The advance against your recovery has already been drawn. By someone else.',
     stats: [
       { stat: 'hullSpeed', kind: 'add', value: 42 },
@@ -272,7 +293,7 @@ export const HULLS: Record<string, HullDef> = {
     id: 'surety',
     name: 'Surety',
     mechanism:
-      '+70 max shield, 40 to 110, so effective health rises 140 to 210. Hull speed 210 to 155 and pickup radius 34 to 24.',
+      'Heavy, and its armour is all shield, the layer that absorbs first. Too slow to dodge a pattern, so it pre-positions instead.',
     flavour: 'The bond is posted against the hull. The hull is expected to come back.',
     stats: [
       { stat: 'maxShield', kind: 'add', value: 70 },
@@ -347,7 +368,7 @@ export const HULLS: Record<string, HullDef> = {
     id: 'probate',
     name: 'Probate',
     mechanism:
-      '-36% max integrity, 100 to 64, and +20 max shield, 40 to 60. Starts holding the Repair Nanites relic.',
+      "Inherits a dead pilot's Repair Nanites on a written-down hull: the write-down comes out of the pool the relic refills.",
     flavour: "The estate was settled. The hull was the only asset anybody wanted.",
     stats: [
       { stat: 'maxIntegrity', kind: 'mul', value: 0.64 },
@@ -395,7 +416,7 @@ export const HULLS: Record<string, HullDef> = {
     id: 'collateral',
     name: 'Collateral',
     mechanism:
-      '+10 shots per second, 20 to 30, and the shield generator is stripped: max shield 40 to 0. Integrity stays at 100, so effective health falls 140 to 100.',
+      'The shield generator is forfeited before departure and the feed runs open in its place. Every hit lands on integrity, which is what makes contact-triggered systems fire.',
     flavour: 'Pledged against the sortie. Forfeited before departure, to save time.',
     stats: [
       { stat: 'fireIntervalTicks', kind: 'add', value: -1 },

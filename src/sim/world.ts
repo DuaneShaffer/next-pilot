@@ -45,6 +45,7 @@ import {
   shakeForHullHit,
   SHAKE_SHIELD_BROKEN,
   tickHullInvulnerability,
+  tickShieldRegen,
 } from './damage'
 import {
   ageEnemyCosmetics,
@@ -62,10 +63,8 @@ import {
 import { Spawner } from './spawner'
 import { addItem, resolveInventory, type InventoryResolution } from './inventory'
 import { NO_EFFECTS, summariseEffects, volleyAngles, type EffectTotals } from './itemEffects'
-import { resolveAllStats, shotsPerSecond } from './stats'
+import { resolveAllStats, shotsPerSecond, STATS } from './stats'
 import {
-  CHOICE_TIMEOUT_TICKS,
-  HELD_CONFIRM_DWELL_TICKS,
   ITEM_CHOICE_WAVES,
   SHOP_WAVES,
   WORK_ORDER_WAVES,
@@ -449,6 +448,13 @@ export class World implements WorldView {
       maxIntegrity: this.resolvedStats.maxIntegrity ?? HULL_INTEGRITY,
       shield: this.resolvedStats.maxShield ?? HULL_SHIELD,
       maxShield: this.resolvedStats.maxShield ?? HULL_SHIELD,
+      shieldRegenProgress: 0,
+      // Not suppressed at spawn: the pilot has not been hit, so the shield is
+      // already full and recovery has nothing to do until it isn't.
+      shieldRegenBlockedTicks: 0,
+      // Overwritten by the beginStage(0) call below, which is where every sector's
+      // reserve is set. Seeded here only because the field is not optional.
+      shieldReserve: 0,
       invulnTicks: 0,
       radius: HULL_COLLISION_RADIUS,
     }
@@ -553,6 +559,18 @@ export class World implements WorldView {
     }
     this.hazardField = new HazardField(defs)
     this.hazardViews = this.hazardField.empty ? [] : this.hazardField.views()
+
+    // The shield's recovery budget refills here, and NOWHERE else. Tying it to sector
+    // entry rather than to a timer is what makes recovery balanceable at a rate the
+    // player can see — the total it can contribute across a run is five reserves, a
+    // number the difficulty curve can be tuned against, instead of an integral over
+    // however long the run happened to last. See `shieldReservePerSector`.
+    //
+    // Refilled rather than topped up: an unspent reserve does not carry into the next
+    // sector. Banking it would reward the sector you found easy with a buffer in the one
+    // you found hard, which inverts the difficulty curve the reserve exists to respect.
+    this.hull.shieldReserve = this.resolvedStats.shieldReservePerSector ?? 0
+    this.hull.shieldRegenProgress = 0
   }
 
   /**
@@ -605,6 +623,10 @@ export class World implements WorldView {
     if (this.fireRateWindowTicks > 0) this.fireRateWindowTicks--
 
     tickHullInvulnerability(this.hull)
+    // After the invuln countdown and before collisions, so a point of shield banked
+    // this tick is available to absorb this tick's hit. The alternative ordering
+    // loses a point of recovery to every hit that lands on the tick it completes.
+    tickShieldRegen(this.hull, this.resolvedStats.shieldRegenPerSecond ?? 0)
     this.moveHull(input)
     this.updateWeapon(input)
 
@@ -670,43 +692,31 @@ export class World implements WorldView {
   }
 
   /**
-   * True while the card is open and the trigger has never been released.
+   * How long the open card has been open, or null when none is.
    *
-   * The screen shows a "release to choose" hint from this. Without it the card looks
-   * frozen to anyone holding fire, which is the state most players are in.
-   */
-  get choiceAwaitingRelease(): boolean {
-    return this.pendingChoice !== null && this.cursor.awaitingRelease
-  }
-
-  /**
-   * What an open card will do on its own if the player does nothing.
-   *
-   * Derived here rather than in each screen so all four card kinds count the same
-   * thing down. See ChoiceResolveView for why this needs to be visible at all.
+   * There is nothing else to report: no timeout, no dwell, nothing that resolves a card
+   * but the player pressing confirm or decline. See `ChoiceResolveView`.
    */
   get choiceResolve(): ChoiceResolveView | null {
     if (this.pendingChoice === null) return null
-    // The dwell only applies while the trigger has been held since the card opened.
-    // Once it has been released the card is in ordinary edge-triggered mode and the
-    // only automatic outcome left is the timeout.
-    if (this.cursor.awaitingRelease) {
-      return {
-        action: 'confirm',
-        ticksRemaining: Math.max(0, HELD_CONFIRM_DWELL_TICKS - this.cursor.openTicks),
-        totalTicks: HELD_CONFIRM_DWELL_TICKS,
-      }
-    }
-    return {
-      action: 'skip',
-      ticksRemaining: Math.max(0, CHOICE_TIMEOUT_TICKS - this.cursor.openTicks),
-      totalTicks: CHOICE_TIMEOUT_TICKS,
-    }
+    return { openTicks: this.cursor.openTicks }
   }
 
   /** Shots per second the HUD should display. Derived, never hand-written. */
   get shotsPerSecond(): number {
     return shotsPerSecond(this.currentFireInterval())
+  }
+
+  /**
+   * How long recovery stays suppressed after a hit. Read by `applyHullDamage`
+   * through `DamageContext`.
+   *
+   * A getter rather than a field so it cannot go stale: the resolved value changes
+   * the moment an item is taken, and a cached copy would suppress recovery for the
+   * duration the pilot had *before* the item that shortened it.
+   */
+  get shieldRegenDelayTicks(): number {
+    return this.resolvedStats.shieldRegenDelayTicks ?? STATS.shieldRegenDelayTicks.base
   }
 
   /**
@@ -944,18 +954,14 @@ export class World implements WorldView {
     const cost = choice.costs[action.index] ?? 0
     if (!offer) return true
     if (cost > this.stats.scrap) {
-      // Silently ignoring an unaffordable pick would read as the button not working.
-      // The UI greys it out; this is the backstop, and a deliberate press stays a
-      // no-op so the player can navigate to something they can afford.
-      //
-      // But a confirm from the held-trigger DWELL cannot be left as a no-op. Nobody
-      // pressed anything, so nothing will change on the next tick either, and the card
-      // re-confirms and is re-refused every tick until the 20-second timeout — an
-      // unresponsive card, which is exactly the soft freeze the dwell was added to
-      // fix. A rescue that cannot complete has to decline instead of looping.
-      if (!action.fromDwell) return true
-      this.pendingChoice = null
-      this.advanceTransition()
+      // A no-op, and safely one now. `updateCursor` will not leave the cursor on an
+      // unaffordable option in the first place (it steps past them), so reaching here
+      // means the price moved under a selection — and the press doing nothing is
+      // correct, because the option is drawn greyed and the player can navigate away or
+      // decline. It used to be reachable a second way: the held-trigger dwell confirmed
+      // for a player who had pressed nothing, the world refused it, and the card
+      // re-confirmed and was re-refused every tick forever. That whole mechanism is
+      // gone — confirm is not the fire key any more, so nothing confirms unasked.
       return true
     }
 

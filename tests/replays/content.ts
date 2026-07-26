@@ -190,11 +190,33 @@ export const PROBE_INTERACTIONS: readonly InteractionDef[] = [
 /**
  * The hull, whose only job is to seed the inventory.
  *
- * NO STAT MODIFIERS, deliberately — see the header. Starting items rather than
- * relying on reward cards, for two reasons: a run only meets item cards at waves 7
- * and 20, so an offer-fed build spends most of the run with an empty inventory and
- * exercises the bus barely at all; and what an offer hands over depends on the
- * `offers` Rng, which would make this fixture's coverage a function of a draw.
+ * Starting items rather than relying on reward cards, for two reasons: a run only meets
+ * item cards at waves 7 and 20, so an offer-fed build spends most of the run with an
+ * empty inventory and exercises the bus barely at all; and what an offer hands over
+ * depends on the `offers` Rng, which would make this fixture's coverage a function of a
+ * draw.
+ *
+ * ## The one stat modifier, and why it is not a contradiction
+ *
+ * This hull carried NO stat modifiers by design, and it now carries exactly one:
+ * `shieldReservePerSector mul 0`, which switches shield recovery off.
+ *
+ * It is here because recovery *silently destroyed two thirds of this fixture's reason to
+ * exist*, and the coverage check caught it. `retaliate` fires only on integrity loss and
+ * `repairOnKill` only does something when integrity is below maximum. A recovering shield
+ * absorbs enough that integrity sits at full for most of a run — so across five policies
+ * and four seeds, `repairOnKill` never fired ONCE and `retaliate` fired in only three of
+ * twenty runs. The items were still held, the hashes still reproduced, and the fixture
+ * would have gone on claiming seven-of-seven coverage while proving five.
+ *
+ * Switching recovery off for the probe hull is the right place to fix that, because this
+ * hull is an instrument and not a balance statement: its job is to make every `EffectKind`
+ * reach its trigger. Recovery is not left unmeasured by the corpus either — it is a base
+ * stat, so all three empty-pool baseline fixtures exercise it. The division is clean: the
+ * baselines cover the shield, this fixture covers the bus.
+ *
+ * `mul: 0` rather than an `add`, for the same reason `exposed-core` uses one on
+ * `maxShield`: adds are summed before muls, so this reaches zero whatever else is held.
  */
 export const PROBE_HULL: HullDef = {
   id: 'probe-hull',
@@ -203,7 +225,7 @@ export const PROBE_HULL: HullDef = {
   // tests/replay.test.ts, because it is currently a convention and not a type.
   name: 'Probe Hull',
   mechanism: 'Company baseline, issued with the full systems suite for instrumentation.',
-  stats: [],
+  stats: [{ stat: 'shieldReservePerSector', kind: 'mul', value: 0 }],
   startingItems: Object.keys(PROBE_ITEMS),
 }
 

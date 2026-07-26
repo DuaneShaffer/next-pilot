@@ -258,6 +258,51 @@ describe('the roster', () => {
     }
   })
 
+  it('quotes the other hull figures it names: speed and starting scrap', () => {
+    /**
+     * THE REST OF R12, closed the same way effective health was.
+     *
+     * Two of the three cards state figures the check above does not read: Arrears' says
+     * "+42 speed, 320 cr of scrap" and Surety's says "155 speed". Both are hand-written
+     * restatements of `HullDef` data, which is exactly the shape of the defect that
+     * shipped three times — the hull is retuned, the card is not, and nothing fails.
+     *
+     * Read as "if the card names this stat, the number beside it must be one the hull
+     * actually resolves to", so a card is still free to describe a hull without
+     * quoting either figure. `src/content/hulls.ts` took the stronger route for its own
+     * prose and states no figures at all; these cards keep theirs because a hangar
+     * entry has no trade table under it to compute them.
+     */
+    for (const def of CERTIFICATIONS) {
+      for (const grant of def.grants) {
+        if (grant.slice !== 'hulls') continue
+        const hull = HULLS[grant.id]
+        if (!hull) continue
+
+        if (/\bspeed\b/i.test(def.effect)) {
+          const speed = resolveStat('hullSpeed', hull.stats)
+          // The baseline through the same fold rather than a literal 210: a test that
+          // restates a tuning number is one more copy to go stale.
+          const delta = Math.abs(speed - resolveStat('hullSpeed', []))
+          const stated =
+            def.effect.includes(String(Math.round(speed))) ||
+            def.effect.includes(String(Math.round(delta)))
+          expect(
+            stated,
+            `${def.id} names speed for ${grant.id}, which is ${speed} u/s (${delta} off base)`,
+          ).toBe(true)
+        }
+
+        if (/\bscrap\b/i.test(def.effect) && hull.startingScrap !== undefined) {
+          expect(
+            def.effect,
+            `${def.id} names scrap for ${grant.id}, which starts with ${hull.startingScrap}`,
+          ).toContain(String(hull.startingScrap))
+        }
+      }
+    }
+  })
+
   it('does not promise a stat the hull it grants has no modifier for', () => {
     // The other half of the Surety failure: a card can be wrong by naming a stat that
     // is not there at all, which no number check catches. Only `projectileDamage` is

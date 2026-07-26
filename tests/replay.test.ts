@@ -63,6 +63,9 @@ function hull(overrides: Partial<Hull> = {}): Hull {
     maxIntegrity: 100,
     shield: 40,
     maxShield: 40,
+    shieldRegenProgress: 0,
+    shieldRegenBlockedTicks: 0,
+    shieldReserve: 0,
     invulnTicks: 0,
     radius: 7,
     ...overrides,
@@ -223,16 +226,24 @@ describe('state hashing', () => {
    *   - Digest generation 4 (`d686a388a1795250` -> `68587bac3c17901f`):
    *     `choiceSelection` entered it too — the highlighted option, which decides
    *     *what* an auto-confirm takes.
-   *   - Digest generation 5 (`68587bac3c17901f` -> the constant below):
+   *   - Digest generation 5 (`68587bac3c17901f` -> `9d27a50ec0d1a237`):
    *     `Bullet.pierceRemaining` and `.hitUids` entered `playerBullets`. Review
    *     finding R3: both are read by the next tick's hit resolution.
+   *   - Digest generation 6 (`9d27a50ec0d1a237` -> the constant below): shield
+   *     recovery entered the hull component — `shieldRegenProgress`,
+   *     `shieldRegenBlockedTicks` and `shieldReserve`, all three read by the next
+   *     tick. AND, for the first time, a field LEFT: `choiceResolve` came out of the
+   *     run component entirely, because cards no longer resolve themselves and its
+   *     surviving `openTicks` steers nothing. A removal moves this constant exactly
+   *     like an addition does, and is the one case where "the test went red" could
+   *     mean coverage was lost rather than gained — so it is named here explicitly.
    *
    * The generation numbers are `DIGEST_GENERATION` in `src/meta/snapshot.ts`, and
    * `tests/simVersion.test.ts` explains why a digest change and a sim change have to
    * be counted separately.
    */
   it('matches a recorded digest for a known world', () => {
-    expect(hashWorld(worldView())).toBe('9d27a50ec0d1a237')
+    expect(hashWorld(worldView())).toBe('71ae763cbfe84e6c')
   })
 
   it('includes the M2 timing state that hitstop and telegraphs introduced', () => {
@@ -356,6 +367,7 @@ function randomInputs(seed: string, ticks: number, changeEvery = 9): InputSnapsh
         fire: rng.chance(0.8),
         special: rng.chance(0.1),
         focus: rng.chance(0.2),
+        confirm: false,
       }
     }
     out.push(current)
@@ -478,7 +490,11 @@ describe('replay encoding', () => {
         for (const fire of [false, true]) {
           for (const special of [false, true]) {
             for (const focus of [false, true]) {
-              all.push({ moveX, moveY, fire, special, focus })
+              // `confirm` included: it is the eighth bit of the packed byte, and a replay
+              // that dropped it would replay every card decision as "nothing pressed".
+              for (const confirm of [false, true]) {
+                all.push({ moveX, moveY, fire, special, focus, confirm })
+              }
             }
           }
         }
@@ -509,7 +525,7 @@ describe('replay encoding', () => {
 })
 
 describe('replay compression', () => {
-  const HELD: InputSnapshot = { moveX: 1, moveY: 0, fire: true, special: false, focus: false }
+  const HELD: InputSnapshot = { moveX: 1, moveY: 0, fire: true, special: false, focus: false, confirm: false }
 
   it('collapses a twenty-minute held run to a few hundred bytes', () => {
     // 20 minutes at 60Hz. Uncompressed this is 72KB, ~96KB base64'd, which is
@@ -606,11 +622,20 @@ describe('replay corruption is rejected, never guessed at', () => {
   })
 
   it('rejects an input byte the packer could never produce', () => {
-    // 0b11 in an axis field and anything in bit 7 are unreachable from
-    // packInput, which makes them a free corruption check.
+    // `0b11` in either axis field is unreachable from packInput — the axis is -1/0/1 —
+    // which makes it a free corruption check.
     expect(() => decodeReplay(forgeReplay({ runs: [[0b0011, 2]] }))).toThrow(/bad-input-byte/)
     expect(() => decodeReplay(forgeReplay({ runs: [[0b1100, 2]] }))).toThrow(/bad-input-byte/)
-    expect(() => decodeReplay(forgeReplay({ runs: [[0b10000000, 2]] }))).toThrow(/bad-input-byte/)
+  })
+
+  it('accepts bit 7, which is now the confirm action rather than a corruption tell', () => {
+    // IT USED TO BE THE STRONGEST CHECK IN THIS DECODER. Bit 7 belongs to
+    // `InputSnapshot.confirm` as of the change that stopped selection screens accepting
+    // on the fire key — so a decoder that still refused it would reject every shared run
+    // in which the player accepted a single card, and blame the corruption checker.
+    expect(() => decodeReplay(forgeReplay({ runs: [[0b10000000, 2]] }))).not.toThrow()
+    const decoded = decodeReplay(forgeReplay({ runs: [[0b10000000, 2]], tickCount: 2 }))
+    expect(unpackInput(decoded.inputs[0] ?? 0).confirm).toBe(true)
   })
 
   it('rejects an implausible seed', () => {

@@ -31,6 +31,7 @@ import {
   explainRejection,
   loadBindings,
   ownerOf,
+  ownersOf,
   persistBindings,
   replaceBinding,
   restoreAction,
@@ -477,7 +478,14 @@ describe('the keyboard resolves through the bindings it is given', () => {
     keyboard.pressForTest('KeyK')
     keyboard.pressForTest('KeyF')
     const snapshot = keyboard.snapshot()
-    expect(snapshot).toEqual({ moveX: 1, moveY: -1, fire: true, special: false, focus: false })
+    expect(snapshot).toEqual({
+      moveX: 1,
+      moveY: -1,
+      fire: true,
+      special: false,
+      focus: false,
+      confirm: false,
+    })
   })
 
   it('cancels opposing directions rather than picking one', () => {
@@ -500,6 +508,7 @@ describe('the keyboard resolves through the bindings it is given', () => {
       fire: false,
       special: false,
       focus: false,
+      confirm: false,
     })
   })
 
@@ -585,10 +594,112 @@ describe('capture', () => {
   })
 })
 
+/**
+ * Two actions owning one key.
+ *
+ * `restoreAction` chooses a shared key over an unbound action, on purpose, so the
+ * state is reachable and `checkBindings` reports it. What was not honest was
+ * `ownerOf`: it answered with the first owner, and the mutating paths used that answer
+ * to decide who loses the key — so an assignment stripped one owner, left the other
+ * holding the code, and reported a clean reassignment for a key that now fired two
+ * controls. The conflict rule this file opens with ("last claim wins, and the loser
+ * loses only that one key") was not being applied to the second loser at all.
+ *
+ * MUTATION-VERIFIED, by restoring `const owner = ownerOf(...)` and the single-owner
+ * branches in `assignBinding`/`replaceBinding`:
+ *   - "reports every owner of a shared key" fails (ownersOf missing).
+ *   - "takes a shared key from ALL of its owners" fails: KeyW stays on `focus`.
+ *   - "refuses when the SECOND owner is the one that would be emptied" fails: the
+ *     assignment is accepted and leaves a duplicate.
+ */
+describe('a key owned by two actions', () => {
+  /**
+   * `up` and `focus` both holding KeyW, built only from public operations.
+   *
+   * Exactly what a player does: move KeyW to focus, then restore up's defaults.
+   */
+  function shared(): Bindings {
+    const moved = replaceBinding(DEFAULT_BINDINGS, 'focus', 'KeyW')
+    expect(moved.ok).toBe(true)
+    expect(moved.bindings.focus).toEqual(['KeyW'])
+    const restored = restoreAction(moved.bindings, 'up')
+    // The premise. If this ever stops holding, the tests below stop meaning anything.
+    expect(restored.up).toContain('KeyW')
+    expect(restored.focus).toContain('KeyW')
+    expect(checkBindings(restored).duplicated).toEqual(['KeyW'])
+    return restored
+  }
+
+  it('reports every owner of a shared key', () => {
+    const bindings = shared()
+    expect(ownersOf(bindings, 'KeyW')).toEqual(['up', 'focus'])
+    // `ownerOf` keeps its one-action answer for copy, and it is the first in
+    // canonical order rather than an arbitrary one.
+    expect(ownerOf(bindings, 'KeyW')).toBe('up')
+    expect(ownersOf(bindings, 'KeyQ')).toEqual([])
+  })
+
+  it('takes a shared key from ALL of its owners', () => {
+    // Both owners have a spare, so the claim is allowed and must clear the duplicate.
+    const bindings = assignBinding(shared(), 'focus', 'KeyQ').bindings
+    expect(bindings.focus).toEqual(['KeyW', 'KeyQ'])
+
+    const result = assignBinding(bindings, 'fire', 'KeyW')
+    expect(result.ok).toBe(true)
+    expect(result.bindings.fire).toContain('KeyW')
+    expect(result.bindings.up).not.toContain('KeyW')
+    expect(result.bindings.focus).not.toContain('KeyW')
+    expect(checkBindings(result.bindings).duplicated).toEqual([])
+    expect(checkBindings(result.bindings).unbound).toEqual([])
+    // The notice names one action, and it is a real loser rather than a guess.
+    expect(result.evictedFrom).toBe('up')
+  })
+
+  it('refuses when the SECOND owner is the one that would be emptied', () => {
+    // `up` has a spare, `focus` does not. Looking at the first owner only, this reads
+    // as a legal reassignment; it is the exception the conflict rule exists for.
+    const result = assignBinding(shared(), 'fire', 'KeyW')
+    expect(result.ok).toBe(false)
+    expect(result.rejection).toBe('would-unbind')
+    expect(result.bindings.focus).toEqual(['KeyW'])
+    expect(result.bindings.up).toContain('KeyW')
+  })
+
+  it('replaces from all owners too, and refuses on the same exception', () => {
+    const refused = replaceBinding(shared(), 'fire', 'KeyW')
+    expect(refused.ok).toBe(false)
+    expect(refused.rejection).toBe('would-unbind')
+
+    const loose = assignBinding(shared(), 'focus', 'KeyQ').bindings
+    const done = replaceBinding(loose, 'fire', 'KeyW')
+    expect(done.ok).toBe(true)
+    expect(done.bindings.fire).toEqual(['KeyW'])
+    expect(done.bindings.up).not.toContain('KeyW')
+    expect(done.bindings.focus).not.toContain('KeyW')
+    expect(checkBindings(done.bindings).duplicated).toEqual([])
+  })
+
+  it('never lets one action hold the same code twice', () => {
+    // The healing path can reach an action that already owns the code, which is the
+    // one way `assignBinding` could have appended a duplicate inside a single row.
+    const bindings = assignBinding(shared(), 'focus', 'KeyQ').bindings
+    const result = assignBinding(bindings, 'up', 'KeyW')
+    expect(result.ok).toBe(true)
+    expect(result.bindings.up.filter((c) => c === 'KeyW').length).toBe(1)
+    expect(result.bindings.focus).not.toContain('KeyW')
+  })
+})
+
 describe('helpers', () => {
   it('finds which action owns a code', () => {
     expect(ownerOf(DEFAULT_BINDINGS, 'KeyW')).toBe('up')
     expect(ownerOf(DEFAULT_BINDINGS, 'KeyQ')).toBeNull()
+    // One owner is the normal case, and `ownersOf` agrees with `ownerOf` there.
+    for (const action of SORTIE_ACTIONS) {
+      for (const code of DEFAULT_BINDINGS[action]) {
+        expect(ownersOf(DEFAULT_BINDINGS, code), code).toEqual([action])
+      }
+    }
   })
 
   it('recognises exactly the remappable actions', () => {

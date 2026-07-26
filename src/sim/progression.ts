@@ -176,17 +176,52 @@ export function makeChoice(
 // ---------------------------------------------------------------------------
 
 /**
- * Scrap paid by a supply route, per stage.
+ * NO ROUTE PAYS SCRAP. Decided 2026-07-26 — see docs/DESIGN.md, "Route rewards are
+ * priced off the panel".
  *
- * Scaled against the measured curve: median holdings are 67 by wave 8 and 370 by
- * wave 23 of a single sector, so a flat bonus would be transformative on the first
- * leg and rounding error on the last.
+ * A route used to pay 70 + 55·stage scrap, and the number was scaled against a
+ * measured curve. It was still worth nothing, because the curve it was scaled against
+ * was a single sector's and the run is five. Measured over 300 five-sector runs
+ * (5 policies × 60 seeds), the scrap a pilot is *holding* when a route card opens:
+ *
+ *   leg 2   560       leg 3  2,030       leg 4  3,463       leg 5  5,474
+ *
+ * against payouts of 125 / 180 / 235 / 290. The last seam's reward is 5% of what the
+ * pilot already has, and there is nothing to spend it on: the dearest thing in any
+ * depot is 272, every shop from leg 2 on is bought at 97-100%, and **100% of runs end
+ * with scrap unspent** (median 3,940). A bigger number would not fix that — an inert
+ * currency is inert at any face value.
+ *
+ * It is also not fixable from this file. Making scrap scarce means pricing the sinks
+ * against holdings that span 43x across a run (257 at the first shop, 8,726 at the
+ * last), and the dominant sink is `shopCosts`, which is handed a per-sector
+ * `waveIndex` and cannot see absolute run progress. One curve cannot bite at both
+ * ends: the leg-1 shop is already declined 29% of the time.
+ *
+ * So the reward moved to an axis the pilot can price, rather than staying a number
+ * nobody can. `RouteReward` still has a `scrap` variant and `World.payRouteReward`
+ * still honours it — the variant is the right shape for the day scrap has a sink,
+ * and deleting it would cost the union a case for no gain.
  */
-const ROUTE_SCRAP_BASE = 70
-const ROUTE_SCRAP_PER_STAGE = 55
 
-/** Repair route: a fraction of maximum integrity, stated in points when offered. */
-const ROUTE_REPAIR_FRACTION = 0.35
+/**
+ * Repair route: a fraction of maximum integrity, stated in points when offered.
+ *
+ * 0.6, up from 0.35, and the number comes from what an item is worth rather than from
+ * feel. `bots.ts` scores one free item at 2.5 route-points and a repair at the
+ * integrity it would *actually* restore over 20 — the only honest reading, because a
+ * heal on a full hull is worth nothing. So a repair is worth an item at 50 points of
+ * damage taken, and 0.35 of a ~110-point hull tops out at 38: **under the shipped
+ * fraction a repair could not outscore an item at any damage level, on any hull.**
+ * It was a third option that could never be correct.
+ *
+ * At 0.6 the crossover lands where the design wants it — a pilot who has lost more
+ * than half a hull takes the dock, one who is nearly full takes the cache — and how
+ * often that happens is a property of how the pilot is flying, not of this constant.
+ * Measured share of route cards opened below half integrity: 48% for the evasive
+ * policy, 27% for the greedy one, 7% for the clear-speed benchmark.
+ */
+const ROUTE_REPAIR_FRACTION = 0.6
 
 /**
  * Build the approach options into `stageIndex`.
@@ -202,6 +237,12 @@ const ROUTE_REPAIR_FRACTION = 0.35
  * Returns an EMPTY array when the stage has no hazards to trade against. A card
  * offering three rewards and no downside is a free lunch dressed as a decision, and
  * the caller skips straight to the shop instead — see World.beginTransition.
+ *
+ * BOTH PRICED REWARDS ARE PRICED OFF THE PANEL. One pays a build slot, the other pays
+ * integrity, and which is better is a fact about the pilot's own meters rather than a
+ * fact about the card — so neither is the standing right answer. Nothing here pays
+ * scrap; see the note above `ROUTE_REPAIR_FRACTION` for the measurement that killed
+ * it.
  */
 export function buildRoutes(
   rng: Rng,
@@ -228,8 +269,15 @@ export function buildRoutes(
   if (hazards.length === 0) return []
 
   // Two priced routes, each carrying one hazard. Drawn without replacement so the
-  // two options are actually different when the sector has more than one hazard;
-  // with only one hazard both routes carry it and the choice is purely the reward.
+  // two options are actually different when the sector has more than one hazard.
+  //
+  // WITH ONE HAZARD BOTH ROUTES CARRY IT, and the card must then say so ONCE rather
+  // than printing the same price twice. That is `sharedHazardNames` in
+  // `src/ui/worldMap.ts`: three of the four seams in the shipped run are this case
+  // (only The Deep Manifest has two hazards), so it is the common presentation and not
+  // an edge case. Leaving it to the screen is deliberate — the choice really is purely
+  // the reward here, and collapsing to two options would delete a real decision to
+  // work around a layout that was mis-stating one price as two.
   const pool = [...hazards]
   const first = rng.weighted(pool, () => 1)
   pool.splice(pool.indexOf(first), 1)
@@ -237,12 +285,11 @@ export function buildRoutes(
 
   // Which reward pairs with which hazard is rolled, so learning "the left one is
   // always the item" is not a substitute for reading the card.
-  const scrap = ROUTE_SCRAP_BASE + ROUTE_SCRAP_PER_STAGE * stageIndex
-  const repair = Math.round(maxIntegrity * ROUTE_REPAIR_FRACTION)
   const item: RouteReward = { kind: 'item' }
-  const other: RouteReward = rng.chance(0.5)
-    ? { kind: 'scrap', amount: scrap }
-    : { kind: 'repair', amount: repair }
+  const other: RouteReward = {
+    kind: 'repair',
+    amount: Math.round(maxIntegrity * ROUTE_REPAIR_FRACTION),
+  }
   // A TUPLE, so indexing is checked rather than cast. The previous version built an
   // array and read `paid[0] as RouteReward` — reflexive casts of exactly the kind
   // `noUncheckedIndexedAccess` exists to make impossible, silencing the compiler on
@@ -282,6 +329,11 @@ function routeFor(
  *
  * Institutional rather than heroic, per the tone in docs/DESIGN.md: these are work
  * orders, and the company does not think of them as adventures.
+ *
+ * SALVAGE DETOUR is on the bench, not retired: `buildRoutes` no longer pays scrap, so
+ * nothing reachable in the shipped run produces that name. The branch stays because
+ * the `scrap` variant stays, and the name is the one that will be needed first if a
+ * scrap sink ever makes the payout mean something.
  */
 function routeName(reward: RouteReward): string {
   switch (reward.kind) {
@@ -318,8 +370,13 @@ export function rewardText(reward: RouteReward): string {
     // is a small clarity tax for no gain, and the cheaper side to change is this one.
     case 'scrap':
       return `+${reward.amount} cr on arrival.`
+    // "up to hull maximum" because `World.payRouteReward` clamps, and a pilot at 95 of
+    // 100 who reads "+66 hp" and gains 5 has been lied to by the card. It is also the
+    // sentence that makes this reward comparable with the item beside it: what the
+    // repair is worth is the gap the player can already see in their own meter, so the
+    // two options are weighed against a readout rather than against each other.
     case 'repair':
-      return `+${reward.amount} hp on arrival.`
+      return `+${reward.amount} hp on arrival, up to hull maximum.`
   }
 }
 
@@ -331,23 +388,26 @@ export function rewardText(reward: RouteReward): string {
  */
 export interface ChoiceCursor {
   index: number
-  /** Ticks this choice has been open, for the dwell and the deadlock guard. */
+  /**
+   * Ticks this choice has been open.
+   *
+   * Not read by any resolution rule — nothing about a card depends on how long it has
+   * been up. It is on `WorldView.choiceResolve.openTicks` because an observer needs it
+   * to tell one card from the NEXT: a seam opens three cards in three ticks with no
+   * null gap between them, and this counter resetting is the only signal that says the
+   * card was swapped. `tools/playtest.ts` bounds a stalled sweep with it.
+   */
   openTicks: number
   /**
-   * True while the trigger has been held for every tick since the card opened.
+   * Previous tick's button states, for edge detection.
    *
-   * Surfaced so the screen can say "release to choose" instead of appearing frozen.
+   * Load-bearing at a SEAM. A seam opens the next card in the same tick the previous
+   * one was confirmed, so the confirm key is still down when the new cursor is built —
+   * and a level-triggered read would take option 0 of two more cards before the player
+   * could lift a finger. Requiring a *rising* edge, from a cursor that starts by
+   * assuming every button is already held, is what makes each card need its own press.
    */
-  awaitingRelease: boolean
-  /**
-   * Previous frame's button states, for edge detection.
-   *
-   * Load-bearing. The player is almost certainly holding fire when a choice opens,
-   * and a held button would instantly confirm the first option — the reward screen
-   * would flash past before it could be read. Requiring a *rising* edge means the
-   * button must be released and pressed again.
-   */
-  prevFire: boolean
+  prevConfirm: boolean
   prevLeft: boolean
   prevRight: boolean
   prevSpecial: boolean
@@ -359,87 +419,63 @@ export function newCursor(): ChoiceCursor {
   return {
     index: 0,
     openTicks: 0,
-    awaitingRelease: true,
-    prevFire: true,
+    prevConfirm: true,
     prevLeft: true,
     prevRight: true,
     prevSpecial: true,
   }
 }
 
-/**
- * How long a choice may stay open before it resolves itself.
+/*
+ * A CARD IS RESOLVED BY THE PLAYER AND BY NOTHING ELSE. Two rules were deleted here,
+ * both of them attempts to work around the same mistake, and the mistake was reading
+ * the fire key.
  *
- * A SAFETY NET, not the intended path. Confirming needs a *rising* fire edge so a
- * player already holding the trigger cannot skip the reward screen before reading
- * it — but that means anyone who never releases fire waits forever, and the run
- * simply stops. A bot policy that holds fire constantly deadlocked its run exactly
- * this way, and a player who walks away mid-choice would too.
+ * 1. `CHOICE_TIMEOUT_TICKS = 20 * 60` auto-resolved any open card as a SKIP after
+ *    twenty seconds. A deadlock guard: confirming needed a rising *fire* edge, so a
+ *    player already holding the trigger had no edge to confirm with and the run
+ *    stopped. What it actually reached was a player holding nothing — somebody reading
+ *    the card — so it threw their reward away and put a countdown on a permadeath
+ *    decision. "The shops shouldn't close automatically, that's annoying."
  *
- * 20 seconds: far longer than any real decision, short enough that a stuck run
- * eventually ends rather than hanging.
+ * 2. `HELD_CONFIRM_DWELL_TICKS = 48` confirmed the highlighted option *for* a player
+ *    whose trigger had been held since the card opened. A better fix for the same
+ *    deadlock, and still the interface deciding on the player's behalf: on touch,
+ *    where auto-fire is permanent, it meant option 0 on every card 0.8 seconds in.
  *
- * THE NUMBER IS RIGHT AND FIVE PLACES SAID OTHERWISE. This comment said 60 seconds,
- * `sim/bots.ts` said 3,600 ticks, `tests/bots.test.ts` called it "a 60-second
- * backstop", `docs/MOBILE.md` said 60, and `tools/playtest.ts` printed "the sim's
- * fallback timeout is 3600 and no policy may reach it". That last one was not merely
- * wrong prose: its stall guard compared against 3600, so a real 1201-tick stall in
- * the bot choice resolver sat under the threshold and was never reported. A constant
- * whose documentation drifts is survivable; a *guard* derived from the drifted
- * documentation is how a bug hides in plain sight for a milestone.
+ * Both are gone because `InputSnapshot.confirm` is now its own action, one that is
+ * never held during a sortie ("the selection screens must not use the fire key to
+ * accept responses"). A card that opens under a held trigger is not a deadlock, it is a
+ * card waiting for its own key — which the player can always press, and can always
+ * press again for the next card at a seam, because the edge is what counts.
+ *
+ * Do not re-add either rule. If a card ever appears stuck, the bug is in whatever is
+ * producing snapshots, not here: `tools/playtest.ts` abandons a sweep whose policy
+ * stops resolving cards (`MAX_CHOICE_RESOLUTION_TICKS`) instead of letting a hidden
+ * rescue paper over it, which is how R1's 1,201-tick stalls hid for a milestone.
+ *
+ * ONE HAZARD IS LEFT, and it is `special`. Declining still reads a rising `special`
+ * edge, and `special` IS a bindable sortie action (X / K / Shift). Nothing in the sim
+ * reads it during play today, so there is no live defect — but the day a special weapon
+ * lands, a player mashing it as a wave dies will decline the reward the same way a held
+ * trigger used to confirm it. The fix is a `cancel` action beside `confirm`, and it
+ * needs a ninth bit in `packInput` — the byte is now full — so it is a replay format
+ * change and deliberately not smuggled in here. See `docs/MOBILE.md`.
  */
-export const CHOICE_TIMEOUT_TICKS = 20 * 60
-
-/**
- * Ticks a card must be open before a *held* trigger may confirm it.
- *
- * This is the fix for a soft freeze a tester hit. Confirming requires a rising fire
- * edge so a card cannot flash past someone already holding the trigger — but in a
- * shmup the trigger is *always* held, so anyone who did not happen to release it sat
- * looking at an unresponsive game until the timeout. The button they were pressing
- * did nothing and nothing explained why.
- *
- * A dwell resolves both: a held trigger cannot confirm instantly (the card is
- * readable), and it cannot fail to confirm either (the game never stops responding).
- * Releasing and pressing still confirms immediately, so a deliberate player is never
- * made to wait.
- *
- * The rescue applies ONLY to a player who has touched nothing — releasing the trigger
- * or moving the cursor cancels it. Someone navigating is not stuck, and confirming
- * under them would steal the choice they were making.
- */
-export const HELD_CONFIRM_DWELL_TICKS = 48
 
 export type ChoiceAction =
   | { kind: 'none' }
-  | {
-      kind: 'confirm'
-      index: number
-      /**
-       * True when this confirm came from the held-trigger DWELL rather than from a
-       * deliberate press.
-       *
-       * The caller needs to tell them apart, and the reason is a second soft freeze
-       * hiding behind the fix for the first. If the dwell confirms an option the
-       * player cannot afford, the world refuses it, the card stays open, and the next
-       * tick tries again — forever, until the 20-second timeout. That is precisely the
-       * unresponsive card `HELD_CONFIRM_DWELL_TICKS` exists to prevent, reappearing
-       * one layer down.
-       *
-       * A deliberate press on an unaffordable option must still do nothing (the option
-       * is greyed out and the player can navigate to another). A *rescue* that cannot
-       * complete has to become a decline instead of a loop.
-       */
-      fromDwell: boolean
-    }
+  | { kind: 'confirm'; index: number }
   | { kind: 'skip' }
 
 /**
  * Advance the cursor and report what the player did this tick.
  *
- * Horizontal movement moves the selection; a rising fire edge confirms; a rising
+ * Horizontal movement moves the selection; a rising CONFIRM edge accepts; a rising
  * special edge skips (a shop must be declinable, and an item choice must be too
  * when every option costs more than the player has).
+ *
+ * `input.fire` is deliberately not read. See the note above.
  */
 export function updateCursor(
   cursor: ChoiceCursor,
@@ -465,15 +501,9 @@ export function updateCursor(
 
   if (left && !cursor.prevLeft) {
     cursor.index = step(cursor.index, -1)
-    // Any deliberate navigation cancels the held-trigger rescue below: someone
-    // moving the cursor is plainly not stuck, and auto-confirming under them would
-    // steal the choice they were in the middle of making. This also stops the dwell
-    // from pre-empting a bot's navigation and skewing measured pick rates.
-    cursor.awaitingRelease = false
   }
   if (right && !cursor.prevRight) {
     cursor.index = step(cursor.index, 1)
-    cursor.awaitingRelease = false
   }
   if (optionCount > 0) {
     cursor.index = ((cursor.index % optionCount) + optionCount) % optionCount
@@ -502,27 +532,18 @@ export function updateCursor(
   }
 
   cursor.openTicks++
-  // Once the trigger has been seen released, this card is in normal edge-triggered
-  // mode and the dwell no longer applies.
-  if (!input.fire) cursor.awaitingRelease = false
 
-  const risingEdge = input.fire && !cursor.prevFire
-  // A trigger held since the card opened confirms after the dwell, so the game never
-  // stops responding to the button the player is actually pressing.
-  const heldPastDwell =
-    cursor.awaitingRelease && input.fire && cursor.openTicks >= HELD_CONFIRM_DWELL_TICKS
-  const confirmed = risingEdge || heldPastDwell
-  const skipped =
-    (input.special && !cursor.prevSpecial) || cursor.openTicks >= CHOICE_TIMEOUT_TICKS
+  // Rising edges only, on both actions, and `openTicks` appears in neither: a card is
+  // resolved when the player resolves it, however long that takes.
+  const confirmed = input.confirm && !cursor.prevConfirm
+  const skipped = input.special && !cursor.prevSpecial
 
   cursor.prevLeft = left
   cursor.prevRight = right
-  cursor.prevFire = input.fire
+  cursor.prevConfirm = input.confirm
   cursor.prevSpecial = input.special
 
-  if (confirmed && optionCount > 0) {
-    return { kind: 'confirm', index: cursor.index, fromDwell: heldPastDwell && !risingEdge }
-  }
+  if (confirmed && optionCount > 0) return { kind: 'confirm', index: cursor.index }
   if (skipped) return { kind: 'skip' }
   return { kind: 'none' }
 }

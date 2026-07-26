@@ -160,6 +160,50 @@ export type StatKey =
   | 'hullSpeed'
   | 'maxIntegrity'
   | 'maxShield'
+  /**
+   * Shield points recovered per second of not being hit.
+   *
+   * A RATE rather than an interval, unlike `fireIntervalTicks`, and the difference
+   * is deliberate. An interval in whole ticks has only a handful of useful values
+   * before integer rounding eats a `mul` — which is why `mul` on fire interval is
+   * banned outright. Shield recovery has to accept fractional multipliers, because
+   * "+50% recharge" is the natural shape for an item, so the rate is the fraction
+   * and the simulation banks it in a whole-point accumulator (see
+   * `Hull.shieldRegenProgress`). That keeps `shield` an integer the panel can print
+   * without the unrounded-float defect that shipped once on the integrity meter.
+   */
+  | 'shieldRegenPerSecond'
+  /**
+   * Ticks after taking damage before recovery resumes. `lowerIsBetter`.
+   *
+   * THIS is the stat that decides whether a recharging shield is balanced, not the
+   * rate. The invulnerability window caps damage intake at 1.33 hits/second, so a
+   * delay shorter than that window would let recovery run *during* sustained fire
+   * and make the pilot unkillable by any pattern under the cap. A delay comfortably
+   * longer than the window means pressure suppresses recovery completely, and the
+   * shield only comes back when the player earns a lull — which is the whole point
+   * of adding it. See "The shield recharges" in docs/DESIGN.md.
+   */
+  | 'shieldRegenDelayTicks'
+  /**
+   * Shield points recovery may draw in one sector. Refilled on sector entry.
+   *
+   * THE MEASUREMENT FORCED THIS FIELD, and it is worth knowing why before anyone
+   * removes it. A purely time-based recharge cannot be balanced in this game at any
+   * rate: a run lasts 15-20 minutes, so even 0.1 points/second — one full pool per
+   * SIX AND A HALF MINUTES, far too slow for a player to ever notice — integrates to
+   * ~100 points of extra absorption and took a competent policy's clear rate from 15%
+   * to 30%. Every faster value overshot harder: 0.25/s reached 48%, 1/s reached 75%,
+   * and 4/s reached 76% even with the delay stretched to fifteen seconds. There is no
+   * rate that is both visible and balanced, because the integral, not the rate, is
+   * what kills you.
+   *
+   * A reserve fixes the units. Recovery becomes bounded by PROGRESS (five sectors)
+   * rather than by the clock, so it can be fast enough to feel — half a shield back
+   * in five seconds — while the total it can ever contribute is a number the
+   * difficulty curve can be tuned against.
+   */
+  | 'shieldReservePerSector'
   | 'scrapMultiplier'
   | 'pickupRadius'
   | 'focusFactor'

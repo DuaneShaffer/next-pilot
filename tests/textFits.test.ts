@@ -298,7 +298,6 @@ describe('world map copy fits its containers', () => {
     controlsLeft: { width: CARDS.mapCard / 2, size: SUB_SIZE, tracking: 0.6 },
     controlsRight: { width: CARDS.mapCard / 2, size: SUB_SIZE, tracking: 0.6 },
     hint: { width: CARDS.mapCard, size: LABEL_SIZE },
-    hintAwaiting: { width: CARDS.mapCard, size: LABEL_SIZE },
     unnamedRoute: { width: CARDS.mapRow / 2, size: TITLE_SIZE, weight: 700 },
   }
 

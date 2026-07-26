@@ -119,6 +119,35 @@ const CANONICAL_HISTORY: ReadonlyArray<{
    * two fields, by mutation rather than by replay.
    */
   { version: 2, digest: 5, hash: 'de2ef870affd4a0a' },
+
+  /**
+   * SIM_VERSION 3 at generation 6, and **this row is not a verified re-base**. Every row
+   * above could say "rebuilt under the previous generation, this build still produces the
+   * old hash to the bit". This one cannot, and saying so is the point of writing it down:
+   * three independent things moved at once, and the probe cannot attribute the change to
+   * any of them.
+   *
+   *   1. The SIMULATION changed — the shield recovers, and cards no longer resolve
+   *      themselves. Both are visible inside 1,800 ticks of sector one.
+   *   2. The DIGEST changed — generation 6 adds three shield fields to `hull` and moves
+   *      `choiceResolve` out of `run` entirely.
+   *   3. THE PROBE'S OWN INPUT SCRIPT changed. `canonicalInputs` gained a `confirm`
+   *      pulse, because `confirm` is now a distinct action and a script that never
+   *      asserted it would leave the new bit permanently 0 — the one state a format-3
+   *      replay already produces, and therefore the least useful thing to probe.
+   *
+   * A single number cannot separate three causes, so it is not evidence that any one of
+   * them is correct. What guards each of them individually: `tests/shield.test.ts` for
+   * recovery, `tests/snapshot.test.ts` by mutation for the three new hashed fields,
+   * `tests/progression.test.ts` for cards not self-resolving, and the re-recorded corpus
+   * in `tests/replays/` for the run as a whole. This row's job is narrower than it looks
+   * — it fails if sector one drifts from here on, and that is all.
+   *
+   * The blind spots from version 2 are unchanged and now matter more: 1,800 ticks of
+   * single-sector content never reaches a seam, so the fourth behaviour change this
+   * version (no route pays scrap) is invisible to this probe entirely.
+   */
+  { version: 3, digest: 6, hash: 'ce03d7deabff7fef' },
 ]
 
 function makeWorld() {

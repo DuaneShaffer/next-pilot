@@ -75,7 +75,9 @@ the code and never on the card the player reads:
 The world map is a card between sectors offering 2-3 **approaches** into the next one. The sector
 order never varies, so a route cannot let a player skip the difficulty curve; what varies is the
 price of arriving well-equipped. Each non-direct route arms a hazard for the whole of the next
-sector and pays for it once on arrival — an item, scrap, or repair, stated with real numbers.
+sector and pays for it once on arrival — an item or a repair, stated with real numbers. Both are
+quantities the pilot reads off their own panel; **scrap was tried as a third payout and removed**,
+see "Route rewards are priced off the panel" below.
 
 The direct approach is always first and always free. A risk/reward screen with no safe option is
 not a choice, it is a tax. And a sector with no hazards to trade against shows **no card at all**,
@@ -110,6 +112,96 @@ no guessing what an icon means:
 - **Vault contract** — a sealed vault. A relic, and a curse attached to it.
 - **Repair dock** — restores integrity. No reward.
 - **Unlisted** — unknown modifiers. Higher certification chance.
+
+## Route rewards are priced off the panel — decided 2026-07-26
+
+**No route pays scrap any more.** The two priced approaches pay a build slot (one item, chosen
+from three) or integrity (+60% of maximum, capped at maximum), and nothing else. The card used to
+offer a currency, a free item and a heal side by side, which is three different kinds of thing,
+and a player could only price one of them.
+
+**The measurement is what settles it, and it is not close.** Five bot policies × 60 seeds × the
+full five-sector run, instrumented at every card:
+
+| | leg 2 | leg 3 | leg 4 | leg 5 |
+| --- | --- | --- | --- | --- |
+| scrap held when the route card opens | 560 | 2,030 | 3,463 | 5,474 |
+| what the scrap route paid | 125 | 180 | 235 | 290 |
+| scrap held at a shop | 1,579 | 2,755 | 4,653 | 8,726 |
+| dearest thing on sale | 220 | 224 | 272 | 220 |
+
+Every shop from leg 2 on is bought from at 97–100%, and **100% of runs end with scrap unspent**,
+median 3,940. A pilot at the last seam is being offered 5% of what they already cannot spend. Take
+rate confirmed it: with every policy told to take the best-paying route, the item won 80–90% of
+the cards it appeared on. **A choice with a standing right answer is not a choice.**
+
+**Why not make scrap scarce instead**, which is the root-cause fix and was the first option
+considered: holdings span **43x across a run** (257 at the first shop, 8,726 at the last), and the
+dominant sink — the two in-sector shops per sector — is priced by `shopCosts`, which is handed a
+per-sector `waveIndex` and cannot see absolute run progress. One curve cannot bite at both ends,
+and the leg-1 shop is *already* declined 29% of the time, which is the direction the unbuyable
+wave-8 shop failed in. Making scrap matter is a real change and a good one, but it is a change to
+what the run *spends scrap on*, not to what a route pays. Whoever takes it needs an absolute
+progress measure in `shopCosts` or a second sink; `RouteReward` keeps its `scrap` variant, and
+`SALVAGE DETOUR` keeps its name, for that day.
+
+**What makes the two survivors commensurable** is that both are read off the pilot's own
+instruments. An item is a slot in a build the player can see; a repair is the gap in the integrity
+meter they have been watching for fifteen minutes. Neither has a fixed value — **which one is
+correct is a fact about the pilot's state, not about the card**, so no amount of learning turns
+this screen into a reflex. The repair went from 35% to 60% of maximum integrity because the old
+number could never be right: scored the way a build-aware policy scores it (an item ≈ 50 points of
+damage healed), 35% of even a 140-point hull is 49 — below the crossover on every hull in the
+game at every damage level. At 60% the crossover lands at "you have lost more than half a hull",
+and how often that happens is a property of how you fly: measured, 48% of route cards for the
+evasive policy, 27% for the greedy one, 7% for the clear-speed benchmark.
+
+**Measured after, same probe** (every policy told to take the best-paying route). Share of route
+cards where each payout was taken:
+
+| | item before | item after | non-item before | repair after |
+| --- | --- | --- | --- | --- |
+| evasive (`dodger`) | 80% | 68% | 29% scrap / 13% repair | **32%** |
+| clear-speed (`aggressor`) | 90% | 90% | 21% / 1% | 10% |
+| greedy | 83% | 82% | 23% / 12% | 18% |
+| build-chaser | 87% | 96% | 26% / 2% | 4% |
+| control (`random`, n=5) | 80% | 20% | 0% / 25% | **80%** |
+
+The item is still the usual answer for a pilot who is not being hit — as it should be, that pilot
+has nothing to spend a repair on. What changed is that **the answer now moves with the pilot**: 4%
+to 80% across policies, against a "third option" that used to be arithmetically incapable of
+winning. The direct approach is taken 100% by the two policies that fly it by default and about a
+third of the time by the uniform control; the risk-appetite probe never takes it, because
+`routeScore` prices rewards and not hazards and says so.
+
+**Do not read a clear-rate delta off this change yet.** Other sim work was landing during the
+sweeps — `world.ts`, `damage.ts` and `entities.ts` all changed mid-run, and the clear-speed
+benchmark's *direct-route* rate (which no route reward can touch) moved from 80% to 42% between
+sweeps on its own. Take-rate reproduced across three sweeps and two seed bases; clear rate is not
+comparable until the tree settles and wants re-measuring after the `SIM_VERSION` bump.
+
+**One price, stated once (finding #33).** `buildRoutes` gives both priced routes the same hazard
+whenever the next sector has only one, and **three of the four seams in the shipped run are that
+case** — only The Deep Manifest carries two. The rows printed that hazard's name twice and the
+card read as though it had drawn the same row by mistake. The sim is right and the screen was
+wrong: the choice there really is purely the reward. So when every detour on a card accepts the
+same hazard, the world map hoists the price into one line above the rows and each row spends its
+second line on what it pays. The alternatives were rejected for stated reasons: collapsing to a
+single priced route deletes the item-versus-integrity decision at three of the four seams, and
+differentiating by hazard *intensity* would need a second near-identically-named hazard per
+sector, which trades one duplicate-looking row for two.
+
+**Two things it fixes for free:**
+
+- **The card can be compared without moving the cursor.** All three payouts are now on the rows in
+  the simulation's own words, where previously two rows spent that line repeating one hazard.
+- **`bots.ts` becomes an honest oracle again.** It already scored a repair against damage actually
+  taken, so its route preference now varies by policy instead of resolving to "take the item".
+
+**What must not change:** the direct approach stays first and stays free — a risk screen with no
+safe option is a tax, not a decision. And `rewardText` stays the single source of the sentence, so
+the map cannot describe a payout the sim will not pay. It is a sim change, so `SIM_VERSION` bumps
+and the replay corpus needs a proved re-base.
 
 ## The shield recharges — decided 2026-07-26
 
@@ -149,14 +241,84 @@ bounds that go with them.
   into weapon charge, so it *wants* to be grazed", and that shipped as flat damage because there is
   no `onShieldAbsorbed` hook and, more fundamentally, because a non-recharging shield can only be
   grazed a fixed number of times. A recharging shield makes the fantasy playable.
-- **`retaliation-coil`'s anti-synergy stops being a trap.** Its card says it fires only on
-  integrity loss, so a larger shield strictly *reduces* its triggers — an anti-synergy the player
-  has to be warned off. With recharge, shield capacity and retaliation are a real trade rather than
-  a mistake.
+- ~~**`retaliation-coil`'s anti-synergy stops being a trap.**~~ **WRONG, and measured wrong.** The
+  claim was that recharge turns shield capacity and retaliation from a mistake into a real trade.
+  It does the opposite: the coil fires only on integrity loss, and a recovering shield means
+  integrity is hit *less often*, so recharge makes the coil strictly worse. See the measurement
+  under "as built" below — across five policies and four seeds, `retaliate` fired in three runs of
+  twenty and `repairOnKill` in none at all, where both fired reliably before. The prediction was
+  made from the direction of the mechanic and never checked; the corpus's effect-coverage check is
+  what caught it. Kept struck through rather than deleted, because "a bigger shield helps the coil"
+  is an intuitive and wrong thought that someone will have again.
 
 **What must not change:** the shield still absorbs before integrity, so `applyHullDamage` keeps one
 damage path; and recharge is simulation state, so it ticks in whole ticks off the run seed like
 everything else. It is a sim change, so `SIM_VERSION` bumps and the corpus needs a proved re-base.
+
+### As built — and the measurement corrected the design above
+
+Implemented 2026-07-26. **The prediction in this section was wrong about the lever, and the numbers
+are worth keeping because being wrong here was cheap and being wrong later would not have been.**
+
+The section above says the danger is a rate that outpaces the 1.33 hits/second intake cap, and that
+the job is to find a narrow band between "too fast to matter" and "too slow to notice". Measured
+against the `aggressor` policy over 60 five-sector runs, with a 15% baseline for no recovery and the
+M5 exit band at 20-40%, **that band is empty**:
+
+| Configuration | Clear rate |
+| --- | --- |
+| recovery off (the shipped M5 game) | 15% |
+| 4/s, 2.5 s delay | 76% |
+| 4/s, **15 s** delay | 60% |
+| 1/s, 2.5 s delay | 75% |
+| 0.25/s | 48% |
+| 0.1/s — one full pool per six and a half minutes | 30% |
+
+Two things fall out. **The delay is not the safety lever** — stretching it six-fold barely moved the
+number, because a 15-20 minute run contains plenty of gaps longer than any delay worth shipping. And
+**there is no rate that is both visible and balanced**: 0.1/s is inside the band and is also
+invisible, refilling one shield per six minutes while still doubling the clear rate in aggregate.
+Statistically decisive and experientially absent is the worst available outcome, and it is what a
+purely time-based recharge forces. The integral, not the rate, is what matters, and elapsed time is
+the wrong denominator for it.
+
+**So recovery is bounded by progress instead of by the clock.** A `shieldReservePerSector` budget
+(base 15) refills on sector entry and is spent one point per point recovered. That fixes the units:
+the most recovery can ever contribute is five reserves, 75 points against a 100-point hull, which is
+a number the difficulty curve can be tuned against. And because the total is bounded, the *rate* is
+free to be fast enough to feel — 4/s, so half a shield comes back in four seconds of not being hit.
+
+The row that shows the mechanic earning its keep is `0.1/s` against `reserve 20`. Both allow ~100
+points across a run; the reserve version measures 12pp stronger, because the same total is worth
+more when the player chooses where it lands. That is the "disengaging becomes a play" claim above,
+finally true and finally measurable. Shipped at 15/sector, which measures 33-35%.
+
+Consequences recorded honestly:
+
+- **The rate cap is not a safety mechanism and must not be mistaken for one.** `Cycling Array` is
+  12/s by design, while the rate that could not out-heal even the weakest 6-damage shot across one
+  invulnerability window is under 7.8/s. The guarantee against recovery running under sustained fire
+  is the delay's `min: 60` floor sitting strictly above the 45-tick invulnerability window.
+  `tests/shield.test.ts` asserts the rate cap is *insufficient*, so nobody tightens it and believes
+  they have fixed something.
+- **An unspent reserve does not carry forward.** Banking it would reward the sector you found easy
+  with a buffer in the one you found hard, inverting the curve the reserve exists to respect.
+- **Three new `StatKey`s, not two** as predicted above: rate, delay, and the reserve.
+- **It quietly weakened every integrity-triggered effect, and that was nearly missed.** A shield
+  that recovers means integrity is hit less often, so `retaliate` (fires on integrity loss) and
+  `repairOnKill` (does nothing at full integrity) both lose most of their triggers. Measured across
+  five policies and four seeds: `repairOnKill` fired in **zero** runs and `retaliate` in three of
+  twenty; with recovery switched off, both fire reliably on the same seeds. That matters beyond two
+  items — **Repair Nanites is the strongest relic in the game**, measured at 1.9-2.6x the clear
+  rate, and it is now working against a hull that takes less integrity damage. It has not been
+  re-measured and should be before the next balance pass.
+
+  What caught it: the replay corpus's effect-coverage check, which removes each probe item and
+  fails if the run is unchanged. Holding an item proves nothing; that check demanded the effect
+  actually fire, and refused a fixture claiming seven-of-seven while proving five. The probe hull
+  now switches recovery off so the bus stays covered — see `tests/replays/content.ts`.
+- Not yet done: the reserve is simulation state and the HUD does not show it. A recovery budget the
+  player cannot see is a budget they cannot plan a disengage around, which is most of the point.
 
 ## Items and synergy
 
@@ -251,7 +413,7 @@ One loose end: the **mid-sector** work-order card from M3 is still in the game a
 be given a mechanical consequence or removed. Leaving a card that does nothing is the
 wave-8-shop mistake wearing different clothes.
 
-### Cross-run persistence — UNRESOLVED, and it decides what kind of game this is
+### Cross-run persistence — SETTLED 2026-07-26, see "Cross-run persistence changes the deck"
 
 A proposal that "items and levels persist" is ambiguous in a way that matters:
 
@@ -267,7 +429,11 @@ that structurally forbids a certification from granting a raw stat increase. Ado
 cross-run power means deliberately removing that constraint, not quietly working
 around it.
 
-**Do not implement either reading until this is settled.**
+**Settled against the second reading.** The reasoning above is kept because it is the argument the
+decision was made on. What it got wrong is the premise that the promise was still pure: the
+certified work-order pool has been a hidden simulation input since M4. See **"Cross-run persistence
+changes the deck, never the numbers — decided 2026-07-26"** at the end of this document for the
+rule, the mechanism it is pinned to, and the six places the code already breaks it.
 
 ## Seeded runs
 
@@ -369,3 +535,159 @@ a ~104px panel bar beneath it, using 731 of 844 available pixels.
 - `src/render/panel.ts` derives its content origin from `PLAYFIELD_W`. That is the one hardcoded
   assumption that the panel is a right-hand column, and the thing to break when the panel is next
   worked on.
+
+## Cross-run persistence changes the deck, never the numbers — decided 2026-07-26
+
+**Decision, in one sentence: what persists between runs may only change *which content ids a run
+can draw from*, and no persisted value may ever change what a resolved number evaluates to.**
+
+Certifications are the whole mechanism and they stay the whole mechanism. There is no permanent
+stat purchase, no surviving level or XP total, no bank balance, no per-hull mastery track, and no
+starting-item carry-over. This settles the UNRESOLVED entry under "Proposals not yet decided"
+against the roguelite reading, and it is deliberate rather than conservative: the code was already
+built to this rule in the one place it is expressible, and the replay corpus is already sitting on
+this exact line.
+
+Line numbers below were taken on 2026-07-26 and the tree is being edited; the symbol names are the
+durable part.
+
+### Where the line is, pinned to a mechanism
+
+Four tests. A proposal has to pass all four, and a future author should be able to apply them
+without reopening this argument.
+
+1. **The unit of persistence is an id entering a named pool.** `PoolGrant` is `{ slice, id }`
+   (`src/content/certifications.ts:110`) and there is nowhere in it to write a magnitude. If a
+   proposal needs a *number* in the persisted payload — a level, a rank, a currency, a multiplier,
+   a count of anything the run consumes — it is on the wrong side. The one persisted number is
+   `CertificationState.progress`, and it is write-only with respect to the simulation: only the
+   hangar reads it, through `describeProgress` (`src/meta/certifications.ts:323`).
+2. **A pool may only grow, and only into a table the run already draws from a fixed number of
+   times.** `poolFor` puts the base pool first and in full, so it has no way to *narrow* a run
+   (`src/meta/certifications.ts:491`). The number of draws is fixed by `ITEM_CHOICE_WAVES = [7,
+   20]`, `SHOP_WAVES = [13, 24]` and `WORK_ORDER_WAVES = [17]` (`src/sim/progression.ts:46-61`),
+   which are content constants and not persisted state. **A certification may change what is
+   offered; never how many offers exist, and never what a taken offer does.**
+3. **The falsifiable question.** For a fixed seed, could this persisted value change the output of
+   `resolveStat` (`src/sim/stats.ts:97`), a `shopCosts` / `transitShopCosts` price, a wave script,
+   an HP or damage figure, a threshold, a tick count, or the number of stages in the run? If yes,
+   it is banned. Could it change only *which id* comes out of a table that is drawn from a fixed
+   number of times? Then it is allowed, subject to 4.
+4. **Anything allowed under 1–3 is a run input, and a run input must be recorded with the run.**
+   The pool is the fourth input to the simulation, after the seed, the hull and the input log. This
+   is the clause the code currently fails; see below.
+
+Allowed, therefore: item ids, enemy ids, hull ids, work-order kinds, boss-variant ids and hazard
+ids entering their slice. Banned, and today unrepresentable: a permanent stat upgrade; a level or
+XP total that survives death; scrap that survives the run (`RunSummary.scrapHeld` is a *balance*
+and an unlock condition, never a bank — `src/meta/certifications.ts:71`); a persisted best that can
+be spent; an unlocked starting item; an extra offer slot; an unlocked sector or a longer run.
+
+The grey cases, decided now so they are not relitigated:
+
+- **Writing and cosmetics may cross runs freely.** Personnel files already do and touch no
+  simulation value (`src/meta/personnel.ts`). Out of scope, not a loophole.
+- **An unlocked *starting* item is banned even though Probate has one.** The distinction is the
+  owner of the fact: Probate's relic is a property of a hull, identical for everyone who flies
+  Probate, fixed in content. A save-level starting item changes the resolved stat vector at tick 0
+  with no offer in between, which is test 3 failing.
+- **Unlocking difficulty upward is allowed** — enemies, hazards and boss variants are pool draws,
+  and `src/content/certifications.ts` is right that they push the opposite way from power. But it
+  is not free: a certified pilot's daily is *harder* than a base pilot's, which is exactly why
+  test 4 exists.
+- **Within-run levels remain open.** The "Experience and levels" proposal above survives this
+  decision unchanged, on one condition: a level may not outlive the run, and "unlock a higher level
+  cap" is a number and therefore banned.
+
+### How it survives determinism, dailies and the corpus
+
+**Contract 1 as CLAUDE.md states it is already false in the shipped build, and this decision does
+not break it — it makes it precise and puts the code on the hook for the difference.** Stating that
+plainly matters more than defending the slogan:
+
+- `main.ts:614` passes `workOrders: runPool.workOrders` into `new World(...)`, where `runPool =
+  poolFor(unlockedSet(save.certifications.unlocked))` (`main.ts:452`, `:567`). A value read out of
+  `localStorage` is a constructor argument to the simulation.
+- The sim builds the work-order card from `this.content.workOrders ?? BASE_WORK_ORDERS`
+  (`src/sim/world.ts:885`) and takes the card's option count from `choice.workOrders.length`
+  (`:918`), which is what `updateCursor` clamps the highlight against.
+- `hashWorld` hashes `choice.workOrders.length` and every kind string
+  (`src/meta/snapshot.ts:468-469`) and `choiceSelection` (`:502`).
+- Therefore **two pilots with the same seed, the same hull and the same input log produce different
+  state digests if one holds `vault-clearance` and the other does not.** Not a theory: the
+  work-order pool has been wired since M4 fixed the literal in `World`.
+- The hull offer is drawn from the persisted pool too — `offerHulls(Rng.fromSeed(seed,
+  HULL_OFFER_STREAM), runPool.hulls)` (`main.ts:571`) — and the chosen hull goes into the sim.
+
+So the honest promise is **seed + hull + pool + one byte per tick**. Three of those four are
+recorded. The pool is not, and that is the single change this decision requires.
+
+**Where the pool has to be recorded.** In the `src/meta/replay.ts` wire format, as a new field
+after `hullId`, and it must be **the granting id set, not the fingerprint** — a fingerprint
+verifies, it cannot reconstruct. The cheap form is a bitmask over `CERTIFICATION_IDS`
+(`src/meta/certifications.ts:366`), one or two bytes for a ten-entry roster, which makes roster
+*order* a format concern in the way `poolFor`'s own header already warns about. That is a
+`REPLAY_FORMAT_VERSION` 3 → 4 bump and **not** a `SIM_VERSION` bump, by exactly the argument that
+file already makes for `hullId`: the rules did not change, the payload was incomplete. Format-3
+replays then fail loudly at the version check instead of being flown against the viewer's pool.
+`playback` must then build the world from `poolFor(unlockedSet(replay.certifications))` and
+**throw if the world reports a different pool fingerprint**, which is the guard `hullId` was given
+after M5 found that a field can exist and still be decoration.
+
+**The corpus survives untouched, and this is the strongest practical argument for the line.** Every
+recorded fixture was produced through a `RunContent` with `workOrders` omitted
+(`tools/playtest.ts:75`, `tests/bots.test.ts`), i.e. against `BASE_WORK_ORDERS`. A new pool field
+that defaults to "nothing certified" reproduces all of it bit-exactly. No re-base, no
+`SIM_VERSION` bump, no `DIGEST_GENERATION` bump. The base pool is already where the corpus lives.
+
+**Daily contracts.** `src/meta/seedModes.ts:611` already decides this correctly and says why — the
+daily is `purist: true` because "if certifications could change its item pool, two players flying
+'the same' contract would be flying different runs, and the one thing the daily is for is
+comparability". That rule is right and it is **not implemented**. A daily is therefore flown from
+`poolFor(new Set())`, hull offer included, and that is a fix rather than a design change.
+
+**Shared seeds** are comparable only within an identical pool, which `verifyPurist` already reports
+as `purist` versus `expanded`. Nothing changes there except that the label has to become true.
+
+### What it means for purist mode
+
+Purist mode stops being a badge and becomes **the definition of the comparable game**.
+
+1. `poolFor(new Set())` has to be *the run*, not just the fingerprint filed afterwards.
+   `RunMode.purist` must gate `runPool` at `main.ts:452` and `:567`, and must gate the hull offer —
+   `BASE_POOL.hulls` is `['lien']`, so a purist run offers one hull and `shouldShowHullSelect`
+   correctly skips the card.
+2. Purist is not "the fair mode versus the cheat mode". It is the base pool, which is **the only
+   difficulty band anyone has ever measured**: every M5 exit number — 26.5% / 36.5% clear, the hull
+   spread, the death shares — came from a harness that omits `workOrders`. The certified game is
+   unmeasured, and this decision turns that from an unknown into a scheduled sweep.
+3. Purist stays *derived, never stored* (`src/meta/purist.ts` header). This decision adds nothing
+   falsifiable: the pool is evidence and the verdict belongs to the verifier.
+
+### What this forecloses — the honest cost
+
+1. **The 26–36% clear rate does not get the standard cure.** Roguelikes overwhelmingly answer a
+   punishing clear rate with meta-progression, and this decision refuses that answer permanently.
+   What is left is variety, legibility, onboarding, and a fast restart — never a stronger pilot. If
+   the game later reads as too punishing, the permitted fixes are content and tuning.
+2. **Daily contracts are comparable only among purist runs**, so a certified player who wants to
+   compete on the contract flies a pool they did not choose. Accepted: comparing across pools is
+   not comparison.
+3. **Certifications will always be a weaker retention hook than a power curve**, because their
+   reward is "more varied, slightly harder" and that is a *worse* reward to a player who wants to
+   feel stronger. The Progression section accepted this already; this section means it cannot be
+   quietly revisited by adding one word to `POOL_SLICES`.
+4. **Every future pool slice becomes a versioned change, not a content change.** Gating `items` or
+   `enemies` on the pool moves every existing player's fingerprint, so stored records stop matching
+   the verifier's base pool.
+
+### Two things it fixes for free
+
+- **`fingerprintPool` gets a job it can finish.** The fingerprint is filed in every personnel
+  record (`main.ts:526`) and compared against the verifier's base pool, but nothing can *reproduce*
+  from it, because the pool is not in the replay. Recording the granting id set makes purist tier 2
+  executable rather than merely described.
+- **Contract 1 becomes true as written.** "Same seed and inputs" becomes "same seed, hull, pool and
+  inputs", with all four recorded fields. A contract that is precisely true is enforceable by a
+  test; one that is approximately true gets worked around, which is how the work-order pool became
+  a hidden simulation input without anyone deciding it should be.

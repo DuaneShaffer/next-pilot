@@ -11,7 +11,18 @@ import { formatSeed } from '../core/seed'
 import { VIRTUAL_H, VIRTUAL_W } from '../core/space'
 import { Palette } from '../render/palette'
 import type { Starfield } from '../render/starfield'
-import { drawText } from '../render/text'
+import { canvasMeasure, drawText } from '../render/text'
+import {
+  SAVE_NOTICE_BODY_SIZE,
+  SAVE_NOTICE_HEADING_SIZE,
+  SAVE_NOTICE_LINE_H,
+  SAVE_NOTICE_PAD,
+  layoutSaveNotice,
+  saveNoticeBodyY,
+  saveNoticeDismissY,
+  saveNoticeHeadingY,
+  type SaveNotice,
+} from './saveNotice'
 
 export interface TitleScreenState {
   seed: string
@@ -19,6 +30,13 @@ export interface TitleScreenState {
   /** Ticks elapsed, for the prompt's slow pulse. */
   tick: number
   version: string
+  /**
+   * What loading the save cost, if it cost anything.
+   *
+   * Optional and null-tolerant: the overwhelmingly common case is nothing to say, and
+   * a caller with nothing to say should not have to construct an absence.
+   */
+  notice?: SaveNotice | null
 }
 
 /** Corner brackets. Cheaper on the eye than a full border and reads as a HUD. */
@@ -39,6 +57,63 @@ function drawCornerBrackets(ctx: CanvasRenderingContext2D): void {
     ctx.lineTo(x, y)
     ctx.lineTo(x, y + dy * len)
     ctx.stroke()
+  }
+}
+
+/**
+ * The save-loss notice.
+ *
+ * A card in the band between the controls line and the footer, not a modal: this must
+ * never stand between the player and a sortie (the pulsed ENTER prompt above it stays
+ * the one primary action), and it must be readable without being obeyed.
+ *
+ * `caution` for a full reset, per docs/UI.md rule 3 — data the player had is gone,
+ * which is a resource in a bad state, and `danger` is reserved for what can hurt them
+ * this instant. Colour does not carry the severity alone: a reset gets a 3px severity
+ * bar and a coloured heading, a partial loss gets a hairline and a neutral heading, and
+ * the two headings say different things in words.
+ */
+function drawSaveNotice(ctx: CanvasRenderingContext2D, notice: SaveNotice): void {
+  const layout = layoutSaveNotice(notice, canvasMeasure(ctx))
+  const reset = notice.severity === 'reset'
+
+  ctx.fillStyle = Palette.panel
+  ctx.fillRect(layout.x, layout.y, layout.w, layout.h)
+  ctx.strokeStyle = Palette.line
+  ctx.lineWidth = 1
+  ctx.strokeRect(layout.x + 0.5, layout.y + 0.5, layout.w - 1, layout.h - 1)
+  // Severity bar along the top edge, the same device the incident report uses so the
+  // two screens read as one interface rather than two inventions.
+  ctx.fillStyle = reset ? Palette.caution : Palette.textDim
+  ctx.fillRect(layout.x, layout.y, layout.w, reset ? 3 : 1)
+
+  const textX = layout.x + SAVE_NOTICE_PAD
+  drawText(ctx, layout.heading, textX, saveNoticeHeadingY(layout), {
+    size: SAVE_NOTICE_HEADING_SIZE,
+    weight: 700,
+    tracking: 2,
+    baseline: 'top',
+    color: reset ? Palette.caution : Palette.text,
+  })
+
+  let y = saveNoticeBodyY(layout)
+  for (const line of layout.body) {
+    drawText(ctx, line.text, textX, y, {
+      size: SAVE_NOTICE_BODY_SIZE,
+      baseline: 'top',
+      color: line.tone === 'loss' ? Palette.text : Palette.textDim,
+    })
+    y += SAVE_NOTICE_LINE_H
+  }
+
+  y = saveNoticeDismissY(layout)
+  for (const line of layout.dismiss) {
+    drawText(ctx, line, textX, y, {
+      size: SAVE_NOTICE_BODY_SIZE,
+      baseline: 'top',
+      color: Palette.textFaint,
+    })
+    y += SAVE_NOTICE_LINE_H
   }
 }
 
@@ -150,4 +225,9 @@ export function drawTitleScreen(
     baseline: 'top',
     color: Palette.textFaint,
   })
+
+  // Drawn last so it sits over the horizon glow rather than under it, and after the
+  // footer so a card that ever grew too tall would visibly collide here instead of
+  // hiding the collision behind itself.
+  if (state.notice) drawSaveNotice(ctx, state.notice)
 }

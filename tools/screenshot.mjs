@@ -98,8 +98,52 @@ const MIME = {
 }
 
 /**
+ * A save whose history is damaged but whose envelope is fine.
+ *
+ * 53 valid personnel records against a retention cap of 50, plus two entries no
+ * coercer can read. Loading it drops three files, skips two, and keeps the pilot
+ * number, settings and certifications — which is the *other* severity of save-loss
+ * notice, and the reason there are two of these shots rather than one.
+ */
+const DAMAGED_HISTORY_SAVE = JSON.stringify({
+  version: 4,
+  pilotNumber: 31,
+  settings: { shake: 1, reduceFlashes: false, masterVolume: 0.8, muted: false, autoFire: false },
+  certifications: { unlocked: [], progress: {} },
+  personnel: [
+    ...Array.from({ length: 53 }, (_, i) => ({
+      v: 1,
+      pilotNumber: i + 1,
+      hullId: 'lien',
+      outcome: 'lost',
+      causeKind: 'enemy-fire',
+      causeEnemyId: 'turret-heavy',
+      sectorId: 'debris-shelf',
+      waveIndex: 12,
+      ticks: 8040,
+      kills: 96,
+      scrap: 310,
+      shotsFired: 2400,
+      hits: 620,
+      seed: SEED,
+      items: [],
+      itemsOmitted: 0,
+      poolFingerprint: '0123456789abcdef',
+      simVersion: 1,
+      stateDigest: null,
+    })),
+    { nonsense: true },
+    null,
+  ],
+  daily: null,
+})
+
+/**
  * Each shot names the state it captures. `keys` are held for `settleMs` before
  * capture, which is how we get a screen mid-combat rather than at rest.
+ *
+ * `storage` writes localStorage before the page that reads it loads, for states that
+ * are *about* what was stored. See the save-notice shots at the end.
  */
 const SHOTS = [
   {
@@ -423,6 +467,39 @@ const SHOTS = [
     pressAfter: ['Escape', 'ArrowDown', 'ArrowLeft'],
     expect: 'screen === "paused"',
   },
+
+  // --- LAST deliberately: these two write a damaged save into localStorage ---
+  //
+  // The save-loss notice, both severities. A save that could not be read used to
+  // become a fresh game in silence — every field of `SaveLoadReport` was computed and
+  // shown to nobody — so a pilot with thirty sorties opened the game at #001 with an
+  // empty hangar and no explanation.
+  //
+  // The state is reached by storing genuinely unusable bytes rather than by a URL flag,
+  // because the notice's whole subject is what the loader could not read: a flag would
+  // photograph a sentence instead of the state. The bytes persist in the context after
+  // the shot, which is why these are last — each viewport gets a fresh context, so
+  // `hangar-fresh` at the top of this list is unaffected.
+  {
+    name: 'save-notice-reset',
+    url: `/?seed=${SEED}`,
+    storage: { 'next-pilot/save': '{not json' },
+    settleMs: 400,
+    // Pilot 001 with nothing filed IS the loss. The notice is the only thing on screen
+    // that says why, which is the entire point of the capture.
+    expect: 'screen === "title" && filedRuns === 0',
+  },
+  {
+    name: 'save-notice-partial',
+    url: `/?seed=${SEED}`,
+    storage: { 'next-pilot/save': DAMAGED_HISTORY_SAVE },
+    settleMs: 400,
+    // 50 files survived and the pilot number is still 31: the run history lost entries
+    // and everything else is intact. If this ever captured `filedRuns === 0` the two
+    // severities would be indistinguishable, which is the misreport the wording exists
+    // to prevent.
+    expect: 'screen === "title" && filedRuns === 50',
+  },
 ]
 
 /** The common case, plus a small window to catch layout breakage. */
@@ -511,6 +588,15 @@ async function capture() {
       await page.waitForTimeout(400)
 
       for (const shot of SHOTS) {
+        // Storage is written BEFORE the page that reads it loads, and writing it needs
+        // an origin — hence the throwaway navigation. Only the save-notice shots use
+        // this; everything else reaches its state by playing the game.
+        if (shot.storage) {
+          await page.goto(`${origin}/`, { waitUntil: 'load' })
+          await page.evaluate((entries) => {
+            for (const [key, value] of entries) localStorage.setItem(key, value)
+          }, Object.entries(shot.storage))
+        }
         await page.goto(`${origin}${shot.url}`, { waitUntil: 'load' })
         // main() sets this once the loop is running; waiting on it avoids
         // capturing a blank first frame.

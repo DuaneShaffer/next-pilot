@@ -56,7 +56,7 @@ import {
   shakeOffset,
   type FeelState,
 } from './feel'
-import { blackoutDepth, drawBlackout } from './hazards'
+import { blackoutDepth, drawBlackout, drawHazardWarning } from './hazards'
 import { pulse } from './intensity'
 import { Palette, withAlpha } from './palette'
 import { drawEnemyShape, enemyTopOffset } from './shapes'
@@ -273,6 +273,15 @@ function drawEnemies(
  * and missing it, and varying brightness per round would be a strobe at 20Hz
  * besides. The length grows *downward* from the leading edge, so a tracer never
  * draws its head anywhere except at the bullet's real position.
+ *
+ * THAT LAST SENTENCE WAS FALSE, and the comment was the correct half. Both passes
+ * started their rect at `y - 14` and `y - 11`, putting the drawn head 11-14 units
+ * *ahead* of the bullet the sim is tracking — a fifth of the 62-unit-per-tick flight,
+ * and always in the direction of travel. So a stream looked like it had reached a
+ * target it had not, which is a lie about the one thing the player is aiming with:
+ * the visible answer to "am I on it yet" arrived a quarter of a tick early, every
+ * shot. Anchoring the rect at `y` is what the invariant says and what
+ * `resolvePlayerBulletHits` actually sweeps.
  */
 function drawPlayerBullets(
   ctx: CanvasRenderingContext2D,
@@ -290,7 +299,7 @@ function drawPlayerBullets(
     const phase = tracerPhase(y, b.vy, tickWithAlpha)
     ctx.fillRect(
       lerp(b.prevX, b.x, alpha) - 2,
-      y - 14,
+      y,
       4,
       TRACER_MIN_LEN + TRACER_LEN_RANGE * phase,
     )
@@ -308,7 +317,7 @@ function drawPlayerBullets(
     const width = phase > 0.5 ? 1.9 : 1.5
     ctx.fillRect(
       lerp(b.prevX, b.x, alpha) - width / 2,
-      y - 11,
+      y,
       width,
       (TRACER_MIN_LEN - 5) + TRACER_LEN_RANGE * 0.8 * phase,
     )
@@ -739,6 +748,18 @@ export function drawScene(
   // is exactly where the vignette is darkest. Muting a warning by 45% to
   // preserve draw-order purity would be the wrong trade.
   drawLowIntegrityRim(ctx, view.hull, tick, reduceFlashes)
+  /*
+   * The hazard alarm, after the rim and outside the shake.
+   *
+   * After the rim because a hazard one second from firing is the more urgent of the
+   * two: low integrity is a condition the player already knows about, the reaction
+   * window is a second long and then gone. Outside the shake because it is a warning
+   * rather than part of the world — a rattling alarm reads as damage, not as a cue.
+   *
+   * The panel's hazard block still draws; this is the addition rule 9 asks for, not a
+   * move. See render/hazards.ts for why the panel alone was not enough.
+   */
+  drawHazardWarning(ctx, hazards, tick, reduceFlashes)
   drawThreatIndicators(ctx, view.enemies, a)
 
   // Last, and outside the shake: text is the one thing that must never rattle, and

@@ -66,7 +66,14 @@ export interface BindResult {
   /** False means nothing changed and `rejection` says why. */
   ok: boolean
   rejection?: BindRejection
-  /** The action that lost this code, when one did. For the "reassigned" notice. */
+  /**
+   * The action that lost this code, when one did. For the "reassigned" notice.
+   *
+   * The FIRST loser in canonical order. More than one is possible only from the
+   * duplicate state `restoreAction` can create, and the assignment that produces this
+   * result is also what clears it, so the notice names an action rather than a list —
+   * one sentence a player can act on beats an exhaustive one they will not read.
+   */
   evictedFrom?: SortieAction
   /** The code pushed out because the action was already at the cap. */
   evictedCode?: string
@@ -82,12 +89,31 @@ function cloneBindings(bindings: Bindings): Bindings {
   return out
 }
 
-/** Which action, if any, currently owns `code`. */
+/**
+ * EVERY action that currently owns `code`, in canonical order.
+ *
+ * Usually zero or one, and `ownerOf` is the convenience for that case — but "one
+ * owner" is not a property this module can promise. `restoreAction` deliberately
+ * lets two actions share a key rather than leave one unbound (see its comment), and
+ * `checkBindings` reports that state as `duplicated` precisely because it is
+ * reachable. The single-owner version of this function was therefore a lie exactly
+ * when the answer mattered: `assignBinding` used it to decide who loses the key, so
+ * it stripped the code from the FIRST owner, left the second holding it, and
+ * reported a clean reassignment for a key that now fired two actions.
+ */
+export function ownersOf(bindings: Bindings, code: string): readonly SortieAction[] {
+  return SORTIE_ACTIONS.filter((action) => bindings[action].includes(code))
+}
+
+/**
+ * The first action that owns `code`, or null.
+ *
+ * For copy that names one action. Anything that *changes* bindings must use
+ * `ownersOf`, because acting on one of two owners is how a duplicate survives an
+ * operation whose whole job was to resolve it.
+ */
 export function ownerOf(bindings: Bindings, code: string): SortieAction | null {
-  for (const action of SORTIE_ACTIONS) {
-    if (bindings[action].includes(code)) return action
-  }
-  return null
+  return ownersOf(bindings, code)[0] ?? null
 }
 
 export function isReservedCode(code: string): boolean {
@@ -104,29 +130,34 @@ export function assignBinding(bindings: Bindings, action: SortieAction, code: st
   if (!isSortieAction(action)) return { bindings, ok: false, rejection: 'reserved' }
   if (isReservedCode(code)) return { bindings, ok: false, rejection: 'reserved' }
 
-  const owner = ownerOf(bindings, code)
-  // Already bound here: a no-op success, so tapping the key you already use reads
-  // as "yes, that one" rather than as an error.
-  if (owner === action) return { bindings, ok: true }
+  // Every other owner, because there can be more than one. See `ownersOf`.
+  const losers = ownersOf(bindings, code).filter((owner) => owner !== action)
 
-  if (owner !== null && bindings[owner].length <= 1) {
+  // Already bound here and nowhere else: a no-op success, so tapping the key you
+  // already use reads as "yes, that one" rather than as an error.
+  if (losers.length === 0 && bindings[action].includes(code)) return { bindings, ok: true }
+
+  // Refused if ANY loser would be emptied, not just the first one found. Checking one
+  // of two owners is how the conflict rule's single exception gets skipped.
+  if (losers.some((owner) => bindings[owner].length <= 1)) {
     return { bindings, ok: false, rejection: 'would-unbind' }
   }
 
   const next = cloneBindings(bindings) as Record<SortieAction, string[]>
-  if (owner !== null) next[owner] = next[owner].filter((c) => c !== code)
+  for (const owner of losers) next[owner] = next[owner].filter((c) => c !== code)
 
-  const list = [...next[action], code]
+  const list = next[action].includes(code) ? [...next[action]] : [...next[action], code]
   // Oldest out rather than refusing at the cap: a player adding a fifth key has
   // clearly decided the first one is not the one they want, and a refusal here
   // would look like the screen had stopped responding.
   const evictedCode = list.length > MAX_CODES_PER_ACTION ? list[0] : undefined
   next[action] = list.slice(Math.max(0, list.length - MAX_CODES_PER_ACTION))
 
+  const evictedFrom = losers[0]
   return {
     bindings: next,
     ok: true,
-    ...(owner !== null ? { evictedFrom: owner } : {}),
+    ...(evictedFrom !== undefined ? { evictedFrom } : {}),
     ...(evictedCode !== undefined ? { evictedCode } : {}),
   }
 }
@@ -145,19 +176,20 @@ export function assignBinding(bindings: Bindings, action: SortieAction, code: st
 export function replaceBinding(bindings: Bindings, action: SortieAction, code: string): BindResult {
   if (isReservedCode(code)) return { bindings, ok: false, rejection: 'reserved' }
 
-  const owner = ownerOf(bindings, code)
-  if (owner !== null && owner !== action && bindings[owner].length <= 1) {
+  const losers = ownersOf(bindings, code).filter((owner) => owner !== action)
+  if (losers.some((owner) => bindings[owner].length <= 1)) {
     return { bindings, ok: false, rejection: 'would-unbind' }
   }
 
   const next = cloneBindings(bindings) as Record<SortieAction, string[]>
-  if (owner !== null && owner !== action) next[owner] = next[owner].filter((c) => c !== code)
+  for (const owner of losers) next[owner] = next[owner].filter((c) => c !== code)
   next[action] = [code]
 
+  const evictedFrom = losers[0]
   return {
     bindings: next,
     ok: true,
-    ...(owner !== null && owner !== action ? { evictedFrom: owner } : {}),
+    ...(evictedFrom !== undefined ? { evictedFrom } : {}),
   }
 }
 
@@ -183,6 +215,10 @@ export function restoreAction(bindings: Bindings, action: SortieAction): Binding
   // Anything the default reclaims is removed elsewhere, but never to zero: an
   // action that would be emptied keeps its keys and simply shares them, because a
   // duplicate is recoverable and an unbound action is what this file exists to stop.
+  //
+  // This is the ONLY producer of a shared code, which is why `ownersOf` exists and
+  // why `checkBindings` reports `duplicated`: the state is visible to the player, and
+  // the next `assignBinding` or `replaceBinding` touching that code clears it.
   for (const other of SORTIE_ACTIONS) {
     if (other === action) continue
     const trimmed = next[other].filter((c) => !next[action].includes(c))

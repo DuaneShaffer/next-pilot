@@ -24,13 +24,17 @@
  *    integrate. Stop moving the thumb and the ship stops within half a tick's
  *    travel of where the mapping said, every time.
  *
- * 2. **Auto-fire is contextual, and it must stay that way.** A shmup trigger is
- *    held permanently, so touch fires by itself — but `updateCursor` in
- *    `src/sim/progression.ts` confirms a reward card from a *held* trigger after
- *    `HELD_CONFIRM_DWELL_TICKS`. Assert fire unconditionally and every card on
- *    mobile auto-takes option 0 after 0.8 seconds, forever. That is why `context`
- *    exists and why `'sortie'` is the only value that fires. See docs/MOBILE.md;
- *    this is the single most important thing in this module.
+ * 2. **Auto-fire is contextual.** A shmup trigger is held permanently, so touch fires
+ *    by itself, and `'sortie'` is the only context that does.
+ *
+ *    THIS USED TO BE THE MOST DANGEROUS LINE IN THE MODULE and it no longer is.
+ *    `updateCursor` confirmed a card from a *held trigger* after 48 ticks, so
+ *    unconditional auto-fire took option 0 of every card on mobile, 0.8 seconds in,
+ *    forever — a whole platform's pick rates decided by the input layer. Accepting is
+ *    its own action now (`InputSnapshot.confirm`, reached here only by an explicit
+ *    tap), so the hazard is gone at the source rather than mitigated here. The context
+ *    stays because a card is not a sortie: nothing should be shooting on one, and it is
+ *    also what stops a drag from steering the ship behind a card. See docs/MOBILE.md.
  */
 
 import { NEUTRAL_INPUT, type Axis, type InputSnapshot } from './input'
@@ -363,7 +367,9 @@ export class TouchControls {
       this.script.push({ ...NEUTRAL_INPUT, moveX: direction })
     }
     this.script.push(NEUTRAL_INPUT)
-    this.script.push({ ...NEUTRAL_INPUT, fire: true })
+    // CONFIRM, not fire. A tap accepts through the same action a keyboard's Enter does;
+    // the trigger is not an accept key on any input device. See InputSnapshot.confirm.
+    this.script.push({ ...NEUTRAL_INPUT, confirm: true })
     this.script.push(NEUTRAL_INPUT)
   }
 
@@ -383,8 +389,10 @@ export class TouchControls {
     const scripted = this.script.shift()
     if (scripted) return scripted
 
-    // Nothing but a sortie fires. This one line is what stops every reward card on
-    // mobile from auto-confirming option 0 after HELD_CONFIRM_DWELL_TICKS.
+    // Nothing but a sortie fires. This used to be load-bearing for a much bigger
+    // reason — a held trigger confirmed cards, so unconditional auto-fire took option 0
+    // on every card 48 ticks in — and `confirm` being its own action has dissolved that
+    // entirely. Kept because a card is not a sortie and should not be shooting.
     if (this.ctx !== 'sortie') return NEUTRAL_INPUT
 
     const focus = this.focusHeld()
@@ -412,6 +420,8 @@ export class TouchControls {
       fire: this.options.autoFire,
       special: false,
       focus,
+      // Only ever asserted by a scripted tap above: there is no auto-confirm.
+      confirm: false,
     }
   }
 }

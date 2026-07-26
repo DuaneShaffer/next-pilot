@@ -42,13 +42,22 @@ const DRIFTING_NO_FIRE: InputSnapshot = {
   fire: false,
   special: false,
   focus: false,
+  confirm: false,
 }
 
-const FIRING: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
-const SPECIAL: InputSnapshot = { moveX: 0, moveY: 0, fire: false, special: true, focus: false }
-const RIGHT: InputSnapshot = { moveX: 1, moveY: 0, fire: false, special: false, focus: false }
+const FIRING: InputSnapshot = { ...NEUTRAL_INPUT, fire: true }
+/**
+ * The accept press. A card reads `confirm`, never `fire`.
+ *
+ * "The selection screens must not use the fire key to accept responses" — so a test that
+ * drives a card by firing at it drives nothing at all, and with no choice timeout in the
+ * sim the run parks on that card until the test's tick cap.
+ */
+const CONFIRM: InputSnapshot = { ...NEUTRAL_INPUT, confirm: true }
+const SPECIAL: InputSnapshot = { ...NEUTRAL_INPUT, special: true }
+const RIGHT: InputSnapshot = { ...NEUTRAL_INPUT, moveX: 1 }
 /** Asks for movement and fire at once — for asserting that a pause refuses both. */
-const DRIFTING: InputSnapshot = { moveX: 1, moveY: -1, fire: true, special: false, focus: false }
+const DRIFTING: InputSnapshot = { ...NEUTRAL_INPUT, moveX: 1, moveY: -1, fire: true }
 
 // --- content fixtures -------------------------------------------------------
 
@@ -161,7 +170,7 @@ function skipChoice(world: World): void {
 /** Confirm whatever the cursor is on. Two ticks, for the same reason. */
 function confirmSelection(world: World): void {
   tickClear(world, IDLE)
-  tickClear(world, FIRING)
+  tickClear(world, CONFIRM)
 }
 
 /** Move the cursor onto `defId` and confirm it. */
@@ -1276,9 +1285,13 @@ describe('acquisition order', () => {
 describe('determinism with items', () => {
   /**
    * A scripted input log. A fixed function of the tick index rather than a random
-   * one, because that is exactly what a recorded replay is — and it releases the
-   * trigger every seventh tick, so a reward choice can actually be confirmed
-   * instead of sitting open until the timeout.
+   * one, because that is exactly what a recorded replay is.
+   *
+   * It pulses CONFIRM every seventh tick so a reward choice is actually accepted. It
+   * used to pulse `fire` for that, which stopped working the moment cards took their own
+   * accept action — and the failure was not subtle: no item was ever taken, the run sat
+   * on the first card for the whole 4,000 ticks, and a determinism test compared two
+   * identical stalls.
    */
   function scripted(tick: number): InputSnapshot {
     return {
@@ -1287,6 +1300,7 @@ describe('determinism with items', () => {
       fire: tick % 7 !== 0,
       special: false,
       focus: tick % 53 === 0,
+      confirm: tick % 7 === 0,
     }
   }
 

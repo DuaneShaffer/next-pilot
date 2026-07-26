@@ -279,12 +279,19 @@ export const BUILD_FOCUSED_TARGET: readonly string[] = ['split-shot', 'warheads'
  *
  * One release tick, then up to two navigation press/release pairs for a
  * three-option screen, then the confirm: 1 + 4 + 1 = 6. Asserted in
- * `tests/bots.test.ts` against a real run, because the alternative failure mode is
- * silent — the sim's `CHOICE_TIMEOUT_TICKS` backstop is 1,200 ticks (20 seconds),
- * and a policy that quietly leans on it adds twenty seconds of dead sim time per
- * choice and corrupts every survival number in the report. That is not
- * hypothetical: it happened, at 1,201 ticks a seam, for as long as `ChoiceResolver`
- * only reset on a null gap. See `ChoiceResolver.cardOpenTicks`.
+ * `tests/bots.test.ts` against a real run.
+ *
+ * IT IS NOW THE ONLY CEILING THERE IS. The sim used to auto-resolve any card after
+ * 1,200 ticks, so a policy that lost the cursor merely produced a corrupted
+ * measurement — twenty seconds of dead sim time charged to a survival number, plus a
+ * pick nobody made. That happened, at 1,201 ticks a seam, for as long as
+ * `ChoiceResolver` only reset on a null gap (R1 in docs/ROADMAP.md), and it went
+ * unreported because the harness guard compared against a stale 3,600.
+ *
+ * With the timeout gone, a card the bots fail to resolve stays open for the rest of
+ * the run. That is strictly better ONLY as long as the harness bound is real, so
+ * `tools/playtest.ts` aborts the run and fails the sweep when a card overruns this
+ * budget by an order of magnitude. See `CHOICE_STALL_ABORT_TICKS` there.
  */
 export const MAX_CHOICE_RESOLUTION_TICKS = 6
 
@@ -301,12 +308,18 @@ export type RouteStyle = 'direct' | 'rewarding' | 'item-only' | 'random'
 /**
  * What one free item is worth to a `rewarding` policy, in route-score units.
  *
- * The other rewards are scaled so the comparison is legible rather than tuned:
- * scrap is worth its face value over `ROUTE_SCRAP_UNIT`, and repair is worth the
- * integrity it would *actually* restore over `ROUTE_REPAIR_UNIT`. At the shipped
- * numbers (70-290 scrap, ~35% of maximum integrity) an item outscores a scrap
- * payout until the last seam and outscores a repair on a healthy hull always,
- * which is the ordering a player who is building a run would use.
+ * Repair is worth the integrity it would *actually* restore over `ROUTE_REPAIR_UNIT`.
+ * At the shipped 60% of maximum, an item outscores a repair until the hull has lost
+ * more than about half of itself — which is a fact about the pilot rather than about
+ * the card, and is the ordering a player building a run would use.
+ *
+ * `ROUTE_SCRAP_UNIT` scores a payout `buildRoutes` NO LONGER PRODUCES. The variant
+ * stays on `RouteReward` deliberately (see "Route rewards are priced off the panel" in
+ * docs/DESIGN.md), so the branch is kept rather than deleted — a `switch` that stopped
+ * being exhaustive would fail the build the day the variant came back, which is the
+ * wrong moment to rediscover this file. The prose here used to quote "70-290 scrap" as
+ * a shipped number and no longer does; it was that quote going stale, not the constant,
+ * that made this comment misleading.
  *
  * These are the PROBE'S STATED PREFERENCE, not a claim about which route is
  * correct. `chooseRoute` is where you change the question a sweep is asking.
@@ -496,9 +509,18 @@ function optionCountOf(choice: Readonly<PendingChoice>): number {
   return choice.offers.length
 }
 
-const PRESS_RIGHT: InputSnapshot = { moveX: 1, moveY: 0, fire: false, special: false, focus: false }
-const PRESS_FIRE: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
-const PRESS_SKIP: InputSnapshot = { moveX: 0, moveY: 0, fire: false, special: true, focus: false }
+const PRESS_RIGHT: InputSnapshot = { ...NEUTRAL_INPUT, moveX: 1 }
+/**
+ * The accept press. `confirm`, NEVER `fire`.
+ *
+ * A policy that pressed fire at a card would resolve nothing at all — cards stopped
+ * reading the trigger when accepting became its own action — and with no timeout in the
+ * sim behind it, "nothing" means the run parks on that card until `tools/playtest.ts`
+ * abandons it. That is the one mistake this constant exists to make impossible to
+ * repeat by hand.
+ */
+const PRESS_CONFIRM: InputSnapshot = { ...NEUTRAL_INPUT, confirm: true }
+const PRESS_SKIP: InputSnapshot = { ...NEUTRAL_INPUT, special: true }
 
 /**
  * The exact input sequence that moves the cursor `steps` right and then acts.
@@ -515,7 +537,7 @@ function scriptFor(steps: number, confirm: boolean): InputSnapshot[] {
     out.push(PRESS_RIGHT)
     out.push(NEUTRAL_INPUT)
   }
-  out.push(confirm ? PRESS_FIRE : PRESS_SKIP)
+  out.push(confirm ? PRESS_CONFIRM : PRESS_SKIP)
   return out
 }
 
@@ -523,17 +545,16 @@ function scriptFor(steps: number, confirm: boolean): InputSnapshot[] {
  * How long the open card has been open, as the sim counts it, or null if it will
  * not say.
  *
- * `ChoiceCursor.openTicks` is not on `WorldView`, but `choiceResolve` is a
- * countdown derived from it, so the elapsed half is recoverable: a card resets its
- * cursor when it opens, which resets this to 0 and makes it the one observable
- * signal that says "this is a DIFFERENT card from the one you were scripting".
+ * A card resets its cursor when it opens, which resets this to 0 and makes it the one
+ * observable signal that says "this is a DIFFERENT card from the one you were
+ * scripting".
  *
- * Both branches of the `World.choiceResolve` getter are counting the same
- * `openTicks` — the dwell while the trigger has not been released, the timeout once
- * it has — so the difference is correct across the switch between them, which
- * happens on the second tick of every card a bot resolves.
+ * It used to be recovered by arithmetic — `totalTicks - ticksRemaining` off a
+ * countdown whose denominator changed when the trigger was released, on the second
+ * tick of every card a bot resolves. `WorldView` now reports the sim's counter
+ * directly, so there is nothing left to get wrong here.
  *
- * Null for a fabricated view that carries a card without a countdown (the test
+ * Null for a fabricated view that carries a card with no `choiceResolve` (the test
  * fixtures do this deliberately). A static fixture cannot chain, so the fallback is
  * simply "the card I already have".
  *
@@ -544,9 +565,7 @@ function scriptFor(steps: number, confirm: boolean): InputSnapshot[] {
  * 1,200-tick stalls above stayed out of every report.
  */
 export function choiceOpenTicks(view: WorldView): number | null {
-  const resolve = view.choiceResolve
-  if (resolve === null) return null
-  return resolve.totalTicks - resolve.ticksRemaining
+  return view.choiceResolve?.openTicks ?? null
 }
 
 /**
@@ -569,8 +588,10 @@ export function choiceOpenTicks(view: WorldView): number | null {
  * nothing and repeats the previous card's action, so `chooseOffer` was never
  * consulted at a seam and the pick was whatever index 0 happened to be. When index 0
  * was unaffordable the world refused it, the branch re-confirmed, and the card sat
- * there for the full 1,200-tick timeout: measured at 7-9 stalls per 100 five-sector
- * runs before the fix, ~8,400 dead ticks per 100 runs.
+ * there for the full 1,200-tick timeout the sim used to have: measured at 7-9 stalls
+ * per 100 five-sector runs before the fix, ~8,400 dead ticks per 100 runs. That
+ * timeout is gone, so the same bug today hangs the card for the rest of the run and
+ * `tools/playtest.ts` aborts the sweep over it. Loudly, which is the point.
  *
  * So the reset condition is the sim's own per-card tick counter going backwards.
  * That is exact rather than heuristic — the sim builds a fresh `ChoiceCursor` for
@@ -596,7 +617,7 @@ class ChoiceResolver {
    * it, which the sim would refuse anyway and which reads in a log as a bot that
    * cannot tell what it can afford.
    */
-  private action: InputSnapshot = PRESS_FIRE
+  private action: InputSnapshot = PRESS_CONFIRM
 
   /** The input for this tick, or null when no choice is open. */
   next(view: WorldView, select: (choice: Readonly<PendingChoice>) => number | null): InputSnapshot | null {
@@ -628,25 +649,28 @@ class ChoiceResolver {
       const count = optionCountOf(choice)
       if (count === 0) {
         // Zero options cannot be confirmed at all — the sim requires
-        // `optionCount > 0` — so the only exit is a skip. Without this branch the
-        // run sits on an empty screen until the 20-second timeout fires.
+        // `optionCount > 0` — so the only exit is a skip. Without this branch the run
+        // sits on an empty screen for good: nothing in the sim resolves a card by itself,
+        // and `tools/playtest.ts` would abandon the run over it.
         this.queue = scriptFor(0, false)
         this.action = PRESS_SKIP
       } else {
         const target = select(choice)
         const confirm = target !== null
         this.queue = scriptFor(confirm ? ((target % count) + count) % count : 0, confirm)
-        this.action = confirm ? PRESS_FIRE : PRESS_SKIP
+        this.action = confirm ? PRESS_CONFIRM : PRESS_SKIP
       }
     }
 
     const next = this.queue.shift()
     if (next !== undefined) return next
 
-    // The script ran out with the choice still open, so an input this class
-    // expected to land did not. Repeat the decision rather than waiting out the
-    // sim's 20-second backstop: acting on the wrong cursor position is one skewed
-    // row in a pick table, and a timeout skews every survival number in the sweep.
+    // The script ran out with the choice still open, so an input this class expected
+    // to land did not. Repeat the decision: acting on the wrong cursor position costs
+    // one skewed row in a pick table, and doing nothing costs the whole run — nothing
+    // else will ever resolve this card. Two ticks per attempt (neutral, then the
+    // action) and `tools/playtest.ts` aborts the run if the attempts stop working, so
+    // this cannot become the silent 1,200-tick stall it replaced.
     this.queue = [this.action]
     return NEUTRAL_INPUT
   }
@@ -742,6 +766,7 @@ function dodgerPolicy(seed: string, routeStyle: RouteStyle): BotPolicy {
         fire: false,
         special: false,
         focus: false,
+        confirm: false,
       }
     }
     return {
@@ -750,6 +775,7 @@ function dodgerPolicy(seed: string, routeStyle: RouteStyle): BotPolicy {
       fire: true,
       special: false,
       focus: false,
+      confirm: false,
     }
   }
 }
@@ -780,6 +806,7 @@ function aggressorPolicy(seed: string, routeStyle: RouteStyle): BotPolicy {
       fire: true,
       special: false,
       focus: false,
+      confirm: false,
     }
   }
 }
@@ -815,6 +842,7 @@ function greedyPolicy(seed: string, routeStyle: RouteStyle): BotPolicy {
       fire: true,
       special: false,
       focus: false,
+      confirm: false,
     }
   }
 }
@@ -859,6 +887,9 @@ function randomPolicy(seed: string, routeStyle: RouteStyle): BotPolicy {
         fire: rng.chance(0.6),
         special: rng.chance(0.05),
         focus: rng.chance(0.12),
+        // NEVER randomly confirmed. A card is resolved by `ChoiceResolver` above, and a
+        // stray accept press would resolve one out from under its script.
+        confirm: false,
       }
       ticksHeld = rng.intBetween(4, 24)
     }
@@ -906,6 +937,7 @@ function buildFocusedPolicy(
         fire: true,
         special: false,
         focus: false,
+        confirm: false,
       }
     }
     const enemy = nearestEnemy(view)
@@ -916,6 +948,7 @@ function buildFocusedPolicy(
       fire: true,
       special: false,
       focus: false,
+      confirm: false,
     }
   }
 }

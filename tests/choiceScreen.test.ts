@@ -13,12 +13,16 @@
 import { describe, expect, it } from 'vitest'
 import { INTERACTIONS } from '../src/content/interactions'
 import { ITEMS } from '../src/content/items'
-import type { ItemDef } from '../src/content/types'
+import type { ItemDef, StatModifier } from '../src/content/types'
 import type { ActiveInteraction, HeldItem, ItemOffer, PendingChoiceKind } from '../src/sim/entities'
+import { Palette } from '../src/render/palette'
+import { resolveAllStats } from '../src/sim/stats'
 import {
   CHIP_SEP,
   MONO_ADVANCE,
   OPTION_TEXT_W,
+  STAT_ROW_LABEL,
+  STAT_ROW_SEP,
   WORK_ORDERS,
   clampSelection,
   isAffordable,
@@ -30,8 +34,10 @@ import {
   wrapText,
   type ChoiceLayoutInput,
   type ChoiceScreenLayout,
+  type OptionLayout,
   type TextLine,
 } from '../src/ui/choiceScreen'
+import { NO_CHANGE_TEXT, collectBuildModifiers } from '../src/ui/statDelta'
 
 const ITEM_IDS = Object.keys(ITEMS)
 
@@ -808,6 +814,325 @@ describe('no NaN for any plausible input', () => {
     for (const option of result.options) {
       expect(option.cost).toBeGreaterThanOrEqual(0)
       expect(option.shortfall).toBeGreaterThanOrEqual(0)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// the resolved stat block
+// ---------------------------------------------------------------------------
+
+/**
+ * The defect: an offer's card stated its authored prose and nothing else, so it
+ * described the ITEM rather than what taking it does to THIS ship. `+22 max shield` is
+ * +22 on a stock hull and +0 on one holding Exposed Core; `+45% damage` is +1.8 or
+ * +14 depending entirely on what is already fitted.
+ *
+ * `tests/statDelta.test.ts` pins the arithmetic. What these assert is that the numbers
+ * reach the card: drawn, positioned above the prose, inside the box, and different
+ * when the build is different.
+ */
+
+/** Modifiers a build implies, the way the app layer supplies them. */
+function build(
+  hullId: string | undefined,
+  ...entries: readonly (string | readonly [string, number])[]
+): readonly StatModifier[] {
+  const heldItems = entries.map((entry, index) => {
+    const [defId, count] = typeof entry === 'string' ? [entry, 1] : entry
+    return { defId, acquiredAtTick: index * 60, count }
+  })
+  return [
+    ...collectBuildModifiers({
+      ...(hullId === undefined ? {} : { hullId }),
+      held: heldItems,
+      items: ITEMS,
+      activeInteractions: [],
+    }),
+  ]
+}
+
+/** Every string drawn inside one option, in draw order. */
+function texts(option: OptionLayout | undefined): readonly string[] {
+  return option?.lines.map((line) => line.text) ?? []
+}
+
+const STAT_ITEM_IDS = ITEM_IDS.filter((id) => (ITEMS[id]?.stats?.length ?? 0) > 0)
+
+describe('resolved stat detail (UI rule 4, dynamically)', () => {
+  it('shows a resolved row for every offered item that moves a stat', () => {
+    for (const ids of everyTriple()) {
+      const result = layout({ offers: ids.map((id) => offer(id)) })
+      result.options.forEach((option, index) => {
+        const def = ITEMS[ids[index] as string] as ItemDef
+        const stats = def.stats ?? []
+        expect(option.statRows.map((row) => row.stat).sort()).toEqual(
+          [...new Set(stats.map((modifier) => modifier.stat))].sort(),
+        )
+        // Modelled AND drawn: a row nobody paints is not information.
+        for (const row of option.statRows) expect(texts(option)).toContain(row.text)
+      })
+    }
+    expect(STAT_ITEM_IDS.length).toBeGreaterThan(20)
+  })
+
+  it('puts the resolved numbers above the authored sentence', () => {
+    // The sentence quotes the item; the rows quote the ship. The rows are read first
+    // because they are the ones that are true of this run.
+    const result = layout({ offers: [offer('warheads')] })
+    const option = result.options[0]
+    const rowY = option?.lines.find((line) => line.text === option?.statRows[0]?.text)?.y
+    const proseY = option?.lines.find((line) => line.text === option?.mechanismLines[0])?.y
+    expect(rowY).toBeDefined()
+    expect(proseY).toBeDefined()
+    expect(rowY!).toBeLessThan(proseY!)
+    // And still under the name, not above it.
+    const nameY = option?.lines.find((line) => line.text === option?.name)?.y
+    expect(nameY!).toBeLessThan(rowY!)
+  })
+
+  it('names whose numbers these are', () => {
+    // Without the label the card shows two different figures for the same stat — the
+    // item's "4 to 5.8" and this run's "8.1 → 11.7" — with nothing saying which is which.
+    for (const id of STAT_ITEM_IDS) {
+      const result = layout({ offers: [offer(id)] })
+      expect(texts(result.options[0]), id).toContain(STAT_ROW_LABEL)
+    }
+    // An item with no stats gets no label, because it has no rows to introduce.
+    expect(texts(layout({ offers: [offer('retaliation-coil')] }).options[0])).not.toContain(
+      STAT_ROW_LABEL,
+    )
+  })
+
+  it('lines two rows up under each other, so they read as a table', () => {
+    // The first row shares the label's line, so the naive placement starts it further
+    // right than the second and the block reads as a table plus a stray sentence.
+    const option = layout({ offers: [offer('hazard-pay-clause')] }).options[0]
+    expect(option?.statRows).toHaveLength(2)
+    const xs = (option?.lines ?? [])
+      .filter((line) => (option?.statRows ?? []).some((row) => row.text === line.text))
+      .map((line) => line.x)
+    expect(xs).toHaveLength(2)
+    expect(new Set(xs).size).toBe(1)
+    // And indented past the label rather than under it.
+    const label = option?.lines.find((line) => line.text === STAT_ROW_LABEL)
+    expect(xs[0]!).toBeGreaterThan(label!.x + label!.width)
+  })
+
+  it('reads the same offer differently on two different builds', () => {
+    // THE WHOLE POINT. Machined Slugs is +1 damage; on a build holding Exposed Core
+    // (damage mul 1.35) and two slugs already, taking a third is (4 + 3) × 1.35 = 9.45
+    // from 8.1. The static prose says "from 4 to 5".
+    const stock = layout({ offers: [offer('machined-slugs')] })
+    const loaded = layout({
+      offers: [offer('machined-slugs')],
+      currentModifiers: build(undefined, 'exposed-core', ['machined-slugs', 2]),
+    })
+    expect(texts(stock.options[0])).toContain('Shot damage  4 → 5 dmg')
+    // 9.5, not the 9.1 that adding the modifier to the resolved value would print.
+    expect(texts(loaded.options[0])).toContain('Shot damage  8.1 → 9.5 dmg')
+    expect(texts(loaded.options[0])).toContain(' (+1.4)')
+    expect(ITEMS['machined-slugs']?.mechanism).toContain('from 4 to 5')
+  })
+
+  it('says a pick is worth nothing when the build has made it worthless', () => {
+    // Exposed Core sets maxShield to mul 0, so Shield Cell's +22 resolves to nothing.
+    // The card could not say this before, and it is the most useful thing it can say.
+    const result = layout({
+      offers: [offer('shield-cell')],
+      currentModifiers: build(undefined, 'exposed-core'),
+    })
+    const option = result.options[0]
+    expect(option?.statRows[0]?.direction).toBe('none')
+    expect(texts(option)).toContain('Max shield  0 → 0 hp')
+    expect(texts(option)).toContain(` ${NO_CHANGE_TEXT}`)
+    // The prose stays: rule 4 does not let the card drop the sentence, and the label
+    // above is what stops the two being read as one claim.
+    expect(option?.mechanismLines.join(' ')).toContain('+22 max shield')
+  })
+
+  it('says when a number rises but cannot matter on this build', () => {
+    // The Collateral's -40 cancels the base 40 max shield exactly, so a shield-recovery
+    // item is worth nothing on it. The rate genuinely rises — 4 to 6 — which is why the
+    // generic before → after cannot catch this and the row states the reason instead.
+    //
+    // A synthetic def, because which roster item carries a recovery stat is still moving
+    // and this is a test of the card rather than of this week's items.ts.
+    const items: Record<string, ItemDef> = {
+      shunt: {
+        id: 'shunt',
+        name: 'Recharge Shunt',
+        tier: 'common',
+        tags: ['defence'],
+        mechanism: 'Shield recovers 50% faster, from 4 to 6 per second.',
+        stats: [{ stat: 'shieldRegenPerSecond', kind: 'mul', value: 1.5 }],
+      },
+    }
+    const result = layout({
+      items,
+      offers: [offer('shunt')],
+      currentModifiers: build('collateral'),
+    })
+    const shunt = result.options[0]
+    expect(shunt?.statRows[0]?.direction).toBe('inert')
+    expect(texts(shunt)).toContain('Shield regen  4 → 6 hp/s')
+    expect(texts(shunt)).toContain(' (no effect: max shield 0)')
+    const note = shunt?.lines.find((line) => line.text === ' (no effect: max shield 0)')
+    expect(note?.color).toBe(Palette.caution)
+    // On a hull with a shield the same offer reads as a gain.
+    expect(
+      layout({ items, offers: [offer('shunt')] }).options[0]?.statRows[0]?.direction,
+    ).toBe('better')
+  })
+
+  it('folds the hull the run was issued into the before value', () => {
+    // Probate resolves max integrity to 100 × 0.64 = 64, and Plating Shim's +18 lands
+    // as (100 + 18) × 0.64 = 75.5. A card ignoring the hull would say 100 → 118.
+    const result = layout({
+      offers: [offer('plating-shim')],
+      currentModifiers: build('probate'),
+    })
+    expect(texts(result.options[0])).toContain('Max integrity  64 → 75.5 hp')
+    expect(texts(result.options[0])).toContain(' (+11.5)')
+  })
+
+  it('shows fire rate in shots per second, signed the right way round', () => {
+    const result = layout({ offers: [offer('feed-relay')] })
+    const option = result.options[0]
+    expect(texts(option)).toContain('Fire rate  20 → 30 shots/s')
+    expect(option?.statRows[0]?.direction).toBe('better')
+    for (const text of texts(option)) expect(text).not.toMatch(/\btick/)
+  })
+
+  it('drops a row rather than contradicting the instrument panel', () => {
+    const modifiers = build('surety')
+    const agreeing = layout({
+      offers: [offer('shield-cell')],
+      currentModifiers: modifiers,
+      resolvedStats: resolveAllStats(modifiers),
+    })
+    expect(texts(agreeing.options[0])).toContain('Max shield  110 → 132 hp')
+
+    const disagreeing = layout({
+      offers: [offer('shield-cell')],
+      currentModifiers: modifiers,
+      // What a hull the screen does not know about would look like.
+      resolvedStats: { ...resolveAllStats(modifiers), maxShield: 512 },
+    })
+    expect(disagreeing.options[0]?.statRows).toHaveLength(0)
+    expect(texts(disagreeing.options[0])).not.toContain(STAT_ROW_LABEL)
+    // The card is still a card: the sentence and the name are untouched.
+    expect(disagreeing.options[0]?.mechanismLines.length).toBeGreaterThan(0)
+  })
+
+  it('colours a gain and a cost differently, and never uses danger', () => {
+    const result = layout({
+      offers: [offer('warheads'), offer('shield-cell')],
+      currentModifiers: build(undefined, 'exposed-core'),
+    })
+    const warheads = result.options[0]
+    // Exposed Core is damage mul 1.35, so 4 × 1.35 = 5.4 and Warheads takes it to
+    // 5.4 × 1.45 = 7.83. Speed is untouched by the curse: 620 × 0.85 = 527.
+    expect(warheads?.statRows.map((row) => row.text)).toEqual([
+      'Shot damage  5.4 → 7.8 dmg',
+      'Shot speed  620 → 527 u/s',
+    ])
+    const damage = warheads?.lines.find((line) => line.text === ' (+2.4)')
+    const speed = warheads?.lines.find((line) => line.text === ' (-93)')
+    expect(damage?.color).toBe(Palette.good)
+    expect(speed?.color).toBe(Palette.caution)
+    // A pick worth nothing is a caution, not a gain — and it says so in words too.
+    const dead = result.options[1]?.lines.find((line) => line.text === ` ${NO_CHANGE_TEXT}`)
+    expect(dead?.color).toBe(Palette.caution)
+    for (const line of allLines(result)) expect(line.color).not.toBe('#FF4A38')
+  })
+
+  it('keeps every row inside its option box, for every item and several builds', () => {
+    // Rows are drawn with a single call and cannot wrap, so a wide one would simply
+    // leave the card. The label shares the first row's line, which is why the check is
+    // against the drawn lines rather than against the row strings.
+    const builds: readonly (readonly StatModifier[])[] = [
+      build(undefined),
+      build('probate', 'repair-nanites'),
+      build('collateral', ['feed-relay', 3], ['machined-slugs', 2]),
+      build('surety', 'exposed-core', 'warheads', ['scrap-magnet', 2]),
+    ]
+    for (const modifiers of builds) {
+      for (const ids of everyTriple()) {
+        const result = layout({ offers: ids.map((id) => offer(id)), currentModifiers: modifiers })
+        expect(result.overflow).toBe(false)
+        for (const option of result.options) {
+          for (const line of option.lines) {
+            const bounds = lineBounds(line)
+            expect(bounds.left).toBeGreaterThanOrEqual(option.box.x)
+            expect(bounds.right, `"${line.text}" leaves the box`).toBeLessThanOrEqual(
+              option.box.x + option.box.w,
+            )
+            expect(line.y + line.size).toBeLessThanOrEqual(option.box.y + option.box.h)
+          }
+          // The label is inline for all real content; the fallback that drops it exists
+          // only for a future stat with a wider range.
+          if (option.statRows.length > 0) expect(texts(option)).toContain(STAT_ROW_LABEL)
+        }
+      }
+    }
+  })
+
+  it('collapses the rows onto one line instead of dropping them when space runs out', () => {
+    // The tightest the content can get: three long mechanisms, each carrying the
+    // longest interaction sentence, and two of the three items moving two stats. Rule 4
+    // lets flavour go and nothing else, so the rows give up their parentheticals —
+    // recomputable from the two numbers — rather than the numbers themselves.
+    const longest = [...INTERACTIONS].sort((a, b) => b.text.length - a.text.length)
+    const result = layout({
+      kind: 'shop',
+      offers: [
+        offer('cursed-hull', [longest[0]?.text ?? '']),
+        offer('retaliation-coil', [longest[1]?.text ?? '']),
+        offer('warheads', [longest[2]?.text ?? '']),
+      ],
+      costs: [384, 192, 288],
+      scrap: 200,
+    })
+    expect(result.degrade).toBe(3)
+    expect(result.overflow).toBe(false)
+    const cursed = result.options[0]
+    expect(cursed?.statCompact).toBe(true)
+    expect(cursed?.statRows).toHaveLength(2)
+    // Both stats are still on the card, and on one line.
+    const joined = texts(cursed).join('')
+    for (const row of cursed?.statRows ?? []) expect(joined).toContain(row.text)
+    expect(joined).toContain(STAT_ROW_SEP)
+    const rowLines = (cursed?.lines ?? []).filter((line) =>
+      (cursed?.statRows ?? []).some((row) => row.text === line.text),
+    )
+    expect(new Set(rowLines.map((line) => line.y)).size).toBe(1)
+    // An item with a single row has nothing to collapse.
+    expect(result.options[2]?.statRows.length).toBe(2)
+  })
+
+  it('gives a work order no rows and no label', () => {
+    const result = layout({ kind: 'work-order', offers: [], workOrders: ['supply', 'hazard'] })
+    for (const option of result.options) {
+      expect(option.statRows).toHaveLength(0)
+      expect(texts(option)).not.toContain(STAT_ROW_LABEL)
+    }
+  })
+
+  it('survives a build described by nonsense', () => {
+    const result = layout({
+      offers: [offer('warheads'), offer('shield-cell')],
+      currentModifiers: [
+        { stat: 'projectileDamage', kind: 'mul', value: Number.NaN },
+        { stat: 'maxShield', kind: 'add', value: Infinity },
+      ],
+    })
+    for (const option of result.options) {
+      for (const line of option.lines) expect(line.text).not.toMatch(/NaN|undefined/)
+      for (const row of option.statRows) {
+        expect(Number.isFinite(row.before)).toBe(true)
+        expect(Number.isFinite(row.after)).toBe(true)
+      }
     }
   })
 })

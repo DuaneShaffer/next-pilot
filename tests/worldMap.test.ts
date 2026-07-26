@@ -26,6 +26,9 @@ import {
   type Rect,
   type TextLine,
 } from '../src/ui/choiceScreen'
+import { Rng } from '../src/core/rng'
+import { HAZARDS } from '../src/content/hazards'
+import { buildRoutes } from '../src/sim/progression'
 import {
   HAZARD_TEXT_W,
   MAP_CARD,
@@ -39,6 +42,9 @@ import {
   ROUTE_PANE_TEXT_W,
   ROUTE_REWARD_KINDS,
   ROUTE_ROW_TEXT_W,
+  SHARED_HAZARD_LABEL,
+  SHARED_HAZARD_TAIL,
+  SUB_SIZE,
   UNNAMED_ROUTE_TEXT,
   drawWorldMap,
   hazardTag,
@@ -144,6 +150,9 @@ function allLines(result: WorldMapLayout): readonly TextLine[] {
   return [
     ...result.header,
     ...result.track.lines,
+    // Included so the containment, palette and legibility sweeps cover the shared-price
+    // banner too. A line nobody sweeps is a line that escapes the card unnoticed.
+    ...(result.sharedHazard?.lines ?? []),
     ...result.rows.flatMap((row) => row.lines),
     ...result.detail.lines,
     ...result.footer,
@@ -513,11 +522,21 @@ describe('the selection comes from the view, not from the screen', () => {
     expect(layout({ selected: Number.NaN }).selected).toBe(0)
   })
 
-  it('reads awaitingRelease from the input and says so on screen', () => {
+  it('always states what declining does, in one unconditional line', () => {
+    /*
+     * This used to be "reads awaitingRelease from the input and says so on screen", and
+     * it asserted a SECOND footer line shown while the fire trigger was held: "Release
+     * fire to choose". That line existed because confirming needed a rising `fire` edge
+     * and the trigger is always held in a shmup, so the card ignored the button the
+     * player was pressing. Confirm is its own key now, so the state cannot arise — the
+     * hint, the dwell that rescued it and the timeout behind that are all gone.
+     *
+     * What is left is the invariant worth keeping: the footer tells the player what
+     * declining costs, on every card, with no condition attached. A conditional line is
+     * how the old copy came to describe a mechanism that no longer existed.
+     */
     expect(textOf(layout().footer)).toContain(collapse(MAP_STRINGS.hint))
-    expect(textOf(layout({ awaitingRelease: true }).footer)).toContain(
-      collapse(MAP_STRINGS.hintAwaiting),
-    )
+    expect(textOf(layout({ selected: 1 }).footer)).toContain(collapse(MAP_STRINGS.hint))
   })
 })
 
@@ -910,6 +929,231 @@ describe('the draw path', () => {
     const { ctx, calls } = stubContext()
     drawWorldMap(ctx, { pendingChoice: null } as unknown as WorldView, { selected: 0, tick: 0 })
     expect(calls).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// one price, stated once
+// ---------------------------------------------------------------------------
+
+/**
+ * Finding #33: the two priced routes into a one-hazard sector carry the SAME hazard,
+ * and the rows used to print it twice. Three of the four seams in the shipped run are
+ * that case, so this is the card most players see, and "two options listing an
+ * identical cost" was reported as a rendering fault. It was not one — the choice really
+ * is purely the reward — so the fix is for the card to say so.
+ *
+ * These tests are driven through the real `buildRoutes` and the real `HAZARDS` table,
+ * not fixtures, because the thing being asserted is a property of what the simulation
+ * actually hands this screen.
+ */
+describe('a price shared by every detour is stated once, not once per row', () => {
+  const singleHazard = HAZARDS['spore-bloom']
+  const secondHazard = HAZARDS['hold-rot']
+
+  function realRoutes(pool: readonly (typeof singleHazard)[], seed = 'SHAREDPRICE1'): readonly RouteOption[] {
+    const defs = pool.filter((def): def is NonNullable<typeof def> => def !== undefined)
+    return buildRoutes(Rng.fromSeed(seed, 'route'), 2, 'Bloomfield', null, defs, 100)
+  }
+
+  /** The row's second line — the one that is not the bracketed hazard count. */
+  function summaryOf(row: WorldMapLayout['rows'][number]): string {
+    return collapse(
+      row.lines
+        .filter((line) => line.size === SUB_SIZE && !line.text.startsWith('['))
+        .map((line) => line.text)
+        .join(' '),
+    )
+  }
+
+  it('is given two priced routes carrying the same hazard, which is the case being fixed', () => {
+    // Guards the guard. If `buildRoutes` ever stopped duplicating the hazard, every
+    // assertion below would pass by describing a card that no longer exists.
+    const routes = realRoutes([singleHazard])
+    expect(routes).toHaveLength(3)
+    expect(routes[1]?.hazardIds).toEqual(routes[2]?.hazardIds)
+    expect(routes[1]?.name).not.toBe(routes[2]?.name)
+  })
+
+  it('hoists the shared hazard above the rows and names it', () => {
+    const routes = realRoutes([singleHazard])
+    const result = layout({ routes, selected: 0 })
+    expect(result.sharedHazard).not.toBeNull()
+    expect(result.sharedHazard?.names).toBe(singleHazard?.name)
+    const banner = textOf(result.sharedHazard?.lines ?? [])
+    expect(banner).toContain(SHARED_HAZARD_LABEL)
+    expect(banner).toContain(singleHazard?.name ?? '')
+    expect(banner).toContain(SHARED_HAZARD_TAIL)
+  })
+
+  it('never gives two rows the same second line', () => {
+    // The actual defect: two differently-named routes whose rows read identically.
+    for (const selected of [0, 1, 2]) {
+      const result = layout({ routes: realRoutes([singleHazard]), selected })
+      const summaries = result.rows.map(summaryOf)
+      expect(new Set(summaries).size, `duplicate row text: ${summaries.join(' | ')}`).toBe(
+        summaries.length,
+      )
+      // And what they differ on is the payout, verbatim from the simulation.
+      for (const row of result.rows) {
+        const route = result.rows.indexOf(row)
+        expect(summaryOf(row)).toBe(collapse(realRoutes([singleHazard])[route]?.rewardText ?? ''))
+      }
+    }
+  })
+
+  it('does not repeat the hazard name on the rows once it is hoisted', () => {
+    const result = layout({ routes: realRoutes([singleHazard]), selected: 1 })
+    const rowText = textOf(result.rows.flatMap((row) => row.lines))
+    expect(rowText).not.toContain(singleHazard?.name ?? 'Spore Bloom')
+    // Still discoverable from the row: the count tag says a hazard is accepted, and the
+    // banner and the pane both name it.
+    expect(result.rows[1]?.hazardTag).toBe('[1 hazard]')
+    expect(textOf(result.detail.lines)).toContain(singleHazard?.name ?? '')
+  })
+
+  it('keeps hazard names on the rows when the detours differ', () => {
+    // The two-hazard sector. Here the rows are telling the player something, so nothing
+    // is hoisted and the old presentation stands.
+    const routes = realRoutes([singleHazard, secondHazard], 'TWOHAZARDS12')
+    expect(routes[1]?.hazardIds).not.toEqual(routes[2]?.hazardIds)
+    const result = layout({ routes, selected: 0 })
+    expect(result.sharedHazard).toBeNull()
+    const rowText = textOf(result.rows.flatMap((row) => row.lines))
+    expect(rowText).toContain('Hazards:')
+    expect(rowText).toContain(singleHazard?.name ?? '')
+    expect(rowText).toContain(secondHazard?.name ?? '')
+  })
+
+  it('costs the card nothing it needed: no trimming, no degrading, on real content', () => {
+    for (const id of Object.keys(HAZARDS)) {
+      const def = HAZARDS[id]
+      if (def === undefined) continue
+      for (const selected of [0, 1, 2]) {
+        const result = layout({ routes: realRoutes([def], `fits-${id}`), selected })
+        expect(result.sharedHazard, `${id} lost its banner`).not.toBeNull()
+        expect(result.degrade, `${id} degraded the card`).toBe(0)
+        expect(result.trimmed, `${id} cut a hazard brief`).toBe(0)
+        expect(result.overflow, `${id} overflowed`).toBe(false)
+        for (const line of result.sharedHazard?.lines ?? []) {
+          insideX(line, MAP_CARD, 16)
+          // Not merely inside the card — UNCUT. The banner is composed at runtime from
+          // a hazard name plus authored copy, so lengthening either could silently
+          // start clipping the sentence that explains the card.
+          expect(line.text, `${id} truncated the banner`).not.toMatch(/…$/)
+        }
+      }
+    }
+  })
+
+  it('truncates the banner rather than running a long hazard name off the card', () => {
+    const monstrous = route({
+      name: 'CACHE RECOVERY',
+      hazards: [{ name: 'Z'.repeat(400), description: LONG_HAZARD }],
+      reward: { kind: 'item' },
+      rewardText: 'One item, chosen from three on arrival.',
+    })
+    const result = layout({ routes: [DIRECT, monstrous, monstrous], selected: 1 })
+    expect(result.sharedHazard).not.toBeNull()
+    const tail = result.sharedHazard?.lines[1]
+    expect(tail?.text).toMatch(/…$/)
+    for (const line of result.sharedHazard?.lines ?? []) insideX(line, MAP_CARD, 16)
+  })
+
+  it('drops the banner before it lets a hazard description be cut', () => {
+    // The banner is an explanation of the price; a hazard description IS the price. When
+    // only one can fit, the mechanism wins — the same ordering the degrade cascade uses.
+    const absurd = route({
+      hazards: hazards(4, 'z'.repeat(900)),
+      reward: { kind: 'repair', amount: 999 },
+      rewardText: 'q'.repeat(600),
+    })
+    const result = layout({ routes: [absurd, absurd, absurd], selected: 1 })
+    expect(result.sharedHazard).toBeNull()
+    // And with the banner gone the rows go back to naming the hazard themselves, so the
+    // fallback is never a card that states no price at all.
+    const roomy = route({ hazards: hazards(1), reward: { kind: 'item' }, rewardText: 'One item.' })
+    const fallback = layout({ routes: [DIRECT, roomy, roomy], selected: 1 })
+    expect(fallback.sharedHazard).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// what the simulation hands this screen
+// ---------------------------------------------------------------------------
+
+/**
+ * Finding #32: the card offered a currency, a free item and a heal, which are three
+ * different kinds of thing, and the currency was worth nothing — 100% of runs end with
+ * scrap unspent, median 3,940 held against a dearest-stock price of 272. So no route
+ * pays scrap any more. Both priced payouts are now read off the pilot's own panel: a
+ * build slot, or integrity.
+ */
+describe('route rewards are priced off the panel', () => {
+  const pool = [HAZARDS['convoy-wake']].filter((def): def is NonNullable<typeof def> => def !== undefined)
+
+  function rewardKinds(seed: string, maxIntegrity = 100): readonly RouteReward[] {
+    return buildRoutes(Rng.fromSeed(seed, 'route'), 2, 'The Tally', null, pool, maxIntegrity).map(
+      (route) => route.reward,
+    )
+  }
+
+  it('never pays scrap, on any seed', () => {
+    for (let i = 0; i < 200; i++) {
+      const kinds = rewardKinds(`SCRAPCHECK${i}`).map((reward) => reward.kind)
+      expect(kinds, `seed ${i} paid scrap`).not.toContain('scrap')
+      expect([...kinds].sort()).toEqual(['item', 'none', 'repair'])
+    }
+  })
+
+  it('offers the item on either side, so the card still has to be read', () => {
+    const firstIsItem = new Set<boolean>()
+    for (let i = 0; i < 40; i++) firstIsItem.add(rewardKinds(`SIDES${i}`)[1]?.kind === 'item')
+    expect(firstIsItem, 'the item is always in the same slot').toEqual(new Set([true, false]))
+  })
+
+  it('scales the repair with the hull it is repairing, and states the cap', () => {
+    // A flat heal is transformative on a 100-point hull and rounding error on a 200-point
+    // one. And `World.payRouteReward` clamps to maximum, so the sentence says so — a card
+    // reading "+60 hp" that pays 5 has lied to a pilot at 95 of 100.
+    for (const maxIntegrity of [100, 140, 220]) {
+      const repair = rewardKinds('REPA1RSCALE', maxIntegrity).find(
+        (reward): reward is Extract<RouteReward, { kind: 'repair' }> => reward.kind === 'repair',
+      )
+      expect(repair?.amount).toBe(Math.round(maxIntegrity * 0.6))
+      const routes = buildRoutes(
+        Rng.fromSeed('REPA1RSCALE', 'route'),
+        2,
+        'The Tally',
+        null,
+        pool,
+        maxIntegrity,
+      )
+      const text = routes.find((r) => r.reward.kind === 'repair')?.rewardText ?? ''
+      expect(text).toContain(`+${repair?.amount ?? 0} hp`)
+      expect(text).toContain('up to hull maximum')
+    }
+  })
+
+  it('is worth more than a free item once half a hull is gone, and less before that', () => {
+    // The commensurability claim, in the only terms that make it checkable: `bots.ts`
+    // prices one free item at 2.5 route-points and a repair at the integrity it would
+    // ACTUALLY restore over 20. At the old 0.35 fraction a repair topped out at 1.75 and
+    // could never be the right answer on any hull at any damage level.
+    const ITEM_SCORE = 2.5
+    const REPAIR_UNIT = 20
+    // Taken from the builder, not restated: a test that hardcodes the fraction it is
+    // checking cannot fail when the fraction changes, which is the failure mode this
+    // repo has been bitten by more than once.
+    const repair = rewardKinds('CROSSOVER1', 100).find(
+      (reward): reward is Extract<RouteReward, { kind: 'repair' }> => reward.kind === 'repair',
+    )
+    const amount = repair?.amount ?? 0
+    const scoreAt = (missing: number): number => Math.min(amount, missing) / REPAIR_UNIT
+    expect(scoreAt(20)).toBeLessThan(ITEM_SCORE)
+    expect(scoreAt(45)).toBeLessThan(ITEM_SCORE)
+    expect(scoreAt(55)).toBeGreaterThan(ITEM_SCORE)
+    expect(scoreAt(100)).toBeGreaterThan(ITEM_SCORE)
   })
 })
 

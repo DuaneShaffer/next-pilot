@@ -85,55 +85,70 @@ and lowering it makes a traverse take two thumb sweeps. It is what focus is for,
 
 ---
 
-## 2. Auto-fire, and the choice card — the most important thing here
+## 2. Auto-fire, and the choice card — RESOLVED AT THE SOURCE
 
 `docs/DESIGN.md` says auto-fire is always on, and it should be: a fire button in a shmup is pure
-tax. But "always" has to mean "always during a sortie", and the reason is a specific, reproducible
-softlock-shaped bug.
+tax. This section used to be the most important thing in this document, because "always" fought
+with the choice card and the card lost. It is now history plus one small remaining rule, and the
+history is worth keeping: it is the clearest example in the project of a constraint that looked
+like a permanent design tension and was actually a bad key binding.
 
-### What naive auto-fire does
+### What it used to do (and must never be re-created)
 
-`HELD_CONFIRM_DWELL_TICKS` in `src/sim/progression.ts` is the fix for a soft freeze a human tester
-hit: confirming a reward card needs a *rising* fire edge so the card cannot flash past someone
-already holding the trigger, which means anyone who never releases waits forever. The dwell lets a
-held trigger confirm after 48 ticks so the game never stops responding. Its docstring says "in a
-shmup the trigger is *always* held" — and on desktop that is a hazard the player can escape by
-letting go of the key.
+Accepting a card was a rising **`fire`** edge. A shmup trigger is held permanently, so:
 
-**On touch there is no key to let go of.** If the touch layer asserts `fire: true` unconditionally,
-exactly two things can happen to every reward card, shop, and work order, and both are shipped
-bugs. `tests/touch.test.ts` drives the real `updateCursor` to demonstrate each:
+1. **The player does nothing.** `HELD_CONFIRM_DWELL_TICKS` — the rescue for a keyboard player who
+   never released — fired at tick 48 and confirmed **index 0**. On touch, where there is no key to
+   let go of, that was every card, every time, **0.8 seconds** after it opened. Mobile item pick
+   rates collapsed to "whatever is leftmost", and the same seed produced a different run on a phone
+   than on a desktop: technically reproducible (a replay is an input log), quietly meaningless as a
+   comparison.
+2. **The player touches the screen.** Navigation cancelled the dwell, and a trigger that never
+   falls can never produce a rising edge — so the card could **never be confirmed**. It ran to
+   `CHOICE_TIMEOUT_TICKS` (20 seconds) and resolved as a **skip**: reward lost, game apparently
+   frozen for a minute. Strictly worse than the bug the dwell was written to fix.
 
-1. **The player does nothing.** The dwell fires at tick 48 and confirms **index 0**. Every card,
-   every time, **0.8 seconds** after it opens. Mobile item pick rates collapse to "whatever is
-   leftmost", and the same seed produces a different run on a phone than on a desktop — the
-   competitive feature set stays *technically* reproducible (a replay is an input log) while
-   quietly becoming meaningless as a comparison.
-2. **The player touches the screen.** Any cursor navigation sets `awaitingRelease = false` and
-   cancels the dwell. A trigger that never falls can never produce a rising edge, so the card can
-   now **never be confirmed** — it runs to `CHOICE_TIMEOUT_TICKS` (20 seconds) and resolves as a
-   **skip**. The reward is lost, and the game was unresponsive for a minute. This is strictly worse
-   than the bug the dwell was written to fix.
+The mitigation was contextual auto-fire: `TouchControls` emits `fire: false` outside a sortie, so
+neither case could be reached on a card. It worked, and it was one refactor away from not working.
 
-### The fix, and where it belongs
+### The actual fix
 
-Auto-fire is **contextual**. `TouchControls` carries a `TouchContext` of `'sortie' | 'choice' |
-'menu'`, and only `'sortie'` asserts the trigger. On a card the touch layer emits `fire: false`,
-which on the card's very first tick clears `awaitingRelease` and disables the dwell rescue —
-correctly, because on touch nobody is stuck holding a trigger. A tap then produces a genuine rising
-edge and confirms immediately.
+**Accepting is its own action.** Reported from play: *"the selection screens must not use the fire
+key to accept responses."* `InputSnapshot.confirm` is a separate, non-remappable action
+(`CONFIRM_CODES` = Enter / NumpadEnter, deliberately **not** Space, which is a default `fire`
+binding); on touch it is produced only by an explicit tap, through `TouchControls.scriptSelect`.
 
-**Do not "simplify" this back to an unconditional `fire: true`.** Four tests fail if you do, and
-one of them exists purely to show what the dwell then does.
+Everything above dissolves with it:
 
-`HELD_CONFIRM_DWELL_TICKS` itself should **not change**. It is a keyboard rescue and it is still
-correct for keyboards. The mobile answer is to not be in the state it rescues.
+- `HELD_CONFIRM_DWELL_TICKS` is **deleted**. Nothing confirms on the player's behalf.
+- `CHOICE_TIMEOUT_TICKS` is **deleted**. A card waits as long as the player wants — *"the shops
+  shouldn't close automatically, that's annoying."*
+- `ChoiceCursor.awaitingRelease`, `ChoiceAction.fromDwell` and the "release fire to choose" hint on
+  every card footer are gone. There is no state left to explain to the player.
+- **This is no longer the largest constraint on the touch design.** A card is blind to `fire`, so an
+  unconditional auto-fire would be a correctness non-event.
+
+Auto-fire is still contextual, and should stay that way for two smaller reasons: nothing off a
+sortie should be shooting, and the `'choice'` context is also what stops a drag steering the ship
+behind an open card.
+
+### The one hazard that is left: `special`
+
+Declining still reads a rising **`special`** edge, and `special` is a bindable sortie action
+(X / K / Shift) that nothing in the sim currently reads during play. So there is no live defect —
+but the day a special weapon lands, a player mashing it as a wave dies will decline the reward the
+same way a held trigger used to confirm it. The fix is a `cancel` action beside `confirm`, and
+`packInput`'s byte is now **full** (movement 0-3, fire, special, focus, confirm), so it needs a
+wider encoding and a `REPLAY_FORMAT_VERSION` bump. Flagged here rather than smuggled in.
+
+Two properties make the wiring forgiving:
 
 Two properties make the wiring forgiving:
 
 - **A one-tick-late context switch is safe.** The app learns a card is open by reading
   `world.pendingChoice` *after* the tick that opened it, so exactly one sortie snapshot can leak
-  onto a card. One tick of held fire is 47 short of the dwell. Tested.
+  onto a card. It used to matter (one tick of the 48-tick dwell); a leaked `fire: true` now means
+  nothing at all to a card. Tested either way.
 - **Leaving a choice drops any queued input script and zeroes the debt**, so a card cannot deliver
   a stale confirm into the sortie behind it, and flying debt earned before the card cannot be
   delivered after it.

@@ -26,6 +26,7 @@ function inputScript(seed: string, ticks: number): InputSnapshot[] {
         fire: rng.chance(0.8),
         special: false,
         focus: rng.chance(0.15),
+        confirm: false,
       }
     }
     script.push(current)
@@ -46,7 +47,7 @@ function runHeld(seed: string, input: InputSnapshot, ticks: number): World {
   return world
 }
 
-const FIRING: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
+const FIRING: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false, confirm: false }
 
 /**
  * Everything that defines the outcome of a run.
@@ -187,7 +188,7 @@ describe('World determinism', () => {
 
 describe('Hull movement', () => {
   it('stays inside the playfield under sustained input', () => {
-    const hard: InputSnapshot = { moveX: 1, moveY: -1, fire: false, special: false, focus: false }
+    const hard: InputSnapshot = { moveX: 1, moveY: -1, fire: false, special: false, focus: false, confirm: false }
     const world = runHeld('BOUNDSBOUND2', hard, 1200)
 
     expect(world.hull.x).toBeGreaterThanOrEqual(0)
@@ -200,13 +201,13 @@ describe('Hull movement', () => {
     const ticks = 20
     const cardinal = new World('DIAGONAL1234')
     for (let i = 0; i < ticks; i++) {
-      cardinal.tick({ moveX: 1, moveY: 0, fire: false, special: false, focus: false })
+      cardinal.tick({ moveX: 1, moveY: 0, fire: false, special: false, focus: false, confirm: false })
     }
     const cardinalDistance = Math.abs(cardinal.hull.x - Playfield.centerX)
 
     const diagonal = new World('DIAGONAL1234')
     for (let i = 0; i < ticks; i++) {
-      diagonal.tick({ moveX: 1, moveY: -1, fire: false, special: false, focus: false })
+      diagonal.tick({ moveX: 1, moveY: -1, fire: false, special: false, focus: false, confirm: false })
     }
     const dx = diagonal.hull.x - Playfield.centerX
     const dy = diagonal.hull.y - (Playfield.h - 110)
@@ -220,15 +221,15 @@ describe('Hull movement', () => {
     const normal = new World('FOCUSFOCUS23')
     const focused = new World('FOCUSFOCUS23')
     for (let i = 0; i < ticks; i++) {
-      normal.tick({ moveX: 1, moveY: 0, fire: false, special: false, focus: false })
-      focused.tick({ moveX: 1, moveY: 0, fire: false, special: false, focus: true })
+      normal.tick({ moveX: 1, moveY: 0, fire: false, special: false, focus: false, confirm: false })
+      focused.tick({ moveX: 1, moveY: 0, fire: false, special: false, focus: true, confirm: false })
     }
     expect(focused.hull.x).toBeLessThan(normal.hull.x)
   })
 
   it('records the previous position so rendering can interpolate', () => {
     const world = new World('INTERPINTER2')
-    world.tick({ moveX: 1, moveY: 0, fire: false, special: false, focus: false })
+    world.tick({ moveX: 1, moveY: 0, fire: false, special: false, focus: false, confirm: false })
     expect(world.hull.prevX).not.toBe(world.hull.x)
     expect(world.hull.prevX).toBeCloseTo(Playfield.centerX, 6)
   })

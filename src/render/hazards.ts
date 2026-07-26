@@ -1,9 +1,20 @@
 /**
- * Hazard presentation: the panel block, and the blackout scrim.
+ * Hazard presentation: the panel block, the playfield alarm, and the blackout scrim.
  *
  * A hazard is a cycle — idle, warning, active — and the warning is the only part the
  * player can do anything about. So the block is built around making the warning
  * impossible to miss and the idle state impossible to mistake for one.
+ *
+ * **The block is not enough, and for two milestones it was the only thing there was.**
+ * It draws in the instrument column, and during a sortie nobody is reading the
+ * instrument column — the eyes are on the hull and on the fire coming at it, which is
+ * the whole point of UI.md rule 9. So the one second a hazard gives the player to react
+ * was being delivered to the part of the screen they are demonstrably not looking at:
+ * the mechanic was fair in the simulation and unfair on the display. `drawHazardWarning`
+ * is the fix, and the division of labour is deliberate — the panel row is the
+ * *reference* (what the hazard is, in prose, counted in seconds) and the playfield cue
+ * is the *alarm* (that it is coming, from where, and how much of the window is left,
+ * with no number to parse mid-dodge).
  *
  * **Rule 3, applied carefully.** `danger` means *can hurt you this instant*, and a
  * hazard one second from firing qualifies: the reaction window is the moment the
@@ -28,7 +39,9 @@
  */
 
 import { PLAYFIELD_H, PLAYFIELD_W } from '../core/space'
+import type { HazardKind } from '../content/types'
 import type { HazardPhase, HazardView } from '../sim/entities'
+import { HAZARD_WARNING_TICKS } from '../sim/hazards'
 import { flashScale, pulse } from './intensity'
 import { Palette, withAlpha } from './palette'
 import { drawText, drawValue, formatSeconds, measureText } from './text'
@@ -273,6 +286,272 @@ export function drawHazardBlock(
   }
 
   return top
+}
+
+// ---------------------------------------------------------------------------
+// the playfield alarm
+// ---------------------------------------------------------------------------
+
+/**
+ * Kinds that take integrity when they fire.
+ *
+ * Read from the SIMULATION's behaviour, not from `HazardDef.damage`: `world.ts` calls
+ * `applyHullDamage` for `corrosion` and spawns damaging projectiles for `debris`, and
+ * for `interdiction` and `blackout` it applies nothing at all — `HazardDef.damage` is
+ * dead data for both, which is why the two cards now read "does no damage" (see
+ * `content/hazards.ts`). So this is a fact about kinds and cannot be falsified by a
+ * content edit, which is what makes it safe to colour a warning with.
+ *
+ * `HazardView` does not carry `damage`, and it should not have to: a *severity* the
+ * alarm derives from the kind is one fewer field on the contract. A kind added later
+ * with no entry here is treated as harmless, which understates rather than overstates —
+ * the wrong direction to be wrong in, but the alternative is crying danger for
+ * something that cannot hurt anyone, which is the failure rule 3 exists to prevent.
+ */
+const HARMFUL_KINDS: ReadonlySet<HazardKind> = new Set<HazardKind>(['corrosion', 'debris'])
+
+/**
+ * Which edges of the playfield a kind's warning is anchored to.
+ *
+ * `debris` is the only kind with a location: `spawnDebris` puts its curtain along the
+ * TOP edge at `y = -radius` and drops it straight down across the full width. The
+ * five lanes carry an rng jitter drawn on the tick it fires, so the exact x of each
+ * chunk is genuinely not knowable during the warning — and it is uniform, so no x is
+ * more likely than another. "The whole top edge, coming down" is therefore the most
+ * specific true thing there is to say, and it is said by washing that one edge.
+ *
+ * The other three are global by construction — `speedFactor()` is one multiplier on the
+ * hull wherever it is, corrosion "strips wherever the hull is", the blackout scrim
+ * covers the field — so they wash all four edges. That is the honest shape for "there
+ * is nowhere to be": inventing a direction for a hazard that has none would send the
+ * player dodging something that is not there, which is worse than the panel-only
+ * warning this cue replaces.
+ */
+const SPATIAL_KINDS: ReadonlySet<HazardKind> = new Set<HazardKind>(['debris'])
+
+/** Inward depth of the edge wash. Inside the rim's 26, for the same reason. */
+const ONSET_DEPTH = 20
+/** Peak wash opacity at the edge itself, fading to nothing by ONSET_DEPTH. */
+const ONSET_WASH_ALPHA = 0.34
+/** Depth of the alarm's breath. Never reaches zero, so it breathes — see rule 10. */
+const ONSET_PULSE_DEPTH = 0.5
+/** Opacity the crisp marks hold at the bottom of the breath. Legible at every phase. */
+const ONSET_FLOOR = 0.5
+
+/** Inward-pointing teeth along a washed edge: the direction, as a shape. */
+const TOOTH = 7
+const TOOTH_SPACING_X = 64
+const TOOTH_SPACING_Y = 80
+
+/**
+ * The onset strip: a countdown with no digits.
+ *
+ * Twelve pips consumed from the outside in, so the block that is left stays centred
+ * under the hull and shrinking time reads as shrinking width in the same glance as the
+ * ship. The empty slots stay drawn — `drawDamageBar` learned the same lesson — because
+ * without the track a short bar has nothing to be short *against*, and the player
+ * cannot tell a window nearly gone from a window that was always small.
+ */
+const STRIP_SLOTS = 12
+const STRIP_PIP_W = 11
+const STRIP_PIP_GAP = 3
+const STRIP_H = 5
+const STRIP_W = STRIP_SLOTS * STRIP_PIP_W + (STRIP_SLOTS - 1) * STRIP_PIP_GAP
+const STRIP_X = (PLAYFIELD_W - STRIP_W) / 2
+/** Top of the first strip. Below the hull's plume, above the bottom edge's own wash. */
+const STRIP_Y = PLAYFIELD_H - 20
+const STRIP_ROW_GAP = 4
+/**
+ * Strips drawn at once. Content ships at most two hazards in a stage; the cap is here
+ * so a future sector cannot turn the alarm into a wall of bars over the ship.
+ */
+const MAX_ALARMS = 3
+
+/** Fraction of the reaction window still to run, 1 at the start and never 0. */
+function onsetRemaining(hazard: HazardView): number {
+  const ticks = Number.isFinite(hazard.ticksToChange) ? hazard.ticksToChange : HAZARD_WARNING_TICKS
+  const fraction = ticks / HAZARD_WARNING_TICKS
+  return fraction < 0 ? 0 : fraction > 1 ? 1 : fraction
+}
+
+/**
+ * Wash one edge, plus its teeth.
+ *
+ * `dx`/`dy` are the inward direction, which is all the four cases differ by. `breath`
+ * arrives already computed so every edge in a frame modulates together — four edges
+ * breathing out of phase would read as rotation rather than as one alarm.
+ */
+function drawOnsetEdge(
+  ctx: CanvasRenderingContext2D,
+  side: 'top' | 'bottom' | 'left' | 'right',
+  color: string,
+  breath: number,
+): void {
+  const vertical = side === 'top' || side === 'bottom'
+  const x0 = side === 'right' ? PLAYFIELD_W : 0
+  const y0 = side === 'bottom' ? PLAYFIELD_H : 0
+  const dx = side === 'left' ? 1 : side === 'right' ? -1 : 0
+  const dy = side === 'top' ? 1 : side === 'bottom' ? -1 : 0
+
+  /*
+   * THE BREATH GOES IN `globalAlpha`, NOT IN THE GRADIENT STOPS.
+   *
+   * Both would look identical on screen and only one of them is measurable: the
+   * rule-10 harness in tests/render.test.ts reconstructs an effect's brightness from
+   * recorded fill styles and `globalAlpha`, and a gradient's `addColorStop` alpha is
+   * not either of those — a stub gradient swallows it. An 8.59 Hz strobe already
+   * shipped once through exactly this kind of blind spot (the engine plume, which
+   * modulated area while the suite watched alpha). A safety rule the suite cannot see
+   * is not enforced, so the modulation is put where the suite looks.
+   */
+  const gradient = vertical
+    ? ctx.createLinearGradient(0, y0, 0, y0 + dy * ONSET_DEPTH)
+    : ctx.createLinearGradient(x0, 0, x0 + dx * ONSET_DEPTH, 0)
+  gradient.addColorStop(0, withAlpha(color, ONSET_WASH_ALPHA))
+  gradient.addColorStop(1, withAlpha(color, 0))
+  ctx.globalAlpha = breath
+  ctx.fillStyle = gradient
+  ctx.fillRect(
+    side === 'right' ? PLAYFIELD_W - ONSET_DEPTH : 0,
+    side === 'bottom' ? PLAYFIELD_H - ONSET_DEPTH : 0,
+    vertical ? PLAYFIELD_W : ONSET_DEPTH,
+    vertical ? ONSET_DEPTH : PLAYFIELD_H,
+  )
+
+  // Teeth. Filled triangles sitting ON the edge and pointing inward — deliberately not
+  // the hollow chevron `drawThreatIndicators` uses, because that one means "an enemy is
+  // about to arrive here" and two cues sharing a silhouette is how a player learns to
+  // read neither.
+  const span = vertical ? PLAYFIELD_W : PLAYFIELD_H
+  const spacing = vertical ? TOOTH_SPACING_X : TOOTH_SPACING_Y
+  const count = Math.max(1, Math.floor(span / spacing))
+  const start = (span - (count - 1) * spacing) / 2
+  ctx.globalAlpha = ONSET_FLOOR + (1 - ONSET_FLOOR) * breath
+  ctx.fillStyle = color
+  for (let i = 0; i < count; i++) {
+    const at = start + i * spacing
+    ctx.beginPath()
+    if (vertical) {
+      ctx.moveTo(at - TOOTH / 2, y0)
+      ctx.lineTo(at + TOOTH / 2, y0)
+      ctx.lineTo(at, y0 + dy * TOOTH)
+    } else {
+      ctx.moveTo(x0, at - TOOTH / 2)
+      ctx.lineTo(x0, at + TOOTH / 2)
+      ctx.lineTo(x0 + dx * TOOTH, at)
+    }
+    ctx.closePath()
+    ctx.fill()
+  }
+  ctx.globalAlpha = 1
+}
+
+/**
+ * The reaction window, drawn where the player is actually looking.
+ *
+ * Three things, and each one answers a question the panel row answers too slowly:
+ *
+ *   WHEN   a twelve-pip strip under the hull, emptied from the outside in. Time to
+ *          onset is a length that shrinks, not a figure to read while dodging.
+ *   WHERE  the playfield edge the hazard comes from is washed and grows teeth. One
+ *          edge means one direction; four means everywhere, which is the truth for
+ *          every kind except debris. See SPATIAL_KINDS.
+ *   WHAT   whether it will cost integrity. `danger` and `caution` are the two roles
+ *          for that — and they are the one pair in the palette that CANNOT be
+ *          separated by hue for a protanope or deuteranope (ΔE00 12.8 at best; see
+ *          tests/palette.test.ts). So severity carries a second channel: the pips of
+ *          a damaging hazard are NOTCHED, exactly as the integrity meter's critical
+ *          state is notched in render/panel.ts, and for exactly the same reason.
+ *
+ * Rule 1 permits this over the playfield on the same terms as the low-integrity rim
+ * and the threat chevrons: it is transient, it exists only during the reaction window,
+ * and it lives in the outer margin plus a strip below the hull rather than over the
+ * space bullets are read in. Nothing here is a persistent state readout — the moment
+ * the hazard fires, it is gone.
+ *
+ * Rule 10: every modulated value comes from `pulse()` at the shared 0.85 Hz and
+ * attenuates under `reduceFlashes`. Geometry is a pure function of the countdown and
+ * never of `tick`, so the alarm cannot flash by changing size — which is also what
+ * makes the alpha the suite measures the axis it actually varies on.
+ */
+export function drawHazardWarning(
+  ctx: CanvasRenderingContext2D,
+  hazards: readonly HazardView[],
+  tick: number,
+  reduceFlashes = false,
+): void {
+  const breath = pulse(tick, ONSET_PULSE_DEPTH, reduceFlashes)
+
+  // Pass one: the union of the washed edges, so two hazards warning at once cannot
+  // stack two washes into an opaque frame. An edge is red if ANY hazard washing it can
+  // take integrity — understating a threat that is genuinely there is not an option.
+  let top = false
+  let sides = false
+  let harmfulTop = false
+  let harmfulSides = false
+  let shown = 0
+  for (const hazard of hazards) {
+    if (hazard.phase !== 'warning') continue
+    if (shown >= MAX_ALARMS) break
+    shown++
+    const harmful = HARMFUL_KINDS.has(hazard.hazardKind)
+    top = true
+    harmfulTop = harmfulTop || harmful
+    if (!SPATIAL_KINDS.has(hazard.hazardKind)) {
+      sides = true
+      harmfulSides = harmfulSides || harmful
+    }
+  }
+  if (shown === 0) return
+
+  const topColor = harmfulTop ? Palette.danger : Palette.caution
+  const sideColor = harmfulSides ? Palette.danger : Palette.caution
+  if (top) drawOnsetEdge(ctx, 'top', topColor, breath)
+  if (sides) {
+    drawOnsetEdge(ctx, 'bottom', sideColor, breath)
+    drawOnsetEdge(ctx, 'left', sideColor, breath)
+    drawOnsetEdge(ctx, 'right', sideColor, breath)
+  }
+
+  // Pass two: one strip per warning hazard, stacked upward from the bottom edge so the
+  // first one is always in the same place. Severity is per hazard here even where the
+  // washes merged, which is the point of putting it on a second channel at all.
+  let row = 0
+  for (const hazard of hazards) {
+    if (hazard.phase !== 'warning') continue
+    if (row >= MAX_ALARMS) break
+    const harmful = HARMFUL_KINDS.has(hazard.hazardKind)
+    const color = harmful ? Palette.danger : Palette.caution
+    const y = STRIP_Y - row * (STRIP_H + STRIP_ROW_GAP)
+    row++
+
+    const filled = Math.min(
+      STRIP_SLOTS,
+      Math.max(1, Math.ceil(onsetRemaining(hazard) * STRIP_SLOTS)),
+    )
+    // Consumed from both ends, so what remains stays under the ship.
+    const dropped = STRIP_SLOTS - filled
+    const from = Math.ceil(dropped / 2)
+    const to = STRIP_SLOTS - Math.floor(dropped / 2)
+
+    for (let i = 0; i < STRIP_SLOTS; i++) {
+      const x = STRIP_X + i * (STRIP_PIP_W + STRIP_PIP_GAP)
+      const lit = i >= from && i < to
+      // The spent slots stay visible at a fixed dimness: they are the scale, not a
+      // second thing blinking.
+      ctx.globalAlpha = lit ? ONSET_FLOOR + (1 - ONSET_FLOOR) * breath : 0.3
+      ctx.fillStyle = lit ? color : Palette.line
+      ctx.fillRect(x, y, STRIP_PIP_W, STRIP_H)
+      if (!lit || !harmful) continue
+      // The notch. Cut in the surface colour rather than drawn in a second hue, so it
+      // survives greyscale, all three deficiency simulations, and a photograph.
+      ctx.globalAlpha = 1
+      ctx.fillStyle = Palette.void
+      const notch = Math.max(1, Math.floor(STRIP_PIP_W / 3))
+      ctx.fillRect(x + (STRIP_PIP_W - notch) / 2, y, notch, STRIP_H)
+    }
+    ctx.globalAlpha = 1
+  }
 }
 
 // ---------------------------------------------------------------------------

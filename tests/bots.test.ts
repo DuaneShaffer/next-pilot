@@ -10,12 +10,15 @@
  *
  *   1. Determinism. Without it every number in a sweep report is unreproducible,
  *      which makes it not a finding.
- *   2. Choices resolve fast. `CHOICE_TIMEOUT_TICKS` is a 20-second backstop (1,200
- *      ticks — this file said 60 seconds for three milestones); a policy that leans
- *      on it adds twenty seconds of dead sim time per screen and silently corrupts
- *      every survival statistic in the report. A card at a SEAM is the case to watch,
- *      because the sim opens the next one in the tick the previous resolves and the
- *      tests below fly single-sector content, which never chains two cards.
+ *   2. Choices resolve fast — and now, that they resolve AT ALL. The sim used to
+ *      auto-resolve any card after 1,200 ticks, so a policy that stopped resolving
+ *      cards produced twenty seconds of dead sim time per screen and a pick nobody
+ *      made. That backstop is gone (accepting is its own action, so the deadlock it
+ *      guarded cannot happen to a player), which means a policy that fails to resolve
+ *      a card now parks the run on it until the tick cap. `MAX_CHOICE_RESOLUTION_TICKS`
+ *      is the only ceiling there is. A card at a SEAM is the case to watch, because the
+ *      sim opens the next one in the tick the previous resolves and the tests below fly
+ *      single-sector content, which never chains two cards.
  *   3. The build-focused probe actually takes its build. If it does not, the
  *      synergy delta it exists to measure is measuring nothing.
  *   4. Degenerate screens do not crash or stall the run.
@@ -52,12 +55,7 @@ import {
   choiceOpenTicks,
   createBuildFocused,
 } from '../src/sim/bots'
-import {
-  CHOICE_TIMEOUT_TICKS,
-  HELD_CONFIRM_DWELL_TICKS,
-  newCursor,
-  updateCursor,
-} from '../src/sim/progression'
+import { newCursor, updateCursor } from '../src/sim/progression'
 import { World, type RunContent } from '../src/sim/world'
 import { hashWorld } from '../src/meta/snapshot'
 
@@ -291,7 +289,7 @@ describe('every policy resolves a choice instead of stalling', () => {
     }
   })
 
-  it.each(BOT_NAMES)('%s never leans on the sim 20-second choice timeout', (name) => {
+  it.each(BOT_NAMES)('%s resolves every card inside its own navigation budget', (name) => {
     const seed = 'N0T1MEOUT234'
     const run = play(BOTS[name].create(seed), seed, LIVE_CONTENT)
     for (const choice of run.choices) {
@@ -302,21 +300,22 @@ describe('every policy resolves a choice instead of stalling', () => {
       expect(scriptTicks, `${name} spent ${scriptTicks} unfrozen ticks on a ${choice.kind}`).toBeLessThanOrEqual(
         MAX_CHOICE_RESOLUTION_TICKS,
       )
-      // And nowhere near the backstop, which is what would corrupt survival times:
-      // six screens at 1,200 ticks each would add two minutes of sim time to a run.
-      expect(choice.ticksOpen).toBeLessThan(CHOICE_TIMEOUT_TICKS / 10)
+      // And in wall ticks too, hitstop included. There is no sim-side backstop behind
+      // this any more: a policy that stops resolving cards parks the run on one, so a
+      // number far above the budget here is a hang rather than a slow bot.
+      expect(choice.ticksOpen).toBeLessThan(120)
     }
   })
 
   it('a full sweep-shaped run spends a negligible fraction of its ticks on menus', () => {
-    // The number this protects: survival time. If choices were resolved by timeout,
-    // a cleared run would report ~180s of sector plus six minutes of nothing.
+    // The number this protects: survival time. A card the policy does not resolve is
+    // charged to the run's survival number, and there is nothing to close it.
     for (const name of BOT_NAMES) {
       const seed = 'MENUT1ME2345'
       const run = play(BOTS[name].create(seed), seed, LIVE_CONTENT)
       const menuTicks = run.choices.reduce((sum, c) => sum + c.ticksOpen, 0)
-      // Six screens at the 6-tick budget is 36 ticks out of ~11,000 — 0.3%. One
-      // screen resolved by timeout alone would be 1,200 ticks and blow this.
+      // Six screens at the 6-tick budget is 36 ticks out of ~11,000 — 0.3%. One card the
+      // policy failed to resolve would be the rest of the run and blow this.
       expect(menuTicks / run.ticks, name).toBeLessThan(0.01)
     }
   })
@@ -524,7 +523,7 @@ describe('policies resolve the world map', () => {
     for (const name of BOT_NAMES) {
       const view = fakeView(card)
       const inputs = pressesAgainst(BOTS[name].create('R0UTECARD123'), view, 12)
-      const acted = inputs.findIndex((input) => input.fire || input.special)
+      const acted = inputs.findIndex((input) => input.confirm || input.special)
       expect(acted, `${name} never acted on a route card`).toBeGreaterThanOrEqual(0)
       expect(acted + 1, `${name} took too long on a route card`).toBeLessThanOrEqual(
         MAX_CHOICE_RESOLUTION_TICKS,
@@ -532,7 +531,7 @@ describe('policies resolve the world map', () => {
       // Confirm, not skip: skipping a route is the sim's fallback to the direct
       // approach, and a policy that reaches option 0 by skipping is indistinguishable
       // from one that cannot read the card at all.
-      expect(inputs.some((input) => input.fire), `${name} skipped rather than chose`).toBe(true)
+      expect(inputs.some((input) => input.confirm), `${name} skipped rather than chose`).toBe(true)
     }
   })
 
@@ -628,14 +627,14 @@ describe('policies resolve the world map', () => {
         }
       }
       expect(view.runState, `${name} was still active at the cap`).not.toBe('active')
-      // A card resolved by the sim's 20-second backstop rather than by the policy is
-      // the failure this catches, and it looks like a long run, not a stuck one. The
-      // bound is deliberately far below `CHOICE_TIMEOUT_TICKS`: hitstop can add a few
-      // ticks to a card, a timeout adds 1,200.
+      // A card the policy never resolves is the failure this catches, and it looks like
+      // a long run rather than a stuck one — nothing in the sim closes a card now, so
+      // the run simply spends the rest of its budget on that screen. 120 ticks is two
+      // seconds: twenty times the navigation budget, and hitstop cannot reach it.
       expect(
         longestCard,
-        `${name} sat on one card for ${longestCard} ticks — a card was resolved by the sim, not by the policy`,
-      ).toBeLessThan(CHOICE_TIMEOUT_TICKS / 10)
+        `${name} sat on one card for ${longestCard} ticks — the policy stopped resolving it`,
+      ).toBeLessThan(120)
       seams += routeCards
     }
     // Without this the test above is a test about five runs that died in sector one.
@@ -759,22 +758,11 @@ function driveChain(policy: BotPolicy, cards: readonly PendingChoice[], maxTicks
         : choice.kind === 'route'
           ? choice.routes.length
           : choice.offers.length
-    // Mirrors the `World.choiceResolve` getter exactly, including the branch switch:
-    // a card whose trigger has not been released yet counts down the dwell, and one
-    // that has is counting down the timeout.
-    const resolve = cursor.awaitingRelease
-      ? {
-          action: 'confirm' as const,
-          ticksRemaining: Math.max(0, HELD_CONFIRM_DWELL_TICKS - cursor.openTicks),
-          totalTicks: HELD_CONFIRM_DWELL_TICKS,
-        }
-      : {
-          action: 'skip' as const,
-          ticksRemaining: Math.max(0, CHOICE_TIMEOUT_TICKS - cursor.openTicks),
-          totalTicks: CHOICE_TIMEOUT_TICKS,
-        }
+    // Mirrors the `World.choiceResolve` getter exactly, which is now one field: the
+    // sim's own per-card tick counter, and the only signal a resolver has that the card
+    // under it was swapped.
     const view = fakeView(choice, {
-      choiceResolve: resolve,
+      choiceResolve: { openTicks: cursor.openTicks },
       choiceSelection: cursor.index,
       stats: fakeStats({ scrap: 500 }),
     })
@@ -836,11 +824,12 @@ describe('a card that opens in the same tick the previous one closed is still ch
     },
   )
 
-  it('a chained card the policy cannot afford is DECLINED rather than stalling to the timeout', () => {
+  it('a chained card the policy cannot afford is DECLINED rather than stalling forever', () => {
     // The 1,200-tick stall, as a unit. The retry branch repeats the previous card's
     // action, so a chain that ended in a confirm re-confirmed an unaffordable option
-    // every other tick — the world refuses, the card stays open, and the run pays the
-    // full timeout. Measured at 1,201 ticks per occurrence in a five-sector sweep.
+    // every other tick — the world refuses and the card stays open. It used to cost the
+    // sim's 1,200-tick timeout (measured at 1,201 ticks per occurrence in a five-sector
+    // sweep); with no timeout it would cost the rest of the run.
     const unaffordable: PendingChoice = {
       kind: 'shop',
       offers: [
@@ -908,6 +897,9 @@ function fakeHull(): Hull {
     maxIntegrity: 100,
     shield: 40,
     maxShield: 40,
+    shieldRegenProgress: 0,
+    shieldRegenBlockedTicks: 0,
+    shieldReserve: 0,
     invulnTicks: 0,
     radius: 7,
   }
@@ -954,10 +946,9 @@ function fakeView(choice: PendingChoice | null, overrides: Partial<WorldView> = 
     activeInteractions: [],
     resolvedStats: {},
     pendingChoice: choice,
-    // Null, not a countdown: these fixtures test what a POLICY does with a card, and
-    // a live auto-resolve timer would mean the card resolved itself while the policy
-    // was still deciding — which is the sim's rescue for a human who walked away, not
-    // a path any bot should ever reach.
+    // Null rather than a tick count, deliberately: a static fixture never chains, so a
+    // resolver must fall back to "the card I already have" rather than reading a counter
+    // that cannot move. `choiceOpenTicks` returning null is that path.
     choiceResolve: null,
     choiceSelection: -1,
     ...overrides,
@@ -1044,9 +1035,10 @@ describe('degenerate choice screens neither crash nor stall', () => {
   })
 
   it('a policy resolves a screen that stays open longer than it expected', () => {
-    // The self-healing branch. If an input the policy expected to land is lost, it
-    // must keep pressing until the screen closes rather than idling into the
-    // 20-second timeout — a wrong pick is one skewed row, a timeout skews everything.
+    // The self-healing branch, and it matters more than it used to. If an input the
+    // policy expected to land is lost, it must keep pressing until the screen closes: a
+    // wrong pick is one skewed row in a table, and a card nobody resolves is now the
+    // whole run, because the sim has no timeout to fall back on.
     const choice: PendingChoice = {
       kind: 'item',
       offers: [
@@ -1061,7 +1053,7 @@ describe('degenerate choice screens neither crash nor stall', () => {
     for (const name of BOT_NAMES) {
       const view = fakeView(choice)
       const inputs = pressesAgainst(BOTS[name].create('ST1CKY234567'), view, 60)
-      const confirms = inputs.filter((input) => input.fire || input.special).length
+      const confirms = inputs.filter((input) => input.confirm || input.special).length
       // Repeatedly, not once: the screen in this fake never closes.
       expect(confirms, `${name} stopped trying to resolve a stuck screen`).toBeGreaterThan(1)
     }

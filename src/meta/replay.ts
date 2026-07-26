@@ -63,10 +63,19 @@ import { packInput, unpackInput } from '../core/input'
 /**
  * Encoding version — how the bytes are laid out.
  *
- * Bumped to 2 when `simVersion` entered the header, and to 3 when `hullId` did.
+ * Bumped to 2 when `simVersion` entered the header, to 3 when `hullId` did, and to 4
+ * when `confirm` took bit 7 of the packed input byte.
  * Distinct from SIM_VERSION, which describes what those bytes *mean*: a format
  * mismatch fails to decode and is safe, while a sim mismatch decodes perfectly and
  * plays back the wrong run. See src/meta/simVersion.ts.
+ *
+ * FORMAT 4 IS THE CLEAREST CASE THE DISTINCTION HAS PRODUCED SO FAR. Selection screens
+ * stopped accepting on the fire key, so `confirm` became a seventh bit in a byte that
+ * previously used six. A format-3 replay's bytes are still *readable* — bit 7 simply
+ * reads as 0 — so without this bump every shared replay would decode cleanly and play
+ * back a run that never confirms a single card. That is precisely the silent-divergence
+ * failure this constant exists to convert into a loud refusal. THE BYTE IS NOW FULL: a
+ * ninth action needs a wider encoding, not a spare bit.
  *
  * Which is why `hullId` was a FORMAT bump and not a sim bump. The simulation's
  * rules did not change — `World` given the same content, hull and inputs does the
@@ -76,7 +85,7 @@ import { packInput, unpackInput } from '../core/input'
  * legible outcome, where leaving the format alone would have let those replays
  * decode and be flown in the wrong hull.
  */
-export const REPLAY_FORMAT_VERSION = 3
+export const REPLAY_FORMAT_VERSION = 4
 
 const MAGIC = [0x4e, 0x50, 0x52] as const // 'NPR'
 /**
@@ -292,12 +301,19 @@ function checksum(bytes: Uint8Array, end: number): number {
 }
 
 /**
- * A packed input byte only ever uses bits 0-6, and each 2-bit axis field holds
- * 0..2 because the axis is -1/0/1. `0b11` in an axis field and any value in bit
- * 7 are unreachable, which makes them a free corruption check.
+ * A packed input byte uses all eight bits now, and each 2-bit axis field holds 0..2
+ * because the axis is -1/0/1. `0b11` in an axis field is unreachable, which makes it a
+ * free corruption check; bit 7 is not one any more.
+ *
+ * BIT 7 USED TO BE THE STRONGEST CHECK HERE and it belongs to `InputSnapshot.confirm`
+ * as of the change that stopped selection screens accepting on the fire key. A build
+ * that rejected it could not record any run that touched a card — the encoder threw
+ * `bad-input-byte` at the first accept press — so widening this is not optional, and it
+ * is a WIRE FORMAT CHANGE: `REPLAY_FORMAT_VERSION` must be bumped alongside it, or an
+ * older build will read a confirm press as an unreachable byte and reject the link.
  */
 function isValidInputByte(byte: number): boolean {
-  if (byte < 0 || byte > 0x7f) return false
+  if (byte < 0 || byte > 0xff) return false
   if ((byte & 0b11) === 0b11) return false
   if (((byte >> 2) & 0b11) === 0b11) return false
   return true

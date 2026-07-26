@@ -27,6 +27,21 @@
  * decides better/worse from the raw stat and its flag, and computes the printed
  * delta from the presented value, so the two can never disagree.
  *
+ * ## THE TABLE OWNS THE FIGURES AND THE SENTENCE OWNS THE INTENT
+ *
+ * Rule 4 wants the mechanism stated with real numbers, and on this screen it is — just
+ * not twice. Hull prose used to restate exactly what the table beneath it prints
+ * ("+42 hull speed, 210 to 252" above `Hull speed 210 → 252 u/s (+42)`), which is one
+ * fact in two places with only one of them derived. That is `docs/ROADMAP.md` R12
+ * waiting to happen to hulls: a balance change updates `stats`, the table follows
+ * because `deltaFor` computes it, and the hand-written sentence goes on selling the old
+ * ship. So the figures live here, in code that reads `STATS`/`resolveStat`, and
+ * `HullDef.mechanism` says what a table cannot — what the hull is for, how it wants to
+ * be flown, which mechanic its stat line interacts with. Both halves are guarded:
+ * `tests/hulls.test.ts` fails on a figure in hull prose, and `tests/hullSelect.test.ts`
+ * fails if a figure the prose gave up is not printed here. `HULL_SELECT_STANDFIRST`
+ * carries the baseline for the same reason — the Lien's card has no table to print it.
+ *
  * ## The drawback is stated first, and as loudly
  *
  * Costs occupy the left column and are headed `GIVES UP`; gains sit to their right
@@ -58,6 +73,7 @@
 import { HULLS, HULL_ORDER, LIEN_ID } from '../content/hulls'
 import { ITEMS } from '../content/items'
 import type { HullDef, ItemDef, StatKey } from '../content/types'
+import { TICK_HZ } from '../core/loop'
 import type { Rng } from '../core/rng'
 import { VIRTUAL_H, VIRTUAL_W } from '../core/space'
 import { PULSE_HZ, pulse as breathe } from '../render/intensity'
@@ -222,6 +238,16 @@ const STAT_DISPLAY: Readonly<Record<StatKey, StatDisplay>> = {
   hullSpeed: { label: 'Hull speed', unit: 'u/s' },
   maxIntegrity: { label: 'Max integrity', unit: 'hp' },
   maxShield: { label: 'Max shield', unit: 'hp' },
+  // Both arrived with shield recovery, and both are presented in the unit the player
+  // thinks in rather than the one the sim counts in — see `present` above. A delay in
+  // ticks on a hull card is the card asking the player to reason about the engine.
+  shieldRegenPerSecond: { label: 'Shield regen', unit: 'hp/s' },
+  shieldRegenDelayTicks: { label: 'Regen delay', unit: 's', present: (v) => v / TICK_HZ },
+  // `hp/sector` rather than `hp` because the per-sector part is the whole point — a
+  // reserve read as a flat `hp` would look like a second shield bar. Abbreviated label,
+  // because `Regen reserve … hp/sector` with a signed delta overruns the card's column
+  // and the fit test catches it: the unit carries the meaning, so the label gives way.
+  shieldReservePerSector: { label: 'Reserve', unit: 'hp/sector' },
   scrapMultiplier: { label: 'Scrap yield', unit: '%', present: (v) => v * 100 },
   pickupRadius: { label: 'Pickup radius', unit: 'u' },
   focusFactor: { label: 'Focus speed', unit: '%', present: (v) => v * 100 },
@@ -416,6 +442,11 @@ const BASE_DPS = STATS.projectileDamage.base * shotsPerSecond(STATS.fireInterval
  * human writes twice is a number that eventually disagrees with itself, and here the
  * disagreement would be the screen naming a baseline no hull actually has. Retune
  * `STATS` and this sentence follows.
+ *
+ * It states the composite baseline; the Lien's own card states the component one
+ * (`HULL_BASELINE_TEXT`). Both are derived, and the split is deliberate: this sentence
+ * is what the deltas below are measured against, and the card is what the Lien
+ * actually is.
  */
 export const HULL_SELECT_STANDFIRST =
   `Every figure below is measured against the Lien: ${numeral(BASE_EFFECTIVE_HEALTH)} effective hp, ` +
@@ -441,14 +472,29 @@ export const HULL_STARTS_LABEL = 'STARTS WITH'
 /** Labels the composite figures, so they do not read as one more stat row. */
 export const HULL_NET_LABEL = 'NET'
 
-/** The Lien's card, where the trade table would be. It has no modifiers by design. */
-export const HULL_BASELINE_TEXT = 'No modifiers. Every other card is measured against this hull.'
+/**
+ * The Lien's card, where the trade table would be. It has no modifiers by design.
+ *
+ * DERIVED, and it is the Lien's trade table. Every other card prints its own bases in
+ * its rows (`Max shield 40 → 110 hp`); the Lien has no rows, so without this the one
+ * hull the whole content set is tuned against would be the only card on the screen
+ * stating no figures at all. It used to say "every other card is measured against this
+ * hull", which the standfirst four lines above already says — and which the hull's own
+ * prose now says better.
+ *
+ * Hull speed is deliberately absent: the standfirst states it, and a card repeating a
+ * number from the sentence directly above it is the duplication this screen just spent
+ * a change removing.
+ */
+export const HULL_BASELINE_TEXT =
+  `No modifiers: ${numeral(STATS.maxIntegrity.base)} integrity, ${numeral(STATS.maxShield.base)} shield, ` +
+  `${numeral(shotsPerSecond(STATS.fireIntervalTicks.base))} shots/s at ${numeral(STATS.projectileDamage.base)} dmg.`
 
 /** Shown if the offer is empty, which would be a defect — Lien is always offered. */
 export const HULL_SELECT_EMPTY_TEXT = 'No hull can be issued. The Lien should always be available.'
 
 export const HULL_SELECT_CONTROLS_LEFT = '↑  ↓  select'
-export const HULL_SELECT_CONTROLS_RIGHT = 'SPACE / Z  launch      ESC  return to title'
+export const HULL_SELECT_CONTROLS_RIGHT = 'ENTER  launch      ESC  return to title'
 
 /**
  * Names the pick, so confirm is never a keypress into the dark, and says the card

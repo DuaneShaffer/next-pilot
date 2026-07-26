@@ -378,6 +378,49 @@ export type RunParamRejection =
   | 'seed-overridden-by-replay'
   | 'daily-overridden-by-replay'
 
+/**
+ * Rejection significance, most significant first.
+ *
+ * This is the *published* order of `ResolvedRun.rejections`, and it mirrors the mode
+ * precedence — replay, then daily, then seed — because the thing a player needs told
+ * first is what decided the run they are about to fly, not what happened to be parsed
+ * first.
+ *
+ * WHY IT IS A TABLE rather than an emergent property of the code below: parse order
+ * is not this order and cannot be made to be. The seed is validated FIRST so that a
+ * rejected replay can fall back to it, so a link with both a damaged replay and a
+ * junk seed collected `seed-invalid` ahead of `replay-malformed` and then took its one
+ * player-facing sentence off the wrong end — telling the pilot about the seed while
+ * the headline fact was that the shared replay was cut in half. Ordering here, once,
+ * where the order is also written down, is the only version of this that stays true.
+ *
+ * A `Record` over the union rather than a list, so a rejection reason added later
+ * cannot be left unranked: it is a typecheck failure, not a reason that silently
+ * sorts to the end.
+ */
+const REJECTION_RANK: Readonly<Record<RunParamRejection, number>> = {
+  // The replay tier. The refusals and the overrides are mutually exclusive — a replay
+  // is either honoured or it is not — so their relative order is unobservable, but the
+  // ranking has to be total for the sort to be.
+  'replay-oversize': 0,
+  'replay-malformed': 1,
+  'replay-incompatible': 2,
+  'daily-overridden-by-replay': 3,
+  'seed-overridden-by-replay': 4,
+  // The daily tier.
+  'daily-date-invalid': 5,
+  'daily-date-future': 6,
+  'seed-overridden-by-daily': 7,
+  // The seed tier: least significant, because a bad seed costs the player the least —
+  // it is the only one of the three that cannot change which run gets flown.
+  'seed-invalid': 8,
+}
+
+/** The published order of `ResolvedRun.rejections`. Exported so a test can pin it. */
+export const REJECTION_PRECEDENCE: readonly RunParamRejection[] = (
+  Object.keys(REJECTION_RANK) as RunParamRejection[]
+).sort((a, b) => REJECTION_RANK[a] - REJECTION_RANK[b])
+
 export interface ResolvedRun {
   readonly mode: RunMode
   /** In precedence order, most significant first. Empty when the URL was honoured. */
@@ -420,14 +463,28 @@ export interface ResolveOptions {
  */
 export function resolveRunMode(options: ResolveOptions): ResolvedRun {
   const { params, now, dailyRecord, randomSeed } = options
-  const rejections: RunParamRejection[] = []
-  let notice: string | null = null
+  const collected: { reason: RunParamRejection; message: string }[] = []
 
   const note = (reason: RunParamRejection, message: string): void => {
-    rejections.push(reason)
-    // First rejection wins the sentence, because they are pushed in precedence
-    // order and a stack of notices is a wall of text nobody reads.
-    if (notice === null) notice = message
+    collected.push({ reason, message })
+  }
+
+  /**
+   * Publish, sorting parse order into `REJECTION_PRECEDENCE` order.
+   *
+   * The sentence comes off the head of the sorted list rather than the first `note()`
+   * call: one notice, and it is the one about the thing that decided the run. A stack
+   * of notices is a wall of text nobody reads.
+   */
+  const resolved = (mode: RunMode): ResolvedRun => {
+    const ordered = [...collected].sort(
+      (a, b) => REJECTION_RANK[a.reason] - REJECTION_RANK[b.reason],
+    )
+    return {
+      mode,
+      rejections: ordered.map((entry) => entry.reason),
+      notice: ordered[0]?.message ?? null,
+    }
   }
 
   const purist = params.get(RUN_PARAM.purist) === '1'
@@ -526,17 +583,13 @@ export function resolveRunMode(options: ResolveOptions): ResolvedRun {
           `one in the address.`,
       )
     }
-    return {
-      mode: {
-        kind: 'replay',
-        seed: normalizeSeed(replay.seed),
-        purist,
-        replay,
-        ofDaily: dailyDateForSeed(replay.seed, now),
-      },
-      rejections,
-      notice,
-    }
+    return resolved({
+      kind: 'replay',
+      seed: normalizeSeed(replay.seed),
+      purist,
+      replay,
+      ofDaily: dailyDateForSeed(replay.seed, now),
+    })
   }
 
   if (dailyDate !== null) {
@@ -548,28 +601,24 @@ export function resolveRunMode(options: ResolveOptions): ResolvedRun {
       )
     }
     const contract = dailyContract(now, dailyRecord, dailyDate)
-    return {
-      mode: {
-        kind: 'daily',
-        seed: contract.seed,
-        // The daily is always purist. If certifications could change its item
-        // pool, two players flying "the same" contract would be flying different
-        // runs, and the one thing the daily is for is comparability.
-        purist: true,
-        date: contract.date,
-        isToday: contract.isToday,
-        alreadyFlown: contract.flown,
-      },
-      rejections,
-      notice,
-    }
+    return resolved({
+      kind: 'daily',
+      seed: contract.seed,
+      // The daily is always purist. If certifications could change its item
+      // pool, two players flying "the same" contract would be flying different
+      // runs, and the one thing the daily is for is comparability.
+      purist: true,
+      date: contract.date,
+      isToday: contract.isToday,
+      alreadyFlown: contract.flown,
+    })
   }
 
   if (sharedSeed !== null) {
-    return { mode: { kind: 'shared', seed: sharedSeed, purist }, rejections, notice }
+    return resolved({ kind: 'shared', seed: sharedSeed, purist })
   }
 
-  return { mode: { kind: 'free', seed: normalizeSeed(randomSeed()), purist }, rejections, notice }
+  return resolved({ kind: 'free', seed: normalizeSeed(randomSeed()), purist })
 }
 
 /** Trim an echoed parameter before it reaches a UI string. */

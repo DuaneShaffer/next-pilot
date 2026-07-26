@@ -1,8 +1,9 @@
 /**
  * Item interactions.
  *
- * Twenty-eight declared combinations over the forty items in `items.ts`: the seven
- * from M3, unchanged, followed by twenty-one added with the M5 roster. These are the
+ * Thirty-one declared combinations over the forty-three items in `items.ts`: the seven
+ * from M3, unchanged, then twenty-one added with the M5 roster, then three for the
+ * recharging shield. These are the
  * point of M3: `docs/DESIGN.md` bets that depth comes from combinations rather than
  * roster size, and `docs/UI.md` rule 5 requires that a combination the game cannot
  * *explain* does not ship — so every one of them is data with a sentence attached,
@@ -71,13 +72,12 @@
  *
  * ## THE GRAPH SHAPE, AND WHY IT IS CAPPED
  *
- * Twenty-eight edges over forty items. Eight items are deliberately standalone (see
- * `STANDALONE_ITEM_IDS` at the bottom), so thirty-two participate, and the degree
- * distribution is:
- *
- *   degree 3  x5   gyro-trim, lance-rounds, flak-spread, scrap-magnet, repair-nanites
- *   degree 2  x14
- *   degree 1  x13
+ * Thirty-one edges over forty-three items. Eight items are deliberately standalone (see
+ * `STANDALONE_ITEM_IDS` at the bottom), so thirty-five participate. The exact degree
+ * distribution is asserted by `tests/items.test.ts` rather than restated here, because a
+ * hand-written census is a number that goes stale on the next pair added — which is the
+ * same defect this file's own retaliation note was recorded for. The shape it asserts:
+ * a maximum degree of 3, and a long tail rather than a plateau.
  *
  * **The cap is the point, not the count.** At forty items the failure mode is not a
  * sparse graph but a hub: one item that every synergy runs through turns forty items
@@ -287,10 +287,17 @@ export const INTERACTIONS: readonly InteractionDef[] = [
   /**
    * The attrition build, and Heavy Shield's one honest pairing.
    *
-   * The direction is right where the DESIGN.md shield combination's was wrong:
-   * shields regenerate nothing and integrity does not come back on its own, so a
-   * large shield is a buffer that only pays off if something behind it refills.
-   * Repair Nanites is that something.
+   * The direction is right where the DESIGN.md shield combination's was wrong: a large
+   * shield is a buffer that only pays off if something behind it refills, and Repair
+   * Nanites is that something.
+   *
+   * The original reason given here was "shields regenerate nothing", and that is no
+   * longer true — see "The shield recharges" in docs/DESIGN.md. The pairing survives
+   * the change because recovery is *suppressed under fire*: during the engagement this
+   * is still a fixed buffer with nothing behind it, and Repair Nanites is still the
+   * only thing that pays out while the shooting continues. What recovery adds is that
+   * the buffer is whole again by the next engagement, which makes this build better,
+   * not redundant.
    *
    * 40 + 35 + 20 = 95 shield, and recovery of 0.28 x (2 + 2) = 1.12 integrity per
    * kill — `amount` sums, `chance` takes the max. Effective health 195, refilling at
@@ -780,6 +787,87 @@ export const INTERACTIONS: readonly InteractionDef[] = [
       { stat: 'projectileDamage', kind: 'add', value: 2 },
       { stat: 'hullSpeed', kind: 'add', value: 40 },
     ],
+  },
+
+  // ==========================================================================
+  // Shield recovery. Added with the recharging shield — see docs/DESIGN.md.
+  // ==========================================================================
+
+  /**
+   * A big pool and a big budget, and the interaction supplies the lever neither item
+   * has: the delay.
+   *
+   * The arithmetic to understand first is that these two DO NOT compose as well as they
+   * look. Heavy Shield takes the pool to 75, Contingency Reserve takes the sector budget
+   * to 25 — so the reserve refills exactly a third of the buffer per sector, where on a
+   * bare hull 15 of 40 is over a third. Stacking capacity onto recovery *dilutes* the
+   * recovery, and a synergy marker over two items that partially cancel is the exact
+   * thing `docs/UI.md` rule 5 exists to prevent.
+   *
+   * So the interaction answers with time rather than more of either number: suppression
+   * falls to 90 ticks (1.5 s), which roughly doubles how many gaps in a fight are long
+   * enough to spend the budget in. `add: -60` composes with the base 150 the same way
+   * Standby Regulator's does — holding all three is 150 - 60 - 60 = 30, floored back to
+   * 60 by the stat's own `min`, which is that floor being load-bearing rather than
+   * decorative.
+   *
+   * The play change: 75 points of buffer, a quarter of it recoverable per sector, and the
+   * recovery reachable in gaps a second and a half long. A heavy hull that can trade a
+   * pass for a reposition instead of only for the sector boundary.
+   */
+  {
+    id: 'shunted-bulwark',
+    requires: ['contingency-reserve', 'heavy-shield'],
+    text: 'Max shield reaches 75 with 25 points recoverable per sector, and recovery starts 1.5 seconds after a hit instead of 2.5 — a heavy buffer you can top up mid-fight rather than only between sectors.',
+    stats: [{ stat: 'shieldRegenDelayTicks', kind: 'add', value: -60 }],
+  },
+
+  /**
+   * Budget meets opportunity — the two halves of recovery that are not the rate, which
+   * makes this the pairing that changes how the run is flown rather than what it totals.
+   *
+   * 25 points per sector, reachable after 1.5 seconds of quiet rather than 2.5. Both
+   * items' own modifiers already do that, so the interaction adds the third thing the
+   * pair is missing: somewhere to put it. 25 recoverable points against a 40-point pool
+   * means a build that banks the reserve early has nothing to spend the rest on, so
+   * `maxShield +16` takes the pool to 56 and the whole budget becomes usable in one
+   * sector.
+   *
+   * Deliberately NOT more rate. Both of these items are cheap to hold and the reserve is
+   * what bounds recovery's total contribution — the measured table in
+   * `sim/stats.ts` shows what happens when that bound slips.
+   */
+  {
+    id: 'standby-cycling',
+    requires: ['contingency-reserve', 'standby-regulator'],
+    text: 'Max shield rises to 56 with 25 points recoverable per sector, reachable 1.5 seconds after a hit instead of 2.5 — the whole sector budget is usable in one pool instead of overflowing it.',
+    stats: [{ stat: 'maxShield', kind: 'add', value: 16 }],
+  },
+
+  /**
+   * The anti-synergy that recovery turns into a real one, and the reason the shield
+   * change was worth making beyond the shield itself.
+   *
+   * Retaliation Coil fires only on INTEGRITY loss, so every point of shield strictly
+   * reduces its triggers. `docs/DESIGN.md` recorded that as a trap the player has to be
+   * warned off. Cycling Array cuts the buffer to 16, so hits reach integrity far more
+   * often — the coil finally fires at the rate its card implies, and the shield still
+   * comes back at 12/second between engagements, which is what stops the pair being
+   * simple self-harm.
+   *
+   * `count: 3` is an INCREMENT — retaliate counts sum, so 6 + 3 = 9 projectiles per
+   * burst. This nearly went in as `radius: 150` with a card promising a wider ring,
+   * which would have been a silent no-op: `retaliate` reads `count` and nothing else
+   * (`itemEffects.ts:103`, and `EffectKind`'s docs say so in one line). The ring has no
+   * radius to widen. That is the exact failure this file's header warns about, caught
+   * by checking the reducer instead of trusting the field list on `EffectDef`, which is
+   * shared across every kind and therefore accepts fields the kind ignores.
+   */
+  {
+    id: 'cycling-retaliation',
+    requires: ['cycling-array', 'retaliation-coil'],
+    text: 'A 16-point shield means hits land on integrity, so retaliation fires far more often, and each burst releases 9 projectiles instead of 6 — with the shield back to full 1.3 seconds after contact breaks.',
+    effects: [{ kind: 'retaliate', on: 'onHullDamaged', count: 3 }],
   },
 ]
 

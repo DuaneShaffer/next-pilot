@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   BOSSES,
@@ -84,7 +85,10 @@ const BOSS_MOVEMENTS: readonly MovementKind[] = ['hover', 'sine', 'swoop', 'drif
  * `boss hp / measured median time-to-kill` over 300 aggressor runs on each of two base
  * seeds, so these are realised seconds and are directly comparable with the `ttk med`
  * column `tools/playtest.ts` prints. Each sits at the floor its own shortest phase
- * allows under `MIN_PHASE_SECONDS`, or at the band's 20 s floor, whichever binds.
+ * allows under `MIN_PHASE_SECONDS`, or at `BOSS_TTK_BAND`'s 16.5 s floor, whichever
+ * binds. These are answers, not a source: the arithmetic they restate is in
+ * `bosses.ts`, and "the HP comments agree with the HP" below is what keeps the two
+ * from drifting apart in silence.
  */
 const INTENDED_TTK_SECONDS: Record<string, number> = {
   repossessor: 17,
@@ -597,6 +601,123 @@ describe('getBoss', () => {
   it('throws on inherited Object.prototype keys', () => {
     for (const id of ['constructor', '__proto__', 'toString', 'valueOf']) {
       expect(() => getBoss(id), id).toThrow(/Unknown boss id/)
+    }
+  })
+})
+
+/**
+ * The authored prose is held to the authored numbers.
+ *
+ * This reads `src/content/bosses.ts` as TEXT, which no other test here does, and it
+ * exists because of a specific near-miss. Five per-boss headers documented an HP ladder
+ * of 2000 / 3605 / 7200 / 9600 / 14430 while the definitions held 1700 / 3060 / 5760 /
+ * 7400 / 12210. The stale ladder was not a typo: it was the band-satisfying raise that
+ * `BOSS_TTK_BAND` records as costing about ten points of clear rate, documented as
+ * though it had shipped. Every other guard in this file passed, including
+ * `INTENDED_TTK_SECONDS`, because they all compare code against code. A future author
+ * reading a boss header and "correcting" the definition to match it would have
+ * re-introduced a measured regression, believing they were fixing a typo.
+ *
+ * WHY SCANNING COMMENTS RATHER THAN DELETING THE NUMBERS FROM THEM: the numbers are
+ * the most useful thing in those headers. `hp` alone does not tell a reader whether
+ * 5760 is a long fight or a short one — `hp / SECTOR_PLAYER_DPS[sector]` does, and that
+ * arithmetic is exactly what an author needs in front of them before touching the
+ * value. Deriving the prose instead would mean generating a docstring, which is worse
+ * to read than one that is checked. So the claim keeps a fixed shape, every boss must
+ * carry exactly one of it, and any other HP figure in a boss's block must either be
+ * live or be marked as history.
+ *
+ * MUTATION-VERIFIED against the defect it was written for: restoring "2000 HP is 20.0
+ * seconds" in the Repossessor's header fails "states each boss's own HP and fight
+ * length correctly", and restoring the old module-header table row fails "keeps the
+ * module header's HP table in step with the definitions". Deleting a claim outright
+ * fails the same test on the count.
+ */
+describe('the HP comments agree with the HP', () => {
+  const SOURCE = readFileSync(new URL('../src/content/bosses.ts', import.meta.url), 'utf8')
+
+  /** The one authored form of a live HP claim. History is written some other way. */
+  const CLAIM = /([\d,]+) HP is ([\d.]+) seconds at the measured ([\d,]+) dps/g
+  const num = (text: string): number => Number(text.replace(/,/g, ''))
+
+  /**
+   * Each boss's authored block: its doc comment through to the next boss's.
+   *
+   * Includes the phase bodies deliberately — the per-phase comments do arithmetic on
+   * the same HP figure ("Equal thirds at 1700 HP give 5.8 / 5.6 / 5.6 s") and go stale
+   * in exactly the same way.
+   */
+  function bossBlocks(): Map<string, string> {
+    const anchors: { id: string; start: number }[] = []
+    for (const id of BOSS_ORDER) {
+      const plain = SOURCE.indexOf(`\n  ${id}: {`)
+      const quoted = SOURCE.indexOf(`\n  '${id}': {`)
+      const at = plain >= 0 ? plain : quoted
+      expect(at, `no entry for ${id} in the source text`).toBeGreaterThan(0)
+      const docStart = SOURCE.lastIndexOf('/**', at)
+      expect(docStart, `no doc comment above ${id}`).toBeGreaterThan(0)
+      anchors.push({ id, start: docStart })
+    }
+    anchors.sort((a, b) => a.start - b.start)
+    const blocks = new Map<string, string>()
+    anchors.forEach((anchor, index) => {
+      blocks.set(anchor.id, SOURCE.slice(anchor.start, anchors[index + 1]?.start ?? SOURCE.length))
+    })
+    return blocks
+  }
+
+  it('states each boss own HP and fight length correctly', () => {
+    const blocks = bossBlocks()
+    for (const [index, id] of BOSS_ORDER.entries()) {
+      const def = getBoss(id)
+      const dps = SECTOR_PLAYER_DPS[index]
+      expect(dps, `no dps for sector ${index + 1}`).toBeDefined()
+      const block = blocks.get(id) ?? ''
+      const claims = [...block.matchAll(CLAIM)]
+      // Exactly one, so the guard cannot be dodged by deleting the sentence.
+      expect(claims.length, `${id} must state its HP arithmetic exactly once`).toBe(1)
+      const [, hp, seconds, claimedDps] = claims[0] ?? []
+      expect(num(hp ?? ''), `${id} header HP`).toBe(def.hp)
+      expect(num(claimedDps ?? ''), `${id} header dps`).toBe(dps)
+      expect(num(seconds ?? ''), `${id} header seconds`).toBeCloseTo(def.hp / (dps ?? 1), 1)
+    }
+  })
+
+  it('keeps the module header HP table in step with the definitions', () => {
+    // The ladder table under "Health, and the arithmetic every HP number here comes
+    // from". It is the first thing an author reads and the easiest thing to leave behind.
+    const rows = [
+      ...SOURCE.matchAll(/^ \* {3}([A-Za-z][A-Za-z ]*?) +([\d,]+) \/ (\d+) dps = ([\d.]+) s$/gm),
+    ]
+    expect(rows.length, 'the ladder table lost a row').toBe(BOSS_ORDER.length)
+    for (const [, label, hp, dps, seconds] of rows) {
+      const def = BOSS_ORDER.map(getBoss).find((boss) => boss.name.endsWith(label?.trim() ?? ''))
+      expect(def, `no boss named "${label ?? ''}"`).toBeDefined()
+      if (!def) continue
+      expect(num(hp ?? ''), `${def.id} table HP`).toBe(def.hp)
+      const index = BOSS_ORDER.indexOf(def.id)
+      expect(num(dps ?? ''), `${def.id} table dps`).toBe(SECTOR_PLAYER_DPS[index])
+      expect(num(seconds ?? ''), `${def.id} table seconds`).toBeCloseTo(bossTimeToKillSeconds(def.id), 1)
+    }
+  })
+
+  it('never quotes an HP figure that no boss has, unless it says it is history', () => {
+    // The catch-all. Any four-figure HP number in the file is either a live value or
+    // explicitly past tense ("Was 2600…", "The previous comment said… 5800 HP"), which
+    // is the distinction a reader needs and the one a stale edit destroys.
+    const live = new Set(BOSS_ORDER.map((id) => getBoss(id).hp))
+    const mentions = [...SOURCE.matchAll(/(\d[\d,]{2,}) HP\b/g)]
+    expect(mentions.length, 'the HP prose vanished entirely').toBeGreaterThanOrEqual(
+      BOSS_ORDER.length,
+    )
+    for (const mention of mentions) {
+      const value = num(mention[1] ?? '')
+      if (live.has(value)) continue
+      const before = SOURCE.slice(Math.max(0, (mention.index ?? 0) - 90), mention.index ?? 0)
+      expect(
+        /\b(was|previous|previously)\b/i.test(before),
+        `${value} HP belongs to no boss and is not marked as history`,
+      ).toBe(true)
     }
   })
 })

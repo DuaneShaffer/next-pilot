@@ -31,12 +31,19 @@ import { TICK_SECONDS } from '../src/core/loop'
 import { HULL_COLLISION_RADIUS } from '../src/sim/damage'
 import { STATS } from '../src/sim/stats'
 import {
-  CHOICE_TIMEOUT_TICKS,
-  HELD_CONFIRM_DWELL_TICKS,
   newCursor,
   updateCursor,
   type ChoiceAction,
 } from '../src/sim/progression'
+
+/**
+ * Long enough that any automatic resolution would have fired by now: three times the
+ * 20-second timeout the sim used to have, and 75x the dwell that replaced it.
+ *
+ * A local constant rather than an import, because the thing it stands in for no longer
+ * exists — cards do not close themselves. See `docs/MOBILE.md`.
+ */
+const A_LONG_CARD_WAIT = 60 * 60
 
 // --- helpers ----------------------------------------------------------------
 
@@ -134,12 +141,19 @@ function driveCursor(
   return { actions, firstConfirmTick }
 }
 
+/**
+ * The trigger, held, and NOTHING else — in particular not `confirm`.
+ *
+ * This is what a naive touch auto-fire produces on every tick of every card, and the
+ * assertions below are that a card is completely blind to it.
+ */
 const HELD_TRIGGER: InputSnapshot = {
   moveX: 0,
   moveY: 0,
   fire: true,
   special: false,
   focus: false,
+  confirm: false,
 }
 
 // --- the constants this module duplicates -----------------------------------
@@ -532,69 +546,61 @@ describe('auto-fire', () => {
 
 describe('the held trigger versus the choice cursor', () => {
   /**
-   * THE FAILURE THIS FILE EXISTS FOR.
+   * THE FAILURE THIS FILE EXISTS FOR, AND WHY IT IS NOW STRUCTURAL.
    *
-   * `HELD_CONFIRM_DWELL_TICKS` rescues a keyboard player who never released the
-   * fire key when a card opened: after 48 ticks the held trigger confirms, so the
-   * game never stops responding. On touch that is not an edge case, it is the
-   * permanent state — a naive auto-fire holds the trigger on every tick of every
-   * card. This test demonstrates what that does, so nobody re-introduces it by
-   * "simplifying" the context away.
+   * Accepting a card used to be a rising `fire` edge, so a keyboard player who never
+   * released the trigger could not resolve a card — and the rescue for that (a 48-tick
+   * dwell that confirmed the highlighted option) turned into a much worse bug here: on
+   * touch, auto-fire is the permanent state, so EVERY card on the platform took option 0
+   * after 0.8 seconds. Mobile pick rates were an input-layer artefact, and the same seed
+   * played out differently on a phone.
+   *
+   * A card reads `confirm` now, which touch only ever produces from a real tap. These
+   * tests assert the hazard is gone at the source rather than mitigated by the context
+   * switch — because a mitigation is one refactor away from being removed.
    */
-  it('would auto-confirm option 0 on every card if touch fired unconditionally', () => {
-    const held = Array.from({ length: HELD_CONFIRM_DWELL_TICKS + 4 }, () => HELD_TRIGGER)
+  it('cannot resolve a card by firing, however long it fires', () => {
+    const held = Array.from({ length: A_LONG_CARD_WAIT }, () => HELD_TRIGGER)
     const { actions, firstConfirmTick } = driveCursor(held, 3)
 
-    expect(firstConfirmTick).toBe(HELD_CONFIRM_DWELL_TICKS - 1)
-    // `fromDwell: true` is the tell, and it is the whole point of this test: the
-    // confirm is the RESCUE firing, not a player pressing anything.
-    expect(actions[HELD_CONFIRM_DWELL_TICKS - 1]).toEqual({
-      kind: 'confirm',
-      index: 0,
-      fromDwell: true,
-    })
-    // 0.8 seconds, and always the leftmost card. Mobile item pick rates would be a
-    // constant, and a seed's outcome would differ from the same seed on desktop.
-    expect(HELD_CONFIRM_DWELL_TICKS / 60).toBeLessThan(1)
+    expect(firstConfirmTick).toBeNull()
+    expect(actions.every((a) => a.kind === 'none')).toBe(true)
   })
 
-  it('would otherwise hang the card for a minute if the player navigated', () => {
-    // Navigating cancels the dwell rescue, and a trigger that never falls can never
-    // produce the rising edge a confirm needs. The card then runs to the 60-second
-    // timeout and resolves as a SKIP: the reward is lost and the game looked broken
-    // the whole time. This is worse than the bug the dwell was written to fix.
+  it('cannot resolve a card by firing and navigating either', () => {
+    // The old shape of this test asserted the opposite outcome — a card driven to the
+    // 20-second timeout and DECLINED, losing the reward — because navigating cancelled
+    // the dwell. There is no dwell and no timeout: the card simply waits for a tap.
     const inputs: InputSnapshot[] = []
     inputs.push({ ...HELD_TRIGGER, moveX: 0 })
     inputs.push({ ...HELD_TRIGGER, moveX: 1 })
-    for (let i = 0; i < CHOICE_TIMEOUT_TICKS; i++) inputs.push(HELD_TRIGGER)
+    for (let i = 0; i < A_LONG_CARD_WAIT; i++) inputs.push(HELD_TRIGGER)
 
     const { actions } = driveCursor(inputs, 3)
-    const confirms = actions.filter((a) => a.kind === 'confirm')
-    const skips = actions.filter((a) => a.kind === 'skip')
-    expect(confirms).toHaveLength(0)
-    expect(skips.length).toBeGreaterThan(0)
+    expect(actions.filter((a) => a.kind === 'confirm')).toHaveLength(0)
+    expect(actions.filter((a) => a.kind === 'skip')).toHaveLength(0)
   })
 
   it('resolves nothing on its own once touch releases the trigger', () => {
-    // The fix. A card open for a full timeout under real touch input never
-    // confirms by itself, so the player's tap is the only thing that picks.
+    // A card open for a minute under real touch input never resolves at all, so the
+    // player's tap is the only thing that picks.
     const controls = new TouchControls()
     controls.setContext('choice')
-    const inputs = Array.from({ length: CHOICE_TIMEOUT_TICKS - 1 }, () => controls.snapshot())
+    const inputs = Array.from({ length: A_LONG_CARD_WAIT }, () => controls.snapshot())
 
     const { actions } = driveCursor(inputs, 3)
     expect(actions.every((a) => a.kind === 'none')).toBe(true)
   })
 
-  it('cannot be pushed past the dwell by a one-tick-late context switch', () => {
-    // The app layer learns a card is open by reading `world.pendingChoice` after
-    // the tick that opened it, so exactly one sortie-context snapshot can leak onto
-    // a card. One tick of held fire is 47 short of the dwell.
+  it('cannot be pushed into a decision by a one-tick-late context switch', () => {
+    // The app layer learns a card is open by reading `world.pendingChoice` after the tick
+    // that opened it, so exactly one sortie-context snapshot can leak onto a card. It
+    // used to matter (one tick of the 48-tick dwell); now it cannot matter at all.
     const controls = new TouchControls()
     controls.setContext('sortie')
     const inputs = [controls.snapshot()]
     controls.setContext('choice')
-    for (let i = 0; i < CHOICE_TIMEOUT_TICKS - 2; i++) inputs.push(controls.snapshot())
+    for (let i = 0; i < A_LONG_CARD_WAIT; i++) inputs.push(controls.snapshot())
 
     const { actions } = driveCursor(inputs, 3)
     expect(actions.every((a) => a.kind === 'none')).toBe(true)
@@ -613,14 +619,7 @@ describe('driving the choice cursor from a tap', () => {
 
       const { actions } = driveCursor(inputs, 3)
       const confirm = actions.find((a) => a.kind === 'confirm')
-      // A scripted tap is a real rising edge, so it must NOT read as the dwell
-      // rescue — otherwise an unaffordable shop option would be declined on the
-      // player's behalf the moment they tapped it. See ChoiceAction.fromDwell.
-      expect(confirm, `target ${target}`).toEqual({
-        kind: 'confirm',
-        index: target,
-        fromDwell: false,
-      })
+      expect(confirm, `target ${target}`).toEqual({ kind: 'confirm', index: target })
     }
   })
 
@@ -672,6 +671,7 @@ describe('driving the choice cursor from a tap', () => {
       fire: true,
       special: false,
       focus: false,
+      confirm: false,
     })
   })
 

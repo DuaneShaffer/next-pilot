@@ -321,6 +321,30 @@ function clampY(y: number): number {
 }
 
 /**
+ * Keep a *particle* inside the playfield.
+ *
+ * Deliberately not `clampX`/`clampY`. Those carry a 20-30 unit inset whose only job is
+ * keeping a run of TEXT clear of the edge, and the ejected cases had borrowed it. At
+ * the leftmost hull the sim permits (x = 11) the 30-unit inset pinned every case to
+ * x = 30 — 19 units from the ship, both barrels landing on the same pixel — and the
+ * mirror image at the right wall. So the one effect whose entire value is "that came
+ * out of your gun" stopped saying so exactly where a pilot spends a dodge.
+ *
+ * A case is a physical object, so the playfield rect is the only limit it has any
+ * business obeying. The rect is still enforced rather than dropped: the instrument
+ * panel is drawn by the caller and not on every screen, and a chip of brass over a
+ * readout is state in the wrong column — rule 1 — while a case resting one unit
+ * inside the border for two frames is nothing.
+ */
+function clampParticleX(x: number): number {
+  return Math.max(0, Math.min(PLAYFIELD_W, finite(x, PLAYFIELD_W / 2)))
+}
+
+function clampParticleY(y: number): number {
+  return Math.max(0, Math.min(PLAYFIELD_H, finite(y, PLAYFIELD_H / 2)))
+}
+
+/**
  * Sanitise an aggregate value.
  *
  * Non-finite and negative inputs are clamped rather than trusted. A `NaN` damage
@@ -751,8 +775,8 @@ export function drawFeelShells(
 
     // Extrapolated by the render alpha rather than snapped to the tick, so a case
     // arcs smoothly on a 144Hz display like every other moving thing.
-    const x = clampX(finite(shell.x) + finite(shell.vx) * a)
-    const y = clampY(finite(shell.y) + finite(shell.vy) * a)
+    const x = clampParticleX(finite(shell.x) + finite(shell.vx) * a)
+    const y = clampParticleY(finite(shell.y) + finite(shell.vy) * a)
 
     ctx.save()
     ctx.translate(x, y)

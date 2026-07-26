@@ -105,7 +105,7 @@ const TARGET_ENEMIES = 32
 const WARMUP_TICKS = 300
 const MEASURE_TICKS = 900
 
-const IDLE: InputSnapshot = { moveX: 0, moveY: 0, fire: false, special: false, focus: false }
+const IDLE: InputSnapshot = { moveX: 0, moveY: 0, fire: false, special: false, focus: false, confirm: false }
 
 // ---------------------------------------------------------------------------
 // worst-case construction

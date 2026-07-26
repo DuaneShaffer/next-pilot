@@ -29,6 +29,7 @@ import {
   shakeForHullHit,
   tickHullInvulnerability,
 } from '../src/sim/damage'
+import { STATS } from '../src/sim/stats'
 import {
   ageEnemyCosmetics,
   createEnemy,
@@ -92,6 +93,9 @@ function makeContext(): DamageContext {
       maxIntegrity: 100,
       shield: 40,
       maxShield: 40,
+      shieldRegenProgress: 0,
+      shieldRegenBlockedTicks: 0,
+      shieldReserve: 0,
       invulnTicks: 0,
       radius: HULL_COLLISION_RADIUS,
     },
@@ -142,7 +146,7 @@ function angleFromDown(vx: number, vy: number): number {
   return (Math.atan2(vx, vy) * 180) / Math.PI
 }
 
-const FIRING: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false }
+const FIRING: InputSnapshot = { moveX: 0, moveY: 0, fire: true, special: false, focus: false, confirm: false }
 
 // --- collision --------------------------------------------------------------
 
@@ -191,7 +195,18 @@ describe('damage', () => {
     expect(ctx.hull.integrity).toBe(90)
   })
 
-  it('does not regenerate shield', () => {
+  /**
+   * This test used to assert the OPPOSITE — "does not regenerate shield" — and it was
+   * correct about the code for four milestones. It is kept, inverted, rather than
+   * deleted, because the old assertion is the reason the defect survived: a shield that
+   * never came back was pinned in place by a passing test, and the name on the tin said
+   * it was intended.
+   *
+   * `tickHullInvulnerability` alone must still not move the shield. Recovery is a
+   * separate call, and conflating them would mean any caller counting down the invuln
+   * window silently healed.
+   */
+  it('does not regenerate from the invulnerability countdown alone', () => {
     const ctx = makeContext()
     applyHullDamage(ctx, 15, 'enemy-fire', 'skiff')
     for (let i = 0; i < 600; i++) tickHullInvulnerability(ctx.hull)
@@ -1333,7 +1348,7 @@ function gameplaySnapshot(world: World): string {
   })
 }
 
-const DRIFTING: InputSnapshot = { moveX: 1, moveY: -1, fire: true, special: false, focus: false }
+const DRIFTING: InputSnapshot = { moveX: 1, moveY: -1, fire: true, special: false, focus: false, confirm: false }
 
 /** Tick until the world is frozen, or give up. Returns the tick it froze on. */
 function tickUntilFrozen(world: World, input: InputSnapshot, max: number): number {
@@ -1551,8 +1566,14 @@ describe('sim events', () => {
   it('reports shield absorption, the break, and the loss of the hull', () => {
     const world = new World('EVENTDEATH12')
     const log: Array<{ tick: number; event: SimEvent }> = []
+    // Recovery has no event of its own, so it is observed directly: the only way `shield`
+    // rises is `tickShieldRegen`, and nothing else in the sim increases it mid-sector.
+    let recovered = 0
+    let previousShield = world.hull.shield
     for (let i = 0; i < 5400 && world.runState === 'active'; i++) {
       world.tick(NEUTRAL_INPUT)
+      if (world.hull.shield > previousShield) recovered += world.hull.shield - previousShield
+      previousShield = world.hull.shield
       for (const event of world.events) log.push({ tick: world.stats.tick, event })
     }
     expect(world.runState).toBe('lost')
@@ -1564,8 +1585,34 @@ describe('sim events', () => {
     // One hull-hit per landed hit, and stats agrees.
     expect(hullHits.reduce((sum, h) => sum + h.damage, 0)).toBe(world.stats.damageTaken)
 
-    // The shield breaks exactly once — it does not regenerate in M1.
-    expect(eventsOfKind(log, 'shield-broken')).toHaveLength(1)
+    // RECOVERY ACTUALLY HAPPENS IN A REAL RUN. This is the assertion that matters, and
+    // it replaces an older one reading "the shield breaks exactly once — it does not
+    // regenerate in M1", which was true of the code and pinned the defect in place for
+    // four milestones under a name that made it look intended.
+    //
+    // Asserted on points recovered rather than on a second `shield-broken` event: with a
+    // 15-point sector reserve, whether the pilot loses a *rebuilt* shield as well is a
+    // property of this seed's wave timing, so a break count would fail on an unrelated
+    // spawn-table change with a message about shield events. Points recovered is the
+    // claim the mechanic actually makes.
+    expect(recovered, 'no shield was recovered in a whole run').toBeGreaterThan(0)
+    // And it cannot exceed the sector budget, whatever the run does — the bound the
+    // difficulty measurements depend on, checked here against a played run rather than
+    // against a hull fixture.
+    expect(recovered).toBeLessThanOrEqual(
+      STATS.shieldReservePerSector.base * world.stage.count,
+    )
+
+    // Every break is a real full-to-empty transition, never the event re-firing on an
+    // already-empty shield. Two breaks cannot be closer together than the suppression
+    // delay, because the shield has to be refilled in between to break again.
+    const breakTicks = log.filter((e) => e.event.kind === 'shield-broken').map((e) => e.tick)
+    expect(breakTicks.length).toBeGreaterThanOrEqual(1)
+    const minGap = STATS.shieldRegenDelayTicks.min + 1
+    for (let i = 1; i < breakTicks.length; i++) {
+      const gap = (breakTicks[i] as number) - (breakTicks[i - 1] as number)
+      expect(gap, `shield-broken repeated ${gap} ticks apart`).toBeGreaterThanOrEqual(minGap)
+    }
 
     const lost = eventsOfKind(log, 'hull-lost')
     expect(lost).toHaveLength(1)

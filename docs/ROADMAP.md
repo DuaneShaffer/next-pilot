@@ -530,6 +530,10 @@ documented 25-point clear-rate regression if a future author trusted them.
 
 - Fix the 2026-07-26 review findings above, and the vacuous guards that hid them. R1 and R11
   come first: every balance pass below is measured with the instruments they break.
+- Land **D1–D6** from "Proposed, unscheduled" below — the code the cross-run persistence decision
+  (`docs/DESIGN.md`, 2026-07-26) found already breaking it. D1–D3 before the balance passes: the
+  certified pool is an unrecorded simulation input, so the daily contract and every `purist` label
+  are currently wrong.
 - Balance passes driven by bot sweeps
 - Accessibility: shake/flash reduction, colourblind-safe verification, remappable keys, pause
 - Settings screen
@@ -546,10 +550,74 @@ See **Proposals not yet decided** in `docs/DESIGN.md` for the reasoning. Summary
 - ~~**World map + between-sector shops**~~ — **built in M5**, as folded in. See above.
 - **Experience / levels** — a real addition, but only if its rhythm is distinct from
   items (high frequency, low deliberation). Otherwise it is a second power curve doing
-  the same job.
-- **Cross-run persistence of items and levels** — UNRESOLVED and load-bearing. It
-  contradicts the Progression section of `docs/DESIGN.md` and the constraint M4's
-  certifications are built under. Decide before M5, not during it.
+  the same job. **Constrained by the decision below**: a level may not outlive the run,
+  and an unlockable level cap is a number and therefore banned.
+- ~~**Cross-run persistence of items and levels**~~ — **DECIDED 2026-07-26.** See
+  "Cross-run persistence changes the deck, never the numbers" in `docs/DESIGN.md`.
+  Cross-run persistence may change **which content ids a run can draw from** and
+  nothing else; no persisted value may change what a resolved number evaluates to.
+  Certifications remain the entire mechanism. The roguelite reading is refused
+  permanently, which costs the 26–36% clear rate its standard cure.
+
+  **The decision is not free, because the code already breaks it in six places.** Found
+  by grep at the M5 exit point, none caught by the suite, numbered D1–D6 so commits can
+  cite them. Line numbers are from 2026-07-26 and the tree is moving; the symbols are
+  the durable part. **These are M6 items and D1–D3 come before the balance passes**, for
+  the same reason R1 and R11 did: they are correctness, and two of them are load-bearing
+  for features that already shipped as headline claims.
+
+  - **D1 — the certified pool reaches the sim and is not in the replay.** `main.ts:614`
+    passes `workOrders: runPool.workOrders` into `new World(...)`;
+    `sim/world.ts:885` reads it; `meta/snapshot.ts:468-469` hashes its length and every
+    kind string. So a replay recorded by a pilot holding `vault-clearance` is played back
+    against the *viewer's* pool — `beginSortie` honours `claimed.replay.hullId`
+    (`main.ts:584`) but `launchSortie` always passes `runPool.workOrders`. Format version
+    and `SIM_VERSION` both match, so it decodes perfectly and diverges silently, which is
+    the exact failure the version byte exists to prevent, arriving through a field the
+    format does not have. Fix: record the granting id set (a bitmask over
+    `CERTIFICATION_IDS` is one byte today) in the replay header, bump
+    `REPLAY_FORMAT_VERSION` 3 → 4 — **not** `SIM_VERSION` — and make `playback` throw on
+    a pool-fingerprint mismatch, the guard `hullId` got after M5. The corpus needs no
+    re-base: every fixture was recorded with `workOrders` omitted, so it is already a
+    base-pool run.
+  - **D2 — a daily contract is not flown purist.** `meta/seedModes.ts:611` sets
+    `purist: true` and its comment states the reason correctly, and nothing narrows the
+    pool: `runPool = poolFor(unlockedSet(save.certifications.unlocked))` unconditionally
+    at `main.ts:452` and `:567`, and `purist` appears nowhere in the launch path. So two
+    players on the same contract today can get different hull offers (`main.ts:571`), a
+    different work-order card, and a different state digest. The one feature the daily
+    exists for does not work.
+  - **D3 — a `?purist=1` shared run is not purist either.** Same cause; the share card
+    labels it `SHARED · PURIST` (`meta/seedModes.ts:621`). The filed fingerprint is honest
+    (`main.ts:526`), so `verifyPurist` will correctly read `expanded` — the record is right
+    and the label is wrong, which is the better failure direction but still a UI rule 4
+    violation, and therefore priority 1.
+  - **D4 — `POOL_SLICES_HONOURED` is stale, so four certification cards understate
+    themselves.** `tests/certifications.test.ts:309` lists only `workOrders` and its
+    docstring says no hull selection screen exists. It does: `offerHulls`
+    (`main.ts:571`), `shouldShowHullSelect`, `screen = 'hull-select'` (`:593`), and a
+    launch on the selected hull. So `hulls` is an honoured slice, and the four
+    hull-granting cards still say `awaiting: 'a hull selection screen'`
+    (`content/certifications.ts:304`, `:364`, `:393`, `:462`) — the hangar telling a pilot
+    an earned hull cannot be flown when it can. Same family as R12. One change: move
+    `hulls` into the honoured list, rewrite the four `awaiting` strings, fix the
+    docstring.
+  - **D5 — the certified game has never been measured.** `tools/playtest.ts:75` omits
+    `workOrders` while claiming to mirror `src/main.ts` exactly — the one place in the
+    harness its own comment says this could quietly happen. So every M5 number is a
+    base-pool number. That is the right *reference* band and should be labelled as such,
+    but the decision's safety argument ("a bigger pool is the same power at more variety")
+    is currently an argument and not a measurement. Needs a fully-certified sweep beside
+    the base one.
+  - **D6 — six of ten certifications still grant nothing.** `items`, `enemies`,
+    `bossVariants` and `hazards` are never drawn from the pool: the app hands the sim the
+    whole `ITEMS`/`SECTORS`/`BOSSES`/`HAZARDS` tables, and `pickVariant` reads
+    `BossDef.variants` (`sim/world.ts:1404`). Seven granted ids resolve to nothing in any
+    table (`drone-uplink`, `mirror-mount`, `ranging-computer`, `precision-sights`,
+    `tally-turret`, `tally-escort`, `turret-siege`). Not a violation of the rule — the
+    rule under-applied — and the cards say so honestly, so this is scheduling rather than
+    a lie. Note that gating any of these slices moves every existing player's pool
+    fingerprint, so it is a versioned change and not a content change.
 
 ## M7 — Mobile
 

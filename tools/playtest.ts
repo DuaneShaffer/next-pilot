@@ -50,7 +50,6 @@ import {
   isBotName,
   isRouteStyle,
 } from '../src/sim/bots'
-import { CHOICE_TIMEOUT_TICKS } from '../src/sim/progression'
 import type { RunContent } from '../src/sim/world'
 import { World } from '../src/sim/world'
 import { digestWorld } from '../src/meta/snapshot'
@@ -434,6 +433,13 @@ export interface RunResult {
   finalStageIndex: number
   /** Stages cleared. 5 means the run was completed. */
   stagesCleared: number
+  /**
+   * Set when this run was ABANDONED on a card nothing was resolving.
+   *
+   * Non-null means the numbers in this run are not measurements of anything: it ends
+   * where the stall was, not where the pilot died. See `CHOICE_STALL_ABORT_TICKS`.
+   */
+  choiceStall: ChoiceStall | null
 }
 
 interface RunObservations {
@@ -542,6 +548,40 @@ function ceilingDps(view: WorldView, volley: number): number {
 }
 
 /** A choice screen currently open, waiting to be resolved. */
+/**
+ * Unfrozen ticks one card may stay open before this harness declares the sweep broken
+ * and stops the run.
+ *
+ * THIS IS NOW A REAL CEILING AND IT HAS TO BE. The sim used to auto-resolve any card
+ * after 1,200 ticks, so a policy that stopped resolving cards produced a corrupted
+ * measurement rather than a hang — and the corruption was invisible, because the guard
+ * that was supposed to catch it compared against a stale copy of the timeout (3,600)
+ * while the timeout was 1,200. R1 in docs/ROADMAP.md: a bot sat 1,201 ticks on an
+ * unaffordable shop option, every survival number in the report was inflated by it,
+ * and nothing said a word.
+ *
+ * With the timeout removed a stuck card stays open for the rest of the run, which is
+ * an improvement ONLY because of this bound. Exceeding it aborts the run, prints a
+ * FAIL, and exits non-zero — a stall must cost a red sweep, never a quiet row in a
+ * table.
+ *
+ * Derived from the bots' own budget rather than written down, so the two cannot drift.
+ * The multiple is slack, not tolerance: a card that overruns
+ * `MAX_CHOICE_RESOLUTION_TICKS` at all is already reported as over-budget below; ten
+ * times it (one second of sim time on a screen a bot resolves in six ticks) is a
+ * policy that has stopped resolving rather than one that is navigating badly.
+ */
+const CHOICE_STALL_ABORT_TICKS = MAX_CHOICE_RESOLUTION_TICKS * 10
+
+/** A card a run gave up on: the bound above fired and the run was cut short. */
+export interface ChoiceStall {
+  kind: PendingChoiceKind
+  /** Unfrozen ticks the card had been open when the run was abandoned. */
+  scriptTicks: number
+  /** Sim tick the card opened, so a repro can be driven to it. */
+  openedAtTick: number
+}
+
 interface OpenChoice {
   kind: PendingChoiceKind
   offers: readonly OfferObservation[]
@@ -564,6 +604,8 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
 
   const choices: ChoiceObservation[] = []
   let open: OpenChoice | null = null
+  /** Set when the stall bound fired and this run was abandoned. */
+  let stall: ChoiceStall | null = null
   /** The open card's sim-side `openTicks` as last observed. See `chained` below. */
   let lastChoiceOpenTicks = -1
   let scrapSpent = 0
@@ -743,6 +785,26 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
     if (pending === null) lastChoiceOpenTicks = -1
     else if (!frozenThisTick) lastChoiceOpenTicks = openTicks ?? lastChoiceOpenTicks + 1
 
+    // --- the stall bound ------------------------------------------------------
+    //
+    // THE HARD CEILING. Nothing in the sim resolves a card on the player's behalf at
+    // all — no timeout, no dwell — so a card the policy has stopped resolving stays open
+    // until the tick cap: one run silently spending its whole budget on one screen, which
+    // is what R1 looked like. Abandon it instead, loudly, and let `printChoiceHealth`
+    // fail the sweep over it. Bounded by construction: this check runs on every tick a
+    // card is open, so the run cannot outlive it.
+    if (open !== null) {
+      const scriptTicks = ticks - open.openedAtTick - open.frozenTicks
+      if (scriptTicks > CHOICE_STALL_ABORT_TICKS) {
+        stall = {
+          kind: open.kind,
+          scriptTicks,
+          openedAtTick: view.stats.tick - (ticks - open.openedAtTick),
+        }
+        break
+      }
+    }
+
     // --- damage output, measured from the outside --------------------------
     // Every live enemy's hp against what it was last tick. Unavoidably per-tick:
     // sampling would miss most of the decrements entirely.
@@ -883,6 +945,7 @@ function runOnce(policyName: BotName, seed: string, options: RunOptions): RunRes
     stages,
     finalStageIndex: view.stage.index,
     stagesCleared,
+    choiceStall: stall,
   }
 }
 
@@ -996,12 +1059,22 @@ export interface ItemReport {
  * Its own section, over every card of every kind, because the item report cannot
  * host it: `summariseItems` skips any choice with no offers, so a route card — the
  * first card of every seam — is invisible there, and so was the 1,201-tick stall
- * that used to sit behind it. A card resolved by `CHOICE_TIMEOUT_TICKS` is not a
- * slow bot, it is a pick nobody made plus twenty seconds of dead sim time charged to
- * the run's survival number.
+ * that used to sit behind it.
  *
- * The threshold is IMPORTED, not written down. The prose here previously said the
- * backstop was 3,600 ticks while the constant said 1,200, and a guard comparing
+ * THE SIM NO LONGER HAS A BACKSTOP. It used to auto-resolve any card after 1,200
+ * ticks, which meant a policy that stopped resolving cards produced a corrupted
+ * measurement — a pick nobody made plus twenty seconds of dead time charged to a
+ * survival number — instead of a hang. This section was where that showed up, and it
+ * did not: the guard compared against a stale 3,600 while the constant was 1,200.
+ *
+ * So the numbers below are now the ONLY thing standing between a broken policy and a
+ * green sweep, and both of them are hard failures that exit non-zero:
+ *
+ *   overBudget — a card took longer than the bots' own navigation budget. The policy
+ *                has lost the cursor, so its picks are not the picks it chose.
+ *   stalls     — a card was never resolved at all and the run was abandoned on it.
+ *
+ * The thresholds are IMPORTED or derived, never written down. A guard comparing
  * against a stale copy of a number is a guard that passes.
  */
 interface ChoiceHealth {
@@ -1012,23 +1085,25 @@ interface ChoiceHealth {
   overBudget: number
   worstScriptTicks: number
   worstKind: string
-  /** Cards the sim resolved itself. Every one of these is a corrupted measurement. */
-  timedOut: number
+  /** Runs abandoned on a card nothing was resolving. Each is a hang, not a slow bot. */
+  stalls: readonly ChoiceStall[]
   /** Ticks spent on over-budget cards. What a survival median was inflated by. */
   deadTicks: number
 }
 
 function summariseChoiceHealth(runs: readonly RunResult[]): ChoiceHealth {
-  const health: ChoiceHealth = {
+  const stalls: ChoiceStall[] = []
+  const health = {
     cards: 0,
     chained: 0,
     overBudget: 0,
     worstScriptTicks: 0,
     worstKind: '-',
-    timedOut: 0,
+    stalls,
     deadTicks: 0,
   }
   for (const run of runs) {
+    if (run.choiceStall !== null) stalls.push(run.choiceStall)
     for (const choice of run.choices) {
       health.cards++
       if (choice.chained) health.chained++
@@ -1041,24 +1116,36 @@ function summariseChoiceHealth(runs: readonly RunResult[]): ChoiceHealth {
         health.overBudget++
         health.deadTicks += scriptTicks
       }
-      if (choice.ticksOpen >= CHOICE_TIMEOUT_TICKS) health.timedOut++
     }
   }
   return health
 }
 
+/** True when the sweep's cards are unhealthy enough that its numbers cannot be read. */
+function choiceHealthFailed(health: ChoiceHealth): boolean {
+  return health.stalls.length > 0 || health.overBudget > 0
+}
+
 function printChoiceHealth(health: ChoiceHealth): void {
   console.log('')
-  console.log('CHOICE RESOLUTION — did the POLICIES decide, or did the sim decide for them?')
+  console.log('CHOICE RESOLUTION — did the POLICIES decide, or did nobody decide?')
   console.log(
     `  ${health.cards} cards seen, ${health.chained} of them opened in the same tick the previous one closed` +
       ' (a seam chains route -> transit item -> transit shop)',
   )
-  if (health.timedOut > 0) {
+  if (health.stalls.length > 0) {
     console.log(
-      `  FAIL  ${health.timedOut} card(s) were resolved by the sim's ${CHOICE_TIMEOUT_TICKS}-tick backstop, not by a` +
-        ' policy. Those picks are not picks, and each one adds 20 seconds of dead time to a survival number.',
+      `  FAIL  ${health.stalls.length} run(s) were ABANDONED on a card nobody resolved, after ` +
+        `${CHOICE_STALL_ABORT_TICKS} unfrozen ticks on one screen. NOTHING in the sim closes a card on its own,` +
+        ' so this is a hang rather than a slow bot: the policy stopped producing the inputs the card needs' +
+        ' (accepting is `InputSnapshot.confirm`, not `fire`). Every number in those runs ends at the stall.',
     )
+    for (const stall of health.stalls) {
+      console.log(
+        `          ${stall.kind} card opened at sim tick ${stall.openedAtTick}, still open ` +
+          `${stall.scriptTicks} unfrozen ticks later`,
+      )
+    }
   }
   if (health.overBudget > 0) {
     console.log(
@@ -1067,10 +1154,10 @@ function printChoiceHealth(health: ChoiceHealth): void {
         ' A policy that overruns has lost the cursor, so its picks are not the ones it chose.',
     )
   }
-  if (health.timedOut === 0 && health.overBudget === 0) {
+  if (!choiceHealthFailed(health)) {
     console.log(
-      `  PASS  every card resolved inside ${MAX_CHOICE_RESOLUTION_TICKS} unfrozen ticks ` +
-        `(worst ${health.worstScriptTicks} on a ${health.worstKind}); none reached the ${CHOICE_TIMEOUT_TICKS}-tick backstop`,
+      `  PASS  every card was resolved by its policy inside ${MAX_CHOICE_RESOLUTION_TICKS} unfrozen ticks ` +
+        `(worst ${health.worstScriptTicks} on a ${health.worstKind}); no run stalled on a card`,
     )
   }
 }
@@ -2169,8 +2256,9 @@ function printItems(report: ItemReport, label: string): void {
   console.log(
     `  longest screen open: ${report.maxChoiceTicks} ticks, of which ` +
       `${report.maxChoiceScriptTicks} were the bot's scripted navigation ` +
-      `(budget ${MAX_CHOICE_RESOLUTION_TICKS}; the sim's fallback timeout is ${CHOICE_TIMEOUT_TICKS} and no policy may ` +
-      'reach it — the surplus is hitstop overlapping a reward screen, which costs nothing. See CHOICE RESOLUTION' +
+      `(budget ${MAX_CHOICE_RESOLUTION_TICKS}; the sim has no fallback timeout, so a card this harness does not ` +
+      `resolve stays open — ${CHOICE_STALL_ABORT_TICKS} unfrozen ticks on one screen abandons the run. The surplus ` +
+      'over the budget is hitstop overlapping a reward screen, which costs nothing. See CHOICE RESOLUTION' +
       ' above, which covers route and work-order cards too; this line only sees cards that carry offers)',
   )
 }
@@ -2592,7 +2680,7 @@ function printCoverage(coverage: Coverage, summaries: readonly PolicySummary[]):
       notes.push(
         `A POLICY IS MIS-NAVIGATING THE CURSOR: a screen took ${coverage.items.maxChoiceScriptTicks} unfrozen ticks ` +
           `against a ${MAX_CHOICE_RESOLUTION_TICKS}-tick budget, so some picks are not the picks the policy chose ` +
-          'and every pick rate above is suspect',
+          'and every pick rate above is suspect. This sweep exited non-zero over it — see CHOICE RESOLUTION',
       )
     }
     notes.push(
@@ -2970,6 +3058,11 @@ Policies:
 ${BOT_NAMES.map((name) => `  ${pad(name, 14)}${pad(name === 'build-focused' ? 'item-only' : BOTS[name].routeStyle, 11)}${BOTS[name].measures}`).join('\n')}
 
 The second column is the policy's default world-map appetite. --route-style overrides it.
+
+Exit codes: 0 healthy, 1 bad flags, 2 World does not implement WorldView, 3 a fixture
+failed to reproduce, 4 CHOICE RESOLUTION failed — a policy stalled on a card or overran
+its ${MAX_CHOICE_RESOLUTION_TICKS}-tick navigation budget, so the sweep's numbers are not measurements. The sim has
+no choice timeout, so ${CHOICE_STALL_ABORT_TICKS} unfrozen ticks on one card abandons the run.
 `)
 }
 
@@ -3191,7 +3284,8 @@ function main(argv: readonly string[]): void {
         itemsEnabled: !args.noItems,
         maxChoiceTicks: aggregateItems.maxChoiceTicks,
         choiceResolutionBudgetTicks: MAX_CHOICE_RESOLUTION_TICKS,
-        choiceTimeoutTicks: CHOICE_TIMEOUT_TICKS,
+        /** The sim has no choice timeout; this is the harness's own hard ceiling. */
+        choiceStallAbortTicks: CHOICE_STALL_ABORT_TICKS,
         choiceHealth,
         notMeasured: [
           'fun',
@@ -3207,6 +3301,9 @@ function main(argv: readonly string[]): void {
     }
     if (args.detail) payload['runs'] = allRuns
     console.log(JSON.stringify(payload, null, 2))
+    // On stderr, so the JSON on stdout stays parseable. The exit code is the part a
+    // caller cannot overlook.
+    exitIfChoicesUnhealthy(choiceHealth)
     return
   }
 
@@ -3261,6 +3358,25 @@ function main(argv: readonly string[]): void {
       `(${timing.runsPerSecond} runs/s, ${timing.ticksPerSecond} ticks/s, ${timing.realtimeFactor}x realtime)`,
   )
   console.log('')
+  exitIfChoicesUnhealthy(choiceHealth)
+}
+
+/**
+ * Turn a choice-resolution failure into a non-zero exit, or return.
+ *
+ * A FAIL line in a wall of output is a FAIL nobody acts on, and there is no human
+ * reading these sweeps — see docs/VERIFICATION.md. The sim used to auto-resolve a card
+ * nobody was resolving, so this class of bug could only ever be a wrong number in a
+ * table; now it is a stalled run, and a stalled run has to be a red sweep.
+ */
+function exitIfChoicesUnhealthy(health: ChoiceHealth): void {
+  if (!choiceHealthFailed(health)) return
+  console.error(
+    `playtest: CHOICE RESOLUTION FAILED — ${health.stalls.length} run(s) abandoned on an unresolved card, ` +
+      `${health.overBudget} card(s) over the ${MAX_CHOICE_RESOLUTION_TICKS}-tick navigation budget. ` +
+      'The pick rates and survival numbers in this sweep are not measurements. See CHOICE RESOLUTION above.',
+  )
+  process.exit(4)
 }
 
 /** Only run as a CLI. Importable from tests without launching a sweep. */

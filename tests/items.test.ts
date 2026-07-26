@@ -145,6 +145,14 @@ const PROMISED_TOTALS: Record<string, Partial<ReturnType<typeof summariseEffects
   'hauler-plating': {},
   'manifold-curtain': { splitShotCount: 9, splitShotSpreadDegrees: 70, pierceCount: 1 },
   'bunker-optics': {},
+  // Shield recovery. Two are pure `stats`, so they carry an empty entry for the same
+  // reason the M5 stat-only interactions above do.
+  'shunted-bulwark': {},
+  'standby-cycling': {},
+  // 6 from Retaliation Coil + 3 from the interaction. This entry is the reason the
+  // pairing is correct: it first went in as `radius: 150`, which `retaliate` does not
+  // read at all, and there is no `retaliateRadius` field here to promise it against.
+  'cycling-retaliation': { retaliateCount: 9 },
   'heavy-broadside': { pierceCount: 1 },
   'vector-magnet': {},
   'curtain-focus': { splitShotCount: 4, splitShotSpreadDegrees: 34 },
@@ -173,14 +181,31 @@ function numeral(value: number): string {
  */
 function salientNumbers(modifier: StatModifier): string[] {
   const spec = STATS[modifier.stat]
-  if (modifier.kind === 'add') {
-    return [numeral(Math.abs(modifier.value)), numeral(spec.base + modifier.value)]
+  const out =
+    modifier.kind === 'add'
+      ? [numeral(Math.abs(modifier.value)), numeral(spec.base + modifier.value)]
+      : [
+          numeral(Math.abs(Math.round((modifier.value - 1) * 100))),
+          numeral(spec.base * modifier.value),
+          numeral(modifier.value),
+        ]
+
+  // A tick-valued stat may be stated in SECONDS instead, and both spellings count.
+  //
+  // Ticks are the simulation's unit and UI rule 2 says the player is told seconds, so
+  // requiring the tick count in the mechanism would force content to leak an
+  // implementation unit into player-facing text. `salientEffectNumbers` already makes
+  // exactly this allowance for `durationTicks`; this extends the same rule to stats,
+  // which is where `shieldRegenDelayTicks` needed it. The check does NOT get weaker: the
+  // card must still name a real number derived from the modifier, just in either unit.
+  if (modifier.stat.endsWith('Ticks')) {
+    const ticks =
+      modifier.kind === 'add'
+        ? [Math.abs(modifier.value), spec.base + modifier.value]
+        : [spec.base * modifier.value]
+    for (const t of ticks) out.push(numeral(t / TICK_HZ))
   }
-  return [
-    numeral(Math.abs(Math.round((modifier.value - 1) * 100))),
-    numeral(spec.base * modifier.value),
-    numeral(modifier.value),
-  ]
+  return out
 }
 
 /** The same, for an effect's tuning params. */

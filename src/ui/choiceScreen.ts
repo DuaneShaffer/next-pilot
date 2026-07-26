@@ -7,12 +7,24 @@ export { WORK_ORDERS }
  * This is where `docs/UI.md` rules 4 and 5 are either honoured or not, so the
  * whole module is arranged around them:
  *
- * - **Rule 4, mechanism first.** Every option renders name + tier, then
- *   `ItemDef.mechanism` *verbatim* in the largest body size on the card, then
- *   flavour in the faintest colour the palette has. Flavour is the first thing
+ * - **Rule 4, mechanism first.** Every option renders name + tier, then — for any
+ *   offer whose def carries stat modifiers — the **resolved before → after for this
+ *   run**, then `ItemDef.mechanism` *verbatim* in the largest body size on the card,
+ *   then flavour in the faintest colour the palette has. Flavour is the first thing
  *   dropped when the content does not fit (see the degradation cascade in
  *   `layoutChoiceScreen`), because it is the only part of an option that rule 4
  *   allows to be missing.
+ *
+ *   **WHY THE RESOLVED NUMBERS COME FIRST, ABOVE THE AUTHORED SENTENCE.** The
+ *   sentence in `items.ts` is written before any run exists, so it can only quote the
+ *   *item*: "+22 max shield" is +22 on a stock hull, +0 on one holding Exposed Core
+ *   (which sets `maxShield` to `mul 0`), and "+45% damage" is +1.8 or +14 depending
+ *   entirely on what is already fitted. The rows say what the pick does to the ship
+ *   the player is actually flying, so they are the priority-1 information on the card
+ *   and they are read first; the sentence underneath keeps the *why*, and keeps the
+ *   behaviour that no number can describe. `src/ui/statDelta.ts` explains why the
+ *   after value has to be re-resolved from the whole modifier list rather than nudged
+ *   from the resolved one — the naive version is wrong for every `mul` item.
  * - **Rule 5, synergies are stated.** `ItemOffer.interactionText` is resolved by
  *   the simulation, so this screen never asks whether two items combine — it can
  *   only fail to *show* an answer it was given. Any offer with a non-empty
@@ -40,7 +52,13 @@ export { WORK_ORDERS }
  * are no bullets underneath for the card to hide.
  */
 
-import type { InteractionDef, ItemDef, ItemTier, WorkOrderDef } from '../content/types'
+import type {
+  InteractionDef,
+  ItemDef,
+  ItemTier,
+  StatModifier,
+  WorkOrderDef,
+} from '../content/types'
 import { VIRTUAL_H, VIRTUAL_W } from '../core/space'
 import { Palette } from '../render/palette'
 import { drawText, measureText, wrapText, type Measure } from '../render/text'
@@ -52,8 +70,10 @@ import type {
   HeldItem,
   ItemOffer,
   PendingChoiceKind,
+  ResolvedStats,
   WorldView,
 } from '../sim/entities'
+import { collectBuildModifiers, statDeltaRows, type StatDeltaRow } from './statDelta'
 // A module cycle: `worldMap` imports this file's hoisted helpers back. Only the
 // function declaration is used, and only inside a function body, so neither module
 // reads the other during initialisation. Do not import a `const` across this edge.
@@ -133,6 +153,22 @@ const MECH_LH = 17
 const SUB_SIZE = 12
 const SUB_LH = 15
 const LABEL_SIZE = 11
+
+/**
+ * The resolved stat block: one row per stat the offer moves, at `SUB_SIZE`/`SUB_LH`,
+ * introduced by a run-in label at `LABEL_SIZE`. Both clear rule 7's 11px floor.
+ */
+const STAT_GAP = 4
+/**
+ * Names whose numbers these are.
+ *
+ * Without it the card shows two different figures for the same stat — the item's
+ * authored "4 to 5.8" and this run's "5 → 7.3" — and nothing says which is which.
+ * Two words is the cheapest possible answer to that.
+ */
+export const STAT_ROW_LABEL = 'YOUR SHIP'
+/** Separator when two rows share one line at the tightest degradation level. */
+export const STAT_ROW_SEP = '  ·  '
 
 const SYN_GAP = 7
 const SYN_PAD = 6
@@ -352,6 +388,10 @@ export interface OptionLayout {
   mechanismLines: readonly string[]
   interactionLines: readonly string[]
   flavourLines: readonly string[]
+  /** Resolved before → after rows for this run. Empty when the offer moves no stat. */
+  statRows: readonly StatDeltaRow[]
+  /** True when the rows were collapsed onto one line to fit. Their deltas are dropped. */
+  statCompact: boolean
   /** Every line inside `box`, positioned and measured. */
   lines: readonly TextLine[]
   /** Border/accent colour for this box. */
@@ -384,7 +424,8 @@ export interface ChoiceScreenLayout {
   pulse: number
   /**
    * How much detail was dropped to fit: 0 nothing, 1 flavour, 2 flavour and
-   * interaction text past two lines, 3 past one line.
+   * interaction text past two lines, 3 past one line and the resolved stat rows
+   * collapsed onto one.
    */
   degrade: number
   /** True if even the tightest pass overflows. A bug, and a test asserts against it. */
@@ -392,13 +433,6 @@ export interface ChoiceScreenLayout {
 }
 
 export interface ChoiceLayoutInput {
-  /**
-   * True while the trigger has been held for every tick since the card opened.
-   *
-   * Drives the "release fire to choose" hint — see the footer. A card that ignores
-   * the button a player is pressing must at least explain itself.
-   */
-  awaitingRelease?: boolean
   kind: PendingChoiceKind
   offers: readonly ItemOffer[]
   costs: readonly number[]
@@ -410,6 +444,21 @@ export interface ChoiceLayoutInput {
   tick: number
   items: Readonly<Record<string, ItemDef>>
   workOrderDefs?: Readonly<Record<string, WorkOrderDef>>
+  /**
+   * Every modifier already in play — hull, held items per stack, live interactions.
+   *
+   * The "before" of every resolved row is folded from this, and the "after" from this
+   * plus the offer's own modifiers. Defaults to what `held` implies; the app layer
+   * passes the full list because only it knows the hull.
+   */
+  currentModifiers?: readonly StatModifier[]
+  /**
+   * `WorldView.resolvedStats`, as a cross-check rather than as a source.
+   *
+   * A row whose reconstructed "before" disagrees with the simulation is dropped, so
+   * this card can never quote a figure the instrument panel contradicts.
+   */
+  resolvedStats?: ResolvedStats
   measure?: Measure
 }
 
@@ -435,6 +484,31 @@ interface OptionContent {
   mechanism: readonly string[]
   flavour: readonly string[]
   interaction: readonly string[]
+  /**
+   * Resolved before → after for every stat this offer moves, for the build in hand.
+   *
+   * Empty for a work order, for an item that is pure behaviour, for an unknown id, and
+   * for any stat whose reconstructed "before" disagreed with the simulation's own
+   * resolved value — see `statDeltaRows`.
+   */
+  statRows: readonly StatDeltaRow[]
+  /**
+   * True when the label plus the first row and its delta fit one line.
+   *
+   * False drops the label rather than letting it push a number past the box edge. The
+   * stat table's own bounds keep every row short enough that no shipped item reaches
+   * this, and a test says so — it exists so a future stat with a wider range degrades
+   * instead of overflowing.
+   */
+  statLabelInline: boolean
+  /**
+   * True when every row fits one line together, without deltas, after the label.
+   *
+   * What the tightest degradation level collapses the block to. Measured rather than
+   * assumed, because a collapse that then wraps saves nothing and the height
+   * calculation would be wrong about it.
+   */
+  statFitsOneLine: boolean
 }
 
 const TEXT_W = CONTENT_W - OPT_PAD * 2 - CARET_GUTTER
@@ -446,8 +520,23 @@ function synLinesShown(degrade: number, total: number): number {
   return Math.min(1, total)
 }
 
+/**
+ * Lines the resolved stat block occupies at this degradation level.
+ *
+ * Never zero when there are rows: the resolved numbers are the priority-1 information
+ * on the card, so at the tightest level they collapse onto one line — losing the
+ * `(+22)` parentheticals, which are the one part a reader can recompute from the two
+ * numbers still shown — rather than being dropped the way flavour is.
+ */
+function statLinesShown(content: OptionContent, degrade: number): number {
+  if (content.statRows.length === 0) return 0
+  return degrade >= 3 && content.statFitsOneLine ? 1 : content.statRows.length
+}
+
 function optionHeight(content: OptionContent, degrade: number): number {
   let h = OPT_PAD + TITLE_H + content.mechanism.length * MECH_LH
+  const statLines = statLinesShown(content, degrade)
+  if (statLines > 0) h += STAT_GAP + statLines * SUB_LH
   if (degrade === 0 && content.flavour.length > 0) {
     h += 4 + content.flavour.length * SUB_LH
   }
@@ -465,12 +554,56 @@ function priceWidth(cost: number, shortfall: number, measure: Measure): number {
   return value + 10 + measure(`SHORT ${shortfall} cr`, LABEL_SIZE, 600, 1.2)
 }
 
+/**
+ * Measure the stat block's two collapse decisions once, at content-build time.
+ *
+ * Both feed `optionHeight`, so they have to be settled before any box is sized — the
+ * same reason `priceInline` is decided here. `src/render/panel.ts` records two shipped
+ * bugs from guessing at a width instead of measuring it.
+ */
+function measureStatBlock(
+  rows: readonly StatDeltaRow[],
+  measure: Measure,
+): { statLabelInline: boolean; statFitsOneLine: boolean } {
+  if (rows.length === 0) return { statLabelInline: false, statFitsOneLine: false }
+  const labelW = measure(STAT_ROW_LABEL, LABEL_SIZE, 600, 1.4) + 10
+  // Every row is indented past the label, not just the one that shares its line, so two
+  // rows read as a table rather than as a table and a stray sentence. Measured over the
+  // WIDEST row for that reason — the second row can be longer than the first.
+  const widest = rows.reduce(
+    (max, row) =>
+      Math.max(max, measure(row.text, SUB_SIZE) + measure(` ${row.deltaText}`, LABEL_SIZE, 600)),
+    0,
+  )
+  const statLabelInline = labelW + widest <= TEXT_W
+
+  const sepW = measure(STAT_ROW_SEP, SUB_SIZE)
+  const joined = rows.reduce(
+    (sum, row, index) => sum + (index > 0 ? sepW : 0) + measure(row.text, SUB_SIZE),
+    0,
+  )
+  return {
+    statLabelInline,
+    statFitsOneLine: rows.length > 1 && (statLabelInline ? labelW : 0) + joined <= TEXT_W,
+  }
+}
+
 function buildOptionContent(
   input: ChoiceLayoutInput,
   scrap: number,
   measure: Measure,
 ): readonly OptionContent[] {
   const { kind } = input
+  // Falls back to the modifiers the *offers* imply, so a caller that hands over a build
+  // without its hull still gets rows that agree with the build strip beside them. The
+  // app layer passes the full list, hull included — see `drawChoiceScreen`.
+  const current =
+    input.currentModifiers ??
+    collectBuildModifiers({
+      held: input.held,
+      items: input.items,
+      activeInteractions: input.activeInteractions,
+    })
   if (kind === 'work-order') {
     // Indexed by a raw string from the sim, not by `WorkOrderKind`, so an
     // unrecognised kind falls through to the prettified id instead of failing to
@@ -495,6 +628,11 @@ function buildOptionContent(
         mechanism: wrapText(description, TEXT_W, MECH_SIZE, measure),
         flavour: [],
         interaction: [],
+        // A work order has no `StatModifier`s to resolve. When one gets an effect it
+        // will get its own resolved line, in the change that makes it real.
+        statRows: [],
+        statLabelInline: false,
+        statFitsOneLine: false,
       }
     })
   }
@@ -525,6 +663,11 @@ function buildOptionContent(
       9 +
       measure(`[${tierLabel}]`, SUB_SIZE, 400) +
       (cursed ? 8 + measure('CURSED', LABEL_SIZE, 600, 1.2) : 0)
+    const statRows = statDeltaRows({
+      current,
+      added: def?.stats ?? [],
+      ...(input.resolvedStats ? { resolved: input.resolvedStats } : {}),
+    })
     return {
       id: offer.defId,
       name,
@@ -541,6 +684,8 @@ function buildOptionContent(
       interaction: offer.interactionText.flatMap((text) =>
         wrapText(text, TEXT_W - SYN_PAD * 2, SUB_SIZE, measure),
       ),
+      statRows,
+      ...measureStatBlock(statRows, measure),
     }
   })
 }
@@ -887,8 +1032,68 @@ export function layoutChoiceScreen(input: ChoiceLayoutInput): ChoiceScreenLayout
     if (content.priceInline) priceLines(cursor)
     cursor += TITLE_H
 
-    // Mechanism: the largest body text in the option, immediately under the name,
-    // verbatim from the def. Rule 4's whole point.
+    // The resolved block, above the authored sentence: what this pick does to the ship
+    // being flown, before what the item does in the abstract. See the module header for
+    // why that order, and `statDelta.ts` for why the numbers cannot be arithmetic on
+    // the already-resolved value.
+    //
+    // `good` for an improvement, `caution` for a cost, a no-op or a rise that cannot
+    // matter — and neither carries alone: every row is written with an explicit sign or
+    // with the words that say why there is none. `danger` appears nowhere: a trade the
+    // player is choosing is information, not incoming fire (rule 3, same call CURSED
+    // makes).
+    const rowColor = (row: StatDeltaRow): string => {
+      if (!content.affordable) return Palette.textDim
+      return row.direction === 'better' ? Palette.good : Palette.caution
+    }
+    const statLines = statLinesShown(content, degrade)
+    const statCompact = statLines === 1 && content.statRows.length > 1
+    if (statLines > 0) {
+      cursor += STAT_GAP
+      let rowX = textX
+      if (content.statLabelInline) {
+        const label = line(STAT_ROW_LABEL, textX, cursor + 1, LABEL_SIZE, Palette.textDim, {
+          weight: 600,
+          tracking: 1.4,
+        })
+        lines.push(label)
+        rowX = textX + label.width + 10
+      }
+      if (statCompact) {
+        // Collapsed: the rows share a line and give up their parentheticals, which are
+        // the only part a reader can recompute from the two numbers still shown. The
+        // direction moves onto the row text itself so it is not lost with them.
+        let x = rowX
+        content.statRows.forEach((row, index) => {
+          if (index > 0) {
+            const sep = line(STAT_ROW_SEP, x, cursor, SUB_SIZE, Palette.textFaint)
+            lines.push(sep)
+            x += sep.width
+          }
+          const body = line(row.text, x, cursor, SUB_SIZE, rowColor(row))
+          lines.push(body)
+          x += body.width
+        })
+        cursor += SUB_LH
+      } else {
+        // Every row at the same x, the one beside the label included: a two-row block
+        // whose second line starts further left reads as a mistake, not as a table.
+        for (const row of content.statRows) {
+          const body = line(row.text, rowX, cursor, SUB_SIZE, bodyColor)
+          lines.push(body)
+          lines.push(
+            line(` ${row.deltaText}`, rowX + body.width, cursor, LABEL_SIZE, rowColor(row), {
+              weight: 600,
+            }),
+          )
+          cursor += SUB_LH
+        }
+      }
+    }
+
+    // Mechanism: the largest body text in the option, verbatim from the def. Rule 4's
+    // whole point, and the only place the *behaviour* of an effect-carrying item is
+    // stated at all.
     for (const text of content.mechanism) {
       lines.push(line(text, textX, cursor, MECH_SIZE, bodyColor))
       cursor += MECH_LH
@@ -964,6 +1169,8 @@ export function layoutChoiceScreen(input: ChoiceLayoutInput): ChoiceScreenLayout
       mechanismLines: content.mechanism,
       interactionLines,
       flavourLines,
+      statRows: content.statRows,
+      statCompact,
       lines,
       accent: boxAccent,
     })
@@ -976,7 +1183,7 @@ export function layoutChoiceScreen(input: ChoiceLayoutInput): ChoiceScreenLayout
   )
   footer.push(
     line(
-      'SPACE / Z  confirm      X  decline',
+      'ENTER  confirm      X  decline',
       CONTENT_RIGHT,
       footerTop + 4,
       SUB_SIZE,
@@ -988,22 +1195,22 @@ export function layoutChoiceScreen(input: ChoiceLayoutInput): ChoiceScreenLayout
   // skip), so the screen says so — a player who cannot afford anything must not be
   // left pressing confirm at a card that refuses without explanation.
   //
-  // When the trigger was already held as the card opened, say so. A tester reported
-  // "the occasional soft freeze": confirm needs a rising edge, the trigger is always
-  // held in a shmup, and the card silently ignored the button they were pressing.
-  // The simulation now resolves it after a short dwell, but recovering quietly is
-  // not enough — the player has to know why nothing is happening.
+  // A third branch used to live here: "Release fire to choose", shown when the trigger
+  // was already held as the card opened. It existed because confirm needed a rising
+  // `fire` edge and the trigger is always held in a shmup, so the card silently ignored
+  // the button the player was pressing — reported as "the occasional soft freeze". The
+  // hint, the 48-tick dwell that rescued it, and the 20-second timeout behind that are
+  // all gone: confirm is its own key now, so the case cannot arise. Worth knowing that
+  // the copy was the third mitigation for one root cause nobody had removed.
   footer.push(
     line(
-      input.awaitingRelease === true
-        ? 'Release fire to choose — holding it confirms the highlighted option.'
-        : kind === 'shop'
-          ? 'Declining is free. An option marked SHORT cannot be confirmed.'
-          : 'Declining is free; the sortie resumes with nothing fitted.',
+      kind === 'shop'
+        ? 'Declining is free. An option marked SHORT cannot be confirmed.'
+        : 'Declining is free; the sortie resumes with nothing fitted.',
       CONTENT_X,
       footerTop + 4 + SUB_LH,
       LABEL_SIZE,
-      input.awaitingRelease === true ? Palette.caution : Palette.textFaint,
+      Palette.textFaint,
     ),
   )
 
@@ -1054,7 +1261,6 @@ export interface ChoiceScreenOptions {
    * Drives the "release fire to choose" hint. Without it the card looks frozen to
    * anyone who was firing when it appeared, which is nearly everyone.
    */
-  awaitingRelease?: boolean
   /**
    * Accepted so the caller can pass its whole content bundle, and DELIBERATELY
    * UNUSED. Every interaction this screen states comes pre-resolved from the sim —
@@ -1166,7 +1372,6 @@ export function drawChoiceScreen(
       // holds a selection of its own.
       selected: opts.selected,
       tick: opts.tick,
-      ...(opts.awaitingRelease === undefined ? {} : { awaitingRelease: opts.awaitingRelease }),
     })
     return
   }
@@ -1182,8 +1387,18 @@ export function drawChoiceScreen(
     selected: opts.selected,
     tick: opts.tick,
     items: opts.items,
-    ...(opts.awaitingRelease === undefined ? {} : { awaitingRelease: opts.awaitingRelease }),
     ...(opts.workOrderDefs ? { workOrderDefs: opts.workOrderDefs } : {}),
+    // The build as the simulation has it: the hull it issued, the items held with their
+    // stacks, and the interactions IT says are live. Reconstructed read-only — nothing
+    // here touches the sim, and `resolvedStats` is passed alongside so a reconstruction
+    // that disagrees with the run drops its rows instead of printing them.
+    currentModifiers: collectBuildModifiers({
+      hullId: view.hullId,
+      held: view.inventory,
+      items: opts.items,
+      activeInteractions: view.activeInteractions,
+    }),
+    resolvedStats: view.resolvedStats,
     // Measured against the real font, so wrapping is exact rather than estimated.
     measure: (text, size, weight, tracking) =>
       measureText(ctx, text, { size, ...(weight ? { weight } : {}), ...(tracking ? { tracking } : {}) }),

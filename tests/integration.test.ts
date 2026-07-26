@@ -213,8 +213,8 @@ describe('certifications reach the simulation', () => {
       if (choice?.kind === 'work-order') return choice.workOrders
       // Decline anything else so the run keeps moving.
       if (choice !== null) {
-        world.tick({ moveX: 0, moveY: 0, fire: false, special: false, focus: false })
-        world.tick({ moveX: 0, moveY: 0, fire: false, special: true, focus: false })
+        world.tick({ moveX: 0, moveY: 0, fire: false, special: false, focus: false, confirm: false })
+        world.tick({ moveX: 0, moveY: 0, fire: false, special: true, focus: false, confirm: false })
       }
     }
     return null

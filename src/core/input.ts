@@ -28,6 +28,11 @@
  *      back to the screen that fixes a mistake, and an escape hatch you can move is
  *      an escape hatch you can lose. `SYSTEM_CODES` are also refused as gameplay
  *      bindings, so Escape can never both pause and fire.
+ *
+ *      `confirm` now reaches `InputSnapshot` as well, because a selection screen must
+ *      not accept on the fire key. That makes rule 2 stronger rather than weaker: the
+ *      key that accepts a permadeath choice cannot be moved onto the trigger, since
+ *      `CONFIRM_CODES` is a constant and Enter is refused as a gameplay binding.
  *   3. Restore-defaults is one action on the settings screen, reachable using only
  *      floor keys.
  *
@@ -45,6 +50,24 @@ export interface InputSnapshot {
   readonly special: boolean
   /** Held to move precisely at reduced speed for threading dense patterns. */
   readonly focus: boolean
+  /**
+   * Accept the highlighted option on a selection screen. NOT a sortie action.
+   *
+   * REPORTED FROM PLAY: "the selection screens must not use the fire key to accept
+   * responses." Confirming used to be a rising `fire` edge, and in a shmup the trigger
+   * is held permanently — so the accept key was, in practice, a key the player was
+   * already pressing. Every consequence of that was ugly: a card could not be
+   * confirmed at all until the trigger was released (a soft freeze a tester hit), the
+   * mitigation was a 48-tick dwell that confirmed option 0 *for* the player, and touch
+   * had to suppress its own auto-fire on every card or pick option 0 every time.
+   *
+   * A separate action deletes the whole class. It is never held during play, so a card
+   * that opens under a held trigger is simply a card waiting for its own key.
+   *
+   * Deliberately NOT remappable and deliberately NOT the fire binding's codes — see
+   * `CONFIRM_CODES`, and rule 2 in the header.
+   */
+  readonly confirm: boolean
 }
 
 export const NEUTRAL_INPUT: InputSnapshot = {
@@ -53,16 +76,25 @@ export const NEUTRAL_INPUT: InputSnapshot = {
   fire: false,
   special: false,
   focus: false,
+  confirm: false,
 }
 
-/** Pack a snapshot into one byte, for compact replay storage. */
+/**
+ * Pack a snapshot into one byte, for compact replay storage.
+ *
+ * THE BYTE IS NOW FULL: movement takes bits 0-3, then fire, special, focus, confirm.
+ * A ninth action cannot be added without widening the encoding, which changes
+ * `REPLAY_FORMAT_VERSION` and every recorded fixture — see the note on `special` in
+ * `src/sim/progression.ts` for the one action that will eventually want it.
+ */
 export function packInput(input: InputSnapshot): number {
   return (
     (input.moveX + 1) |
     ((input.moveY + 1) << 2) |
     (input.fire ? 1 << 4 : 0) |
     (input.special ? 1 << 5 : 0) |
-    (input.focus ? 1 << 6 : 0)
+    (input.focus ? 1 << 6 : 0) |
+    (input.confirm ? 1 << 7 : 0)
   )
 }
 
@@ -73,18 +105,23 @@ export function unpackInput(byte: number): InputSnapshot {
     fire: (byte & (1 << 4)) !== 0,
     special: (byte & (1 << 5)) !== 0,
     focus: (byte & (1 << 6)) !== 0,
+    confirm: (byte & (1 << 7)) !== 0,
   }
 }
 
 /**
  * What the player is looking at.
  *
- * Deliberately the same vocabulary as `TouchContext` in `src/core/touch.ts`, and
- * for the same reason: auto-fire must not be asserted while a reward card is open,
- * because `updateCursor` in `src/sim/progression.ts` confirms a card from a *held*
- * trigger after a dwell. Assert fire unconditionally and every card auto-takes
- * option 0. The two types are structurally identical, so one call in the app layer
- * can drive both controllers.
+ * Deliberately the same vocabulary as `TouchContext` in `src/core/touch.ts`. The two
+ * types are structurally identical, so one call in the app layer can drive both
+ * controllers.
+ *
+ * IT USED TO BE LOAD-BEARING FOR CORRECTNESS and is now only tidy. Cards were
+ * confirmed by a rising `fire` edge, so asserting auto-fire outside a sortie made every
+ * card take option 0 by itself; `'choice'` existing is what stopped that. `confirm` is
+ * its own action now, so a card ignores the trigger entirely and this distinction is
+ * back to being what it looks like — don't restore the old reasoning if you see the
+ * gate and wonder what it is for.
  */
 export type InputContext = 'sortie' | 'choice' | 'menu'
 
@@ -134,6 +171,21 @@ export const DEFAULT_BINDINGS: Bindings = {
  * arrows really does free them for something else while still being able to
  * navigate back here and change their mind.
  */
+/**
+ * The codes that ACCEPT a selection, in a menu and on a card alike.
+ *
+ * SPACE IS ABSENT ON PURPOSE, and it is the whole point of the constant. Space is a
+ * default `fire` binding, and a player who is holding it to shoot must not be holding
+ * the key that accepts a permadeath choice — that equivalence is what produced the soft
+ * freeze, the auto-confirming dwell, and "the selection screens must not use the fire
+ * key to accept responses". `MENU_FLOOR.confirm` adds Space back for menus only, where
+ * nothing is being shot at and a press is edge-triggered through `consumePressed`.
+ *
+ * Enter carries this instead, and `SYSTEM_CODES` refuses Enter as a gameplay binding,
+ * so a player cannot re-create the overlap from the binding screen.
+ */
+export const CONFIRM_CODES: readonly string[] = ['Enter', 'NumpadEnter']
+
 export const MENU_FLOOR: Readonly<Record<Action, readonly string[]>> = {
   left: ['ArrowLeft'],
   right: ['ArrowRight'],
@@ -142,7 +194,8 @@ export const MENU_FLOOR: Readonly<Record<Action, readonly string[]>> = {
   fire: [],
   special: [],
   focus: [],
-  confirm: ['Enter', 'NumpadEnter', 'Space'],
+  // Space is a MENU convenience only, never in `CONFIRM_CODES` — see there.
+  confirm: [...CONFIRM_CODES, 'Space'],
   cancel: ['Escape', 'Backspace'],
   pause: ['Escape', 'KeyP'],
 }
@@ -349,11 +402,15 @@ export class Keyboard {
     return {
       moveX: (left && right ? 0 : left ? -1 : right ? 1 : 0) as Axis,
       moveY: (up && down ? 0 : up ? -1 : down ? 1 : 0) as Axis,
-      // Auto-fire ONLY in a sortie. This one condition is what stops every reward
-      // card from confirming option 0 by itself after HELD_CONFIRM_DWELL_TICKS.
+      // Auto-fire ONLY in a sortie. Once load-bearing (a held trigger used to confirm
+      // cards), now just correct: nothing off a sortie should be shooting.
       fire: this.anyHeld(this.bindings.fire) || (this.autoFire && this.ctx === 'sortie'),
       special: this.anyHeld(this.bindings.special),
       focus: this.anyHeld(this.bindings.focus),
+      // Level-triggered here, edge-detected by the sim's cursor, which is what keeps a
+      // replay's byte the whole truth about a tick. Read off `CONFIRM_CODES` rather than
+      // any binding: confirm is not remappable, and it is deliberately not the fire key.
+      confirm: this.anyHeld(CONFIRM_CODES),
     }
   }
 

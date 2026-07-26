@@ -9,7 +9,10 @@
  * header for what changed about the graph.
  *
  * Every item, old and new, is tuned against the same fixed facts `enemies.ts` is
- * tuned against: the hull has **100 integrity plus 40 shield** (140 effective health),
+ * tuned against: the hull has **100 integrity plus 40 shield** (140 effective health
+ * per engagement — the shield now recovers between them, at 4/second after 2.5
+ * seconds of not being hit, so the figure below is burst capacity and not the total a
+ * run can absorb),
  * moves at **210 units/second**, and fires **20 shots/second at 4 damage — 80
  * damage per second**. A full sector-1 clear runs ~188 seconds and pays ~800
  * scrap, and a competent bot policy currently clears 39% of runs. Every number
@@ -238,11 +241,17 @@ export const ITEMS: Record<string, ItemDef> = {
 
   /**
    * +22 shield is +16% effective health (140 to 162), deliberately a little more per
-   * pick than Plating Shim's +13%. Not a mistake: shield does not regenerate AND
-   * cannot be restored, while integrity is the pool Repair Nanites refills. A point
-   * of integrity is therefore worth more than a point of shield in any build that
-   * ever finds the relic, and the sizes are set so the two commons are a real choice
-   * rather than one dominating.
+   * pick than Plating Shim's +13%.
+   *
+   * THE JUSTIFICATION FOR THAT GAP HAS CHANGED, and the number is being kept anyway.
+   * It used to be "shield does not regenerate and cannot be restored, so a point of
+   * integrity is worth more" — which was true until the shield started recovering.
+   * Now capacity is worth *more* than it was, because a bigger pool is a bigger pool
+   * refilled every lull, so if anything the two commons have swapped which is
+   * stronger. The size is unchanged because re-tuning the M3 roster on reasoning
+   * rather than on a measured pick-rate is exactly what this file's header forbids;
+   * the retune belongs to whichever balance pass measures recovery, not to the commit
+   * that adds it.
    *
    * Raising a maximum grants the difference immediately (see `refreshInventory`), so
    * this reads as +22 shield right now, not as a bigger empty bar.
@@ -256,6 +265,38 @@ export const ITEMS: Record<string, ItemDef> = {
     flavour: 'Charged at the depot. The depot does not guarantee it stayed charged.',
     stats: [{ stat: 'maxShield', kind: 'add', value: 22 }],
     weight: 10,
+  },
+
+  /**
+   * The recovery common, and it sells the RESERVE rather than the rate — which is the
+   * opposite of what this item was first written as, on measured evidence.
+   *
+   * The shield recovers 15 points per sector at 4/second (see "The shield recharges" in
+   * docs/DESIGN.md). Of those three numbers the reserve is the only one that changes how
+   * much damage a run can absorb; the rate changes how fast a fixed budget arrives and
+   * the delay changes whether a given lull qualifies. A common should be the plainest
+   * useful thing at its tier, so it moves the number that matters: +10 takes the sector
+   * budget from 15 to 25, which is two thirds of a fresh shield every sector.
+   *
+   * The rate version is a trap for a common and worth recording as rejected. "Shield
+   * recovers 50% faster" reads like a straight upgrade and, with the reserve binding,
+   * buys nothing but arriving sooner — the same total, earlier. That is a real effect and
+   * it is nowhere near legible enough for the tier that teaches players what items do.
+   * Rate lives on `cycling-array`, where it is half of an explicit trade.
+   *
+   * An `add`, not a `mul`, so it composes predictably with a hull that already moves the
+   * reserve rather than scaling whatever that hull chose.
+   */
+  'contingency-reserve': {
+    id: 'contingency-reserve',
+    name: 'Contingency Reserve',
+    tier: 'common',
+    tags: ['defence'],
+    mechanism:
+      'The shield recovers 25 points per sector instead of 15 — two thirds of a full shield back each sector rather than a bit over a third.',
+    flavour: 'Held against contingencies. The schedule of contingencies is not published.',
+    stats: [{ stat: 'shieldReservePerSector', kind: 'add', value: 10 }],
+    weight: 9,
   },
 
   /**
@@ -762,6 +803,38 @@ export const ITEMS: Record<string, ItemDef> = {
     weight: 6,
   },
 
+  /**
+   * The delay item, and the reason recovery is a *system* rather than a stat.
+   *
+   * -60 ticks takes suppression from 150 to 90 (2.5 s to 1.5 s). That is a bigger
+   * change than the arithmetic suggests, because of what it crosses: the invulnerability
+   * window is 45 ticks and intake is capped at 1.33 hits/second, so at 90 ticks a
+   * pilot who breaks contact for a second and a half is already recovering, where at
+   * 150 they were not. It converts disengaging from a delay into a play.
+   *
+   * An UNCOMMON rather than a common, unlike Contingency Reserve, and the split is that
+   * the reserve is a number and this is a *skill enabler*: it does not raise the budget
+   * at all, it widens which gaps in the fighting are long enough to spend it in. A
+   * player who never breaks contact gets nothing from this; the reserve pays out to
+   * everyone. That is the right way round for the tiers.
+   *
+   * `min: 60` on the stat holds the floor above the invulnerability window however many
+   * of these stack, so recovery can never tick between two hits of a sustained stream —
+   * which would turn the shield into flat damage reduction and make bullet density inert
+   * for a second reason.
+   */
+  'standby-regulator': {
+    id: 'standby-regulator',
+    name: 'Standby Regulator',
+    tier: 'uncommon',
+    tags: ['defence'],
+    mechanism:
+      'Shield starts recovering 1 second sooner after a hit, at 1.5 seconds instead of 2.5.',
+    flavour: 'Rated for continuous duty by an assessor who has never flown one.',
+    stats: [{ stat: 'shieldRegenDelayTicks', kind: 'add', value: -60 }],
+    weight: 6,
+  },
+
   // -------------------------------------------------------------------------
   // rare — items that change the shape of the volley.
   // -------------------------------------------------------------------------
@@ -1232,6 +1305,48 @@ export const ITEMS: Record<string, ItemDef> = {
     effects: [
       { kind: 'splitShot', on: 'onFire', count: 6, spreadDegrees: 70 },
       { kind: 'pierce', on: 'onFire', count: 1 },
+    ],
+    weight: 2,
+  },
+
+  /**
+   * The relic that inverts the shield: almost no depth, recovered almost immediately.
+   *
+   * `mul: 0.4` on capacity and `mul: 3` on rate takes the base 40/4 to 16/12. The pool
+   * is small enough that the sector's 15-point reserve can refill it almost from empty,
+   * and at 12/second that refill takes 1.3 seconds instead of ten — so the same budget
+   * buys roughly one full shield per sector either way, but here it arrives fast enough
+   * to spend inside a single fight rather than only between them.
+   *
+   * That is the trade: burst absorption falls 60%, and the *tempo* of the resource
+   * changes completely. It moves the shield from "how much can I eat at once" to "how
+   * often can I break contact for a second". Nothing else in the roster asks that
+   * question, which is what earns it the relic slot.
+   *
+   * `defence`, and NOT `cursed`, which is the opposite call from Exposed Core — and
+   * the line between them is worth stating because both shrink `maxShield`. Exposed
+   * Core sets it to zero: the resource is *gone*, so an offer weighting that reads
+   * `defence` as "this player wants to survive" must never hand it over. This leaves
+   * the resource intact and changes its shape, and a pilot who wants to survive is a
+   * pilot this genuinely serves. The `mul` fold is what makes the difference legible:
+   * 0.4 scales whatever capacity items are already held, 0 erases them.
+   *
+   * The trap to be aware of, stated on the card: with 16 points of buffer a single
+   * heavy hit spills into integrity where 40 would have held it. Against the game's
+   * hardest single hits this is strictly worse, and the player should be able to see
+   * that from the numbers rather than discovering it in sector four.
+   */
+  'cycling-array': {
+    id: 'cycling-array',
+    name: 'Cycling Array',
+    tier: 'relic',
+    tags: ['defence'],
+    mechanism:
+      'Max shield falls 60%, from 40 to 16, and it recovers 3x faster at 12 per second — the sector reserve refills the smaller shield in 1.3 seconds of not being hit instead of 10.',
+    flavour: 'Certified for rapid cycling. Not certified for the number of cycles logged.',
+    stats: [
+      { stat: 'maxShield', kind: 'mul', value: 0.4 },
+      { stat: 'shieldRegenPerSecond', kind: 'mul', value: 3 },
     ],
     weight: 2,
   },

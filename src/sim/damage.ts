@@ -13,7 +13,8 @@
  * Applying the budget is `world.ts`'s job; deciding its size is this file's.
  */
 
-import { TICK_SECONDS } from '../core/loop'
+import { TICK_HZ, TICK_SECONDS } from '../core/loop'
+import { STATS } from './stats'
 import type {
   DeathCauseKind,
   EnemyInstance,
@@ -173,11 +174,80 @@ export interface DamageContext {
   stats: RunStats
   runState: RunState
   incident: Incident | null
+  /**
+   * Resolved `shieldRegenDelayTicks`, passed in rather than read off the world.
+   *
+   * Damage is the only thing that knows a hit landed, so it has to be what starts
+   * the suppression clock; but this module deliberately cannot reach the stat table,
+   * so the caller supplies the resolved value. Optional so the fallback is the
+   * stat's own base — a caller that forgets still suppresses recovery, which fails
+   * safe. Silently *not* suppressing would be the dangerous default.
+   */
+  shieldRegenDelayTicks?: number
 }
 
 /** Count down the invulnerability window. Call once per tick, before collisions. */
 export function tickHullInvulnerability(hull: Hull): void {
   if (hull.invulnTicks > 0) hull.invulnTicks--
+}
+
+/**
+ * Advance shield recovery by one tick. Call once per tick, alongside the invuln
+ * countdown.
+ *
+ * Whole ticks and whole points: the per-tick share of the rate is banked in
+ * `shieldRegenProgress` and only moves `shield` when a full point is due. There is
+ * no `deltaTime` here and there must never be — a recovery that scaled with frame
+ * time would make the same seed produce a different run on a slower machine.
+ *
+ * The suppression clock counts down first and gates recovery in the same tick, so a
+ * hit taken on tick N cannot be followed by a point of shield on tick N + delay - 1.
+ *
+ * Every point recovered spends one from `hull.shieldReserve`, which is refilled per
+ * sector. That bound is not a detail — it is the only reason a rate fast enough to be
+ * noticed does not break the difficulty curve. See `shieldReservePerSector`.
+ */
+export function tickShieldRegen(hull: Hull, perSecond: number): void {
+  if (hull.shieldRegenBlockedTicks > 0) {
+    hull.shieldRegenBlockedTicks--
+    // Progress is discarded rather than held, so an interrupted recovery restarts
+    // from zero. Banking it across hits would let a player under continuous fire
+    // accumulate a point during the gaps, which is the exact leak the delay exists
+    // to close.
+    hull.shieldRegenProgress = 0
+    return
+  }
+  if (hull.shield >= hull.maxShield) {
+    hull.shieldRegenProgress = 0
+    return
+  }
+  // An exhausted reserve is a hard stop, not a slowdown. Banked progress is cleared with
+  // it so a reserve refilled at the next sector does not immediately pay out a point
+  // that was earned against the previous sector's budget.
+  if (hull.shieldReserve <= 0) {
+    hull.shieldRegenProgress = 0
+    return
+  }
+  if (perSecond <= 0) return
+
+  // Banked in per-second units and spent a whole TICK_HZ at a time, rather than adding
+  // `perSecond / TICK_HZ` and spending 1. The two are algebraically identical and
+  // numerically are not: dividing first means an integer rate accumulates a repeating
+  // binary fraction, so at 4/second fifteen ticks summed to 0.9999999999999999 and the
+  // point landed on the sixteenth. That is deterministic but it is also WRONG — it made
+  // a full pool take 10.25 seconds against the 10 the item cards promise, and the error
+  // grew with the rate. Adding the rate itself keeps every authored figure exact.
+  hull.shieldRegenProgress += perSecond
+  while (
+    hull.shieldRegenProgress >= TICK_HZ &&
+    hull.shield < hull.maxShield &&
+    hull.shieldReserve > 0
+  ) {
+    hull.shieldRegenProgress -= TICK_HZ
+    hull.shield++
+    hull.shieldReserve--
+  }
+  if (hull.shield >= hull.maxShield || hull.shieldReserve <= 0) hull.shieldRegenProgress = 0
 }
 
 /**
@@ -212,8 +282,11 @@ export function applyHullDamage(
 
   const hull = ctx.hull
 
-  // Shield absorbs first and does not regenerate in M1, so it reads as a one-off
-  // buffer rather than as a slowly refilling second health bar.
+  // Shield absorbs first, then recovers once the pilot has been left alone (see
+  // `tickShieldRegen`). Suppression is reset by ANY hit, including one that bypassed
+  // the shield entirely — rot still counts as being under fire, and a corrosion
+  // hazard that left recovery running would be a way to top the shield up while
+  // taking damage.
   let remaining = amount
   if (hull.shield > 0 && options?.bypassShield !== true) {
     const absorbed = remaining < hull.shield ? remaining : hull.shield
@@ -221,6 +294,9 @@ export function applyHullDamage(
     remaining -= absorbed
   }
   if (remaining > 0) hull.integrity -= remaining
+
+  hull.shieldRegenBlockedTicks = ctx.shieldRegenDelayTicks ?? STATS.shieldRegenDelayTicks.base
+  hull.shieldRegenProgress = 0
 
   ctx.stats.damageTaken += amount
   hull.invulnTicks = HULL_INVULN_TICKS

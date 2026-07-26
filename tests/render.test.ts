@@ -43,6 +43,7 @@ import {
   blackoutDepth,
   drawBlackout,
   drawHazardBlock,
+  drawHazardWarning,
   hazardStatus,
 } from '../src/render/hazards'
 import {
@@ -358,6 +359,9 @@ function worldFixture(overrides: Partial<WorldView> = {}): WorldView {
     maxIntegrity: 100,
     shield: 20,
     maxShield: 40,
+    shieldRegenProgress: 0,
+    shieldRegenBlockedTicks: 0,
+    shieldReserve: 0,
     invulnTicks: 0,
     radius: 5,
   }
@@ -1266,6 +1270,9 @@ describe('UI rule 2: no panel readout prints an unrounded float', () => {
       maxIntegrity,
       shield: 25.6,
       maxShield: 25.6,
+      shieldRegenProgress: 0,
+      shieldRegenBlockedTicks: 0,
+      shieldReserve: 0,
       invulnTicks: 0,
       radius: 5,
     }
@@ -1374,6 +1381,30 @@ describe('UI rule 10: nothing pulses faster than ~1Hz', () => {
       },
     ],
     [
+      /*
+       * The playfield alarm, which is the largest area this renderer modulates after
+       * the rim — a wash down all four edges plus a strip under the ship.
+       *
+       * It is on this list because the panel band already was and the panel band is
+       * not what a player sees during a sortie. Its geometry is deliberately a pure
+       * function of the countdown rather than of `tick` (asserted in
+       * tests/hazardWarning.test.ts), so the alpha this suite reconstructs really is
+       * the axis it varies on — the distinction the engine plume proved was load
+       * bearing.
+       */
+      'hazard playfield alarm',
+      (ctx, tick) => {
+        drawHazardWarning(
+          ctx,
+          [
+            hazard({ phase: 'warning', ticksToChange: 40 }),
+            hazard({ id: 'g', hazardKind: 'interdiction', phase: 'warning', ticksToChange: 25 }),
+          ],
+          tick,
+        )
+      },
+    ],
+    [
       'low-integrity rim',
       (ctx, tick) => {
         drawLowIntegrityRim(
@@ -1477,6 +1508,22 @@ const ATTENUATED: ReadonlyArray<
         available: 120,
         reduceFlashes: reduce,
       }),
+  ],
+  [
+    // The panel band's counterpart in the playfield. Both are listed: the row above
+    // could keep honouring the setting while the cue the player actually looks at
+    // stopped, and a suite that cannot tell those apart is not covering the screen.
+    'hazard playfield alarm',
+    (ctx, reduce) =>
+      drawHazardWarning(
+        ctx,
+        [
+          hazard({ phase: 'warning', ticksToChange: 30 }),
+          hazard({ id: 'g', hazardKind: 'blackout', phase: 'warning', ticksToChange: 50 }),
+        ],
+        12,
+        reduce,
+      ),
   ],
   [
     'blackout scrim',
