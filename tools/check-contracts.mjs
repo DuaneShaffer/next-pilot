@@ -383,6 +383,64 @@ async function importClosure(seeds) {
   return { files, importedNames }
 }
 
+/**
+ * Contract 1, second half: every named RNG stream must be DOCUMENTED.
+ *
+ * `docs/ARCHITECTURE.md` carries the table of what a seed determines, and CLAUDE.md
+ * points at it as the authority. Nothing enforced it, and it had already failed: the
+ * `hull-offer` stream — which decides which three hulls a sortie offers — was missing
+ * for a whole milestone, even though `src/ui/hullSelect.ts` carries the literal
+ * instruction to add it. The bot and audio streams had drifted out too.
+ *
+ * The rest of this file proves streams are NAMED. That is the half a compiler could
+ * almost catch. The half that actually costs someone a day is a stream nobody wrote
+ * down, because the table is what a reader consults to find out what a seed controls —
+ * and a table missing an entry is worse than no table, since it answers confidently.
+ *
+ * Matched on `Rng.fromSeed(seed, <literal>)` and on `*_STREAM = '<literal>'`. A stream
+ * named by a computed expression is not checkable here and is flagged, because a stream
+ * name that cannot be read statically cannot be documented reliably either.
+ */
+const STREAM_LITERAL = /fromSeed\s*\([^,)]+,\s*'([^']+)'/g
+const STREAM_CONST = /\b[A-Z0-9_]*STREAM\b\s*(?::[^=]+)?=\s*'([^']+)'/g
+const STREAM_COMPUTED = /fromSeed\s*\([^,)]+,\s*`/
+
+async function checkStreamsDocumented(allFiles) {
+  let table
+  try {
+    table = await readFile('docs/ARCHITECTURE.md', 'utf8')
+  } catch {
+    violations.push(
+      'docs/ARCHITECTURE.md  CONTRACT 1: cannot read the RNG stream table to verify it',
+    )
+    return
+  }
+  const found = new Map()
+  for (const file of allFiles) {
+    const code = stripComments(await readFile(file, 'utf8'))
+    for (const pattern of [STREAM_LITERAL, STREAM_CONST]) {
+      pattern.lastIndex = 0
+      let match
+      while ((match = pattern.exec(code)) !== null) {
+        const name = match[1]
+        if (!found.has(name)) found.set(name, file)
+      }
+    }
+    if (STREAM_COMPUTED.test(code)) {
+      flag(file, 0, 'Rng.fromSeed(seed, `...`)', 'CONTRACT 1: stream name is computed — ' +
+        'a name that cannot be read statically cannot be kept in the documented table')
+    }
+  }
+  for (const [name, file] of [...found].sort()) {
+    // Backticked in the table, so a bare mention in prose does not count as a row.
+    if (table.includes(`\`${name}\``)) continue
+    violations.push(
+      `${display(file)}  CONTRACT 1: RNG stream '${name}' is not in the table in ` +
+        'docs/ARCHITECTURE.md — a seed input nobody wrote down',
+    )
+  }
+}
+
 async function main() {
   const simDir = join(ROOT, 'sim')
   const contentDir = join(ROOT, 'content')
@@ -454,6 +512,8 @@ async function main() {
       }
     }
   }
+
+  await checkStreamsDocumented(allFiles)
 
   // Contract 3 — the sim's only input is an InputSnapshot. A tick() that reads
   // anything else cannot be replayed from a recorded input log.
