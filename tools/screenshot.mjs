@@ -247,7 +247,11 @@ const SHOTS = [
     // the card rather than on a stage index — by the time stageIndex has moved, the
     // card the capture is for has already closed.
     name: 'world-map',
-    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=28&holdchoice=1`,
+    // `holdchoice=route` — kind-aware now, so the run flies normally through its item
+    // and shop cards and only stops on the one being captured. As `holdchoice=1` this
+    // was unreachable by construction: the first card of the run stayed open, the ship
+    // stopped flying, and it died in sector one three seams short of a route card.
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=28&holdchoice=route`,
     waitFor: 'choiceKind === "route"',
     holdMs: 0,
     expect: 'choiceKind === "route"',
@@ -259,7 +263,6 @@ const SHOTS = [
     // that. Any capture of a LATE card is unreachable by construction under a
     // whole-run hold; it needs `holdchoice=<kind>`, which is a one-line change in
     // `src/main.ts:176`.
-    unreachedUntil: 'harness — holdchoice=1 holds the FIRST card, so a late card is unreachable',
   },
   {
     // Sector two, in progress. Proves the panel is describing the run and not the
@@ -281,7 +284,12 @@ const SHOTS = [
     // is measuring two things at once" (`sim/bots.ts:899`) — so it declines every
     // hazard there is. `greedy` "accepts every hazard it is paid for". Reported as a
     // balance failure for as long as the check has existed; it was the wrong policy.
-    url: `/?seed=${SEED}&screen=sortie&autopilot=greedy&ff=20`,
+    // `aggressor&route=rewarding`: the strongest policy, told to accept priced routes.
+    // greedy accepts them by default but dies in sector one, so it never reached a
+    // sector that HAS a hazard — sector one deliberately has none. A bot taking a
+    // hazard route is a legal player choice, so this is a capture affordance and not a
+    // cheat; nothing about the run is altered.
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&route=rewarding&ff=20`,
     waitFor: 'hazardPhase === "warning"',
     // HAZARD_WARNING_TICKS is 60 — one simulated second, which at ff=20 is FIFTY
     // MILLISECONDS of wall clock. The default 100ms poll steps straight over the
@@ -293,18 +301,18 @@ const SHOTS = [
     // hazard: a warning that has become active between the poll and the capture
     // files the wrong second.
     expect: 'hazardPhase === "warning"',
-    unreachedUntil: 'M6 balance — greedy must clear sector one and be offered a hazard route',
+    unreachedUntil: 'M6 balance — the pilot must clear sector one and accept a hazard route',
   },
   {
     name: 'hazard-active',
-    // greedy for the same reason as the warning shot above.
-    url: `/?seed=${SEED}&screen=sortie&autopilot=greedy&ff=20`,
+    // Same policy and reasoning as the warning shot above.
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&route=rewarding&ff=20`,
     waitFor: 'hazardPhase === "active"',
     // 120 ticks = 100ms of wall clock at ff=20, i.e. exactly the default poll.
     pollMs: 20,
     holdMs: 0,
     expect: 'hazardPhase === "active"',
-    unreachedUntil: 'M6 balance — greedy must clear sector one and be offered a hazard route',
+    unreachedUntil: 'M6 balance — the pilot must clear sector one and accept a hazard route',
   },
   {
     // A boss on screen. Waits on the health bar being readable rather than on the

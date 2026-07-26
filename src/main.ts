@@ -34,8 +34,9 @@ import { createFeelState, feelTick, resetFeelState } from './render/feel'
 import { drawPanel, type PanelState } from './render/panel'
 import { drawScene } from './render/scene'
 import { Starfield } from './render/starfield'
-import { BOTS, isBotName, type BotPolicy } from './sim/bots'
+import { BOTS, isBotName, isRouteStyle, type BotPolicy } from './sim/bots'
 import { World, type RunContent } from './sim/world'
+import type { PendingChoiceKind } from './sim/entities'
 import { BASE_POOL, CERTIFICATIONS, getCertification } from './content/certifications'
 import { fileRun, poolFor, summariseRun, unlockedSet } from './meta/certifications'
 import {
@@ -127,14 +128,35 @@ interface UrlOptions {
   /** Extra simulation ticks per rendered frame. 1 is real time. */
   fastForward: number
   /**
-   * Stop the autopilot from resolving a reward choice, so the card stays open.
+   * Which kind of card the autopilot may not resolve, so it stays open to be captured.
    *
    * A capture affordance. A bot resolves a choice in about six ticks, which at any
-   * useful fast-forward is ~25ms — shorter than the harness's polling interval, so
-   * the reward screen was literally unobservable and its captures silently
-   * photographed whatever state the run had reached instead.
+   * useful fast-forward is ~25ms — shorter than the harness's polling interval, so a
+   * reward screen was literally unobservable and its captures silently photographed
+   * whatever state the run had reached instead.
+   *
+   * KIND-AWARE rather than a boolean, and that was not a refinement — as a boolean it
+   * made every LATE card unreachable by construction. Holding *any* card meant the
+   * run's first item card (tick 2358) stayed open forever, the ship stopped flying,
+   * and the run died in sector one — three seams short of the route card the capture
+   * was for. A capture that cannot reach its state is not flaky, it is impossible.
+   *
+   * `'any'` keeps the old behaviour for the item and shop captures, which want the
+   * first card they see.
    */
-  holdChoice: boolean
+  holdChoice: PendingChoiceKind | 'any' | null
+}
+
+/**
+ * Parse `?holdchoice=`. Unknown values are refused rather than coerced.
+ *
+ * `1` means "any", for the captures written before this was kind-aware.
+ */
+function readHoldChoice(raw: string | null): PendingChoiceKind | 'any' | null {
+  if (raw === null) return null
+  if (raw === '1' || raw === 'any') return 'any'
+  const kinds: readonly PendingChoiceKind[] = ['item', 'shop', 'work-order', 'route']
+  return kinds.find((kind) => kind === raw) ?? null
 }
 
 /** Ceiling on fast-forward, so a typo can't wedge the page in a long loop. */
@@ -147,7 +169,25 @@ function readUrlOptions(fallbackSeed: string): UrlOptions {
   const seed = rawSeed && isValidSeed(rawSeed) ? normalizeSeed(rawSeed) : fallbackSeed
 
   const rawAutopilot = params.get('autopilot')
-  const autopilot = rawAutopilot && isBotName(rawAutopilot) ? BOTS[rawAutopilot].create(seed) : null
+  /**
+   * `?route=` selects the policy's route style.
+   *
+   * Needed because the hazard captures drove `aggressor`, which is pinned to
+   * `routeStyle: 'direct'` on purpose — it is the clear-rate benchmark, so the number
+   * the exit criterion is read off must not also measure optional risk-taking. That
+   * made it the one policy that can never meet a hazard, and the two hazard captures
+   * were therefore waiting for a state their own pilot had declined.
+   *
+   * A bot accepting a hazard route is a legal choice a player can make, so this is a
+   * capture affordance rather than a cheat — unlike a god-mode flag, which would
+   * change the run it is meant to photograph.
+   */
+  const rawRoute = params.get('route')
+  const routeStyle = rawRoute !== null && isRouteStyle(rawRoute) ? rawRoute : undefined
+  const autopilot =
+    rawAutopilot && isBotName(rawAutopilot)
+      ? BOTS[rawAutopilot].create(seed, routeStyle ? { routeStyle } : undefined)
+      : null
 
   const rawFf = Number(params.get('ff') ?? '1')
   const fastForward = Number.isFinite(rawFf)
@@ -173,7 +213,7 @@ function readUrlOptions(fallbackSeed: string): UrlOptions {
     screen: autopilot ? 'sortie' : (requested ?? 'title'),
     autopilot,
     fastForward,
-    holdChoice: params.get('holdchoice') === '1',
+    holdChoice: readHoldChoice(params.get('holdchoice')),
   }
 }
 
@@ -604,7 +644,11 @@ function main(): void {
   function stepSim(): void {
     // Held choices get neutral input so nothing confirms and the card stays up for
     // the capture. Everything else still runs, so the frame is a real one.
-    const holding = options.holdChoice && world.pendingChoice !== null
+    const held = options.holdChoice
+    const holding =
+      held !== null &&
+      world.pendingChoice !== null &&
+      (held === 'any' || world.pendingChoice.kind === held)
     // A replay drives the sim from its recorded log; nothing else may touch input
     // while one is playing, or the run stops being the run that was shared.
     const replayInput =
