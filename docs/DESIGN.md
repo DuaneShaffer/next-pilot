@@ -221,7 +221,8 @@ than a delay — and it is the axis the game currently has none of.
 **It interacts with the two structural findings already measured, and both cut the same way:**
 
 - **Integrity recovery is the game's dominant variable.** One recovery relic multiplies the clear
-  rate by 1.9–2.6×. A recharging shield is a *second* recovery source, permanently available to
+  rate by 1.9–2.6× (**re-measured after the recharge shipped: ×1.97, and ×2.59 with recovery off —
+  see below**). A recharging shield is a *second* recovery source, permanently available to
   every hull, so it cannot be tuned by feel — it has to be measured against that number, and the
   recharge rate is likely to be the single most sensitive constant in the game.
 - **Boss bullet density is inert**, because the 45-tick invulnerability window caps intake at 1.33
@@ -241,15 +242,26 @@ bounds that go with them.
   into weapon charge, so it *wants* to be grazed", and that shipped as flat damage because there is
   no `onShieldAbsorbed` hook and, more fundamentally, because a non-recharging shield can only be
   grazed a fixed number of times. A recharging shield makes the fantasy playable.
-- ~~**`retaliation-coil`'s anti-synergy stops being a trap.**~~ **WRONG, and measured wrong.** The
-  claim was that recharge turns shield capacity and retaliation from a mistake into a real trade.
-  It does the opposite: the coil fires only on integrity loss, and a recovering shield means
-  integrity is hit *less often*, so recharge makes the coil strictly worse. See the measurement
-  under "as built" below — across five policies and four seeds, `retaliate` fired in three runs of
-  twenty and `repairOnKill` in none at all, where both fired reliably before. The prediction was
-  made from the direction of the mechanic and never checked; the corpus's effect-coverage check is
-  what caught it. Kept struck through rather than deleted, because "a bigger shield helps the coil"
-  is an intuitive and wrong thought that someone will have again.
+- ~~**`retaliation-coil`'s anti-synergy stops being a trap.**~~ **Wrong, and the first correction of
+  it was also wrong.** Worth reading as a pair, because the same mistake was made twice in one day
+  from opposite directions.
+
+  The original claim was that recharge turns shield capacity and retaliation from a mistake into a
+  real trade. It was replaced within hours by the opposite claim — that recharge makes the coil
+  *strictly worse*, since the coil fires only on integrity loss and a recovering shield means
+  integrity is hit less often. That reasoning is sound and the trigger count does fall: across five
+  policies and four seeds, `retaliate` fired in three runs of twenty where it had fired reliably
+  before.
+
+  **Neither claim survives a clear-rate measurement.** Ablated properly — 900 runs per arm across
+  three seed bases — the coil is worth **+2.1pp against a 2.2pp standard error**, and ×1.04/×1.00/
+  ×1.00 with recovery switched off. It was already inside the noise, so the recharge had nothing to
+  take away. Both predictions were reasoning about a *mechanism* and calling it an effect on the
+  *game*; the trigger count moved and nothing the player can feel did.
+
+  Kept struck through rather than deleted, because both wrong thoughts are intuitive and someone
+  will have one of them again. The lesson is the third one: a change in how often a thing fires is
+  not a balance finding until it is measured against the clear rate.
 
 **What must not change:** the shield still absorbs before integrity, so `applyHullDamage` keeps one
 damage path; and recharge is simulation state, so it ticks in whole ticks off the run seed like
@@ -309,9 +321,19 @@ Consequences recorded honestly:
   `repairOnKill` (does nothing at full integrity) both lose most of their triggers. Measured across
   five policies and four seeds: `repairOnKill` fired in **zero** runs and `retaliate` in three of
   twenty; with recovery switched off, both fire reliably on the same seeds. That matters beyond two
-  items — **Repair Nanites is the strongest relic in the game**, measured at 1.9-2.6x the clear
-  rate, and it is now working against a hull that takes less integrity damage. It has not been
-  re-measured and should be before the next balance pass.
+  items — **Repair Nanites is the strongest relic in the game**, and it is now working against a
+  hull that takes less integrity damage.
+
+  **Re-measured, 900 runs per arm across three seed bases (2026-07-26): ×1.97, down from ×2.59
+  with recovery switched off on the same seeds.** So the recharge did cost the relic roughly a
+  quarter of its edge — the old 1.9–2.6× band's top end is now the recovery-off figure. It is still
+  by a distance the dominant variable: +30.6pp against shield recovery's own +13.3pp ablation, so
+  one relic is worth about three shields.
+
+  The trigger-count observation that started this stands; the conclusion drawn from it did not
+  transfer to `retaliation-coil`, which turned out to be inside the noise either way. See the
+  struck-through bullet above — a change in how often something fires is not a balance finding
+  until it is measured against the clear rate.
 
   What caught it: the replay corpus's effect-coverage check, which removes each probe item and
   fails if the run is unchanged. Holding an item proves nothing; that check demanded the effect
