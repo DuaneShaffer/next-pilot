@@ -376,8 +376,17 @@ export function newCursor(): ChoiceCursor {
  * simply stops. A bot policy that holds fire constantly deadlocked its run exactly
  * this way, and a player who walks away mid-choice would too.
  *
- * 60 seconds: far longer than any real decision, short enough that a stuck run
+ * 20 seconds: far longer than any real decision, short enough that a stuck run
  * eventually ends rather than hanging.
+ *
+ * THE NUMBER IS RIGHT AND FIVE PLACES SAID OTHERWISE. This comment said 60 seconds,
+ * `sim/bots.ts` said 3,600 ticks, `tests/bots.test.ts` called it "a 60-second
+ * backstop", `docs/MOBILE.md` said 60, and `tools/playtest.ts` printed "the sim's
+ * fallback timeout is 3600 and no policy may reach it". That last one was not merely
+ * wrong prose: its stall guard compared against 3600, so a real 1201-tick stall in
+ * the bot choice resolver sat under the threshold and was never reported. A constant
+ * whose documentation drifts is survivable; a *guard* derived from the drifted
+ * documentation is how a bug hides in plain sight for a milestone.
  */
 export const CHOICE_TIMEOUT_TICKS = 20 * 60
 

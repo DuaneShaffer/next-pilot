@@ -298,7 +298,9 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
     condition: { kind: 'bareHull', waves: 16 },
     grants: [{ slice: 'hulls', id: 'arrears' }],
     effect:
-      'Adds the Arrears hull: +42 speed, 150 scrap, 45 less effective health.',
+      // Absolute, not '30 less': the other two hull cards state effective health
+      // outright, and a delta only helps a player who already knows the 140 baseline.
+      'Adds the Arrears hull: +42 speed, 320 cr of scrap, 110 effective health.',
     awaiting: 'a hull selection screen',
   },
 
@@ -387,7 +389,7 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
       { slice: 'hulls', id: 'probate' },
     ],
     effect:
-      'Adds the Siege Turret elite, and the Probate hull: 132 effective health.',
+      'Adds the Siege Turret elite, and the Probate hull: 124 effective health.',
     awaiting: 'the Siege Turret elite, and a hull selection screen',
   },
 
@@ -456,7 +458,7 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
     condition: { kind: 'cleanExtraction', damage: 40 },
     grants: [{ slice: 'hulls', id: 'surety' }],
     effect:
-      'Adds the Surety hull: 210 effective health, +1 damage, and 155 speed.',
+      'Adds the Surety hull: 210 effective health and 155 speed.',
     awaiting: 'a hull selection screen',
   },
 ]

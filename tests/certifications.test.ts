@@ -30,6 +30,7 @@ import { HAZARDS } from '../src/content/hazards'
 import { HULLS, HULLS_AWAITING_MECHANICS } from '../src/content/hulls'
 import { ITEMS } from '../src/content/items'
 import { WORK_ORDERS } from '../src/content/workOrders'
+import { resolveStat } from '../src/sim/stats'
 import {
   CERTIFICATION_IDS,
   DEFAULT_CERTIFICATIONS,
@@ -210,6 +211,70 @@ describe('the roster', () => {
       if (target === null) continue
       const text = describeCondition(def.condition, { waveCount: WAVE_COUNT })
       expect(text, `${def.id} states no number`).toContain(String(target))
+    }
+  })
+
+  it('quotes numbers a hull it grants actually has', () => {
+    /**
+     * THREE CARDS WERE SELLING HULLS THAT HAD BEEN REBALANCED UNDERNEATH THEM.
+     *
+     * Surety's said "+1 damage" after that modifier was removed on measured evidence.
+     * Arrears' said "150 scrap, 45 less effective health" against 320 scrap and 30
+     * less. Probate's said "132 effective health" where the hull lands at 124. Each
+     * was a balance change that updated the hull and left the card advertising the
+     * old one — UI rule 4, on the screen where a player decides what to fly.
+     *
+     * The test below it asserted only that the string was non-empty, which is why
+     * this survived three separate rebalances.
+     *
+     * Effective health is checked because it is the figure these cards all quote and
+     * it is derivable: integrity plus shield, both through the real stat fold, so a
+     * `mul` and an `add` compose the way the game composes them. `+1 damage`-style
+     * claims cannot be verified from prose in general — the guard here is that any
+     * card naming a hull's effective health must name the right one.
+     */
+    const hullGrants = CERTIFICATIONS.flatMap((def) =>
+      def.grants.filter((g) => g.slice === 'hulls').map((g) => ({ def, hullId: g.id })),
+    )
+    expect(hullGrants.length, 'no certification grants a hull — has the roster moved?')
+      .toBeGreaterThan(0)
+
+    for (const { def, hullId } of hullGrants) {
+      const hull = HULLS[hullId]
+      expect(hull, `${def.id} grants unknown hull ${hullId}`).toBeDefined()
+      if (!hull) continue
+
+      const integrity = resolveStat('maxIntegrity', hull.stats)
+      const shield = resolveStat('maxShield', hull.stats)
+      const effective = Math.round(integrity + shield)
+
+      // Only cards that make the claim are held to it; a card may describe a hull
+      // without quoting this particular number.
+      if (!/effective health/i.test(def.effect)) continue
+      expect(
+        def.effect,
+        `${def.id} quotes effective health for ${hullId}, which is ${effective}`,
+      ).toContain(String(effective))
+    }
+  })
+
+  it('does not promise a stat the hull it grants has no modifier for', () => {
+    // The other half of the Surety failure: a card can be wrong by naming a stat that
+    // is not there at all, which no number check catches. Only `projectileDamage` is
+    // spelled out here because it is the one that actually went stale, and guessing at
+    // prose for the rest would produce false positives on flavour.
+    for (const def of CERTIFICATIONS) {
+      for (const grant of def.grants) {
+        if (grant.slice !== 'hulls') continue
+        const hull = HULLS[grant.id]
+        if (!hull) continue
+        const touchesDamage = hull.stats.some((m) => m.stat === 'projectileDamage')
+        if (touchesDamage) continue
+        expect(
+          /\bdamage\b/i.test(def.effect),
+          `${def.id} mentions damage but ${grant.id} has no projectileDamage modifier`,
+        ).toBe(false)
+      }
     }
   })
 

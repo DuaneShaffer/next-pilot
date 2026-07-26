@@ -212,8 +212,21 @@ export class Keyboard {
   attach(target: Window | HTMLElement = window): void {
     const onDown = (event: Event) => {
       const e = event as KeyboardEvent
-      if (e.repeat) return
+      /*
+       * `preventDefault` BEFORE the autorepeat guard, and the order is the whole bug.
+       *
+       * It used to `return` on `e.repeat` first, so only the FIRST keydown of a hold
+       * was swallowed and every autorepeat afterwards reached the browser. Hold
+       * ArrowDown, ArrowUp or Space during a sortie and the page scrolls out from under
+       * the canvas — which is the single thing `swallowedCodes` exists to stop, failing
+       * in exactly the case a shmup spends all its time in.
+       *
+       * Everything below the guard still needs it: `pressed` is edge-triggered, so an
+       * autorepeat must not re-enter it, and the rebind capture must not fire twice for
+       * one physical press.
+       */
       if (this.swallowed.has(e.code)) e.preventDefault()
+      if (e.repeat) return
       this.held.add(e.code)
       this.pressed.add(e.code)
       const sink = this.captureSink

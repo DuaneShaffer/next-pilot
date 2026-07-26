@@ -700,6 +700,43 @@ function buildLink(baseUrl: string, entries: readonly (readonly [string, string]
   return query === '' ? url.toString() : `${url.toString()}?${query}`
 }
 
+/**
+ * What a sortie should actually fly, given a pending URL mode and an optional typed
+ * seed.
+ *
+ * A PURE FUNCTION, extracted out of `main.ts` because that is where this decision
+ * went wrong and stayed wrong. `main.ts` has no unit test — it is DOM-bound app
+ * wiring — so the whole of M4's headline feature lived in untestable code: the URL
+ * resolved correctly, the title screen displayed the seed, and then
+ * `beginSortie()`'s `seed = withSeed ?? generateSeed()` rolled a fresh one and
+ * `launchSortie` overwrote the mode with `{ kind: 'free' }`. Every shared seed, daily
+ * contract and replay was discarded on the first keypress.
+ *
+ * Precedence, and each clause is a real case:
+ *
+ *  1. `typed` wins outright — that is the seed-entry screen, the most explicit
+ *     statement of intent there is, and it must override a link the player is
+ *     ignoring. It produces a `shared` run: the seed came from outside, so purist
+ *     accounting has to know that.
+ *  2. Otherwise a `pending` URL mode is flown as itself, so a daily stays a daily.
+ *  3. Otherwise a fresh free run.
+ *
+ * `nextPending` is always null: a URL mode is a single attempt. That is what makes
+ * `save.daily` meaningful, and what stops the run after a death silently re-flying
+ * yesterday's contract.
+ */
+export function claimSortieMode(
+  pending: RunMode | null,
+  typed: string | undefined,
+  freshSeed: () => string,
+): { readonly mode: RunMode; readonly nextPending: null } {
+  if (typed !== undefined) {
+    return { mode: { kind: 'shared', seed: normalizeSeed(typed), purist: false }, nextPending: null }
+  }
+  if (pending !== null) return { mode: pending, nextPending: null }
+  return { mode: { kind: 'free', seed: freshSeed(), purist: false }, nextPending: null }
+}
+
 /** Short, always shareable, reproduces the starting conditions. */
 export function buildSeedLink(baseUrl: string, seed: string, purist = false): string {
   const entries: [string, string][] = [[RUN_PARAM.seed, normalizeSeed(seed)]]

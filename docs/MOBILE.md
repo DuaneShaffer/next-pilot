@@ -111,7 +111,7 @@ bugs. `tests/touch.test.ts` drives the real `updateCursor` to demonstrate each:
    quietly becoming meaningless as a comparison.
 2. **The player touches the screen.** Any cursor navigation sets `awaitingRelease = false` and
    cancels the dwell. A trigger that never falls can never produce a rising edge, so the card can
-   now **never be confirmed** — it runs to `CHOICE_TIMEOUT_TICKS` (60 seconds) and resolves as a
+   now **never be confirmed** — it runs to `CHOICE_TIMEOUT_TICKS` (20 seconds) and resolves as a
    **skip**. The reward is lost, and the game was unresponsive for a minute. This is strictly worse
    than the bug the dwell was written to fix.
 

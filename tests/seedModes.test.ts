@@ -39,6 +39,7 @@ import {
   URL_SAFE_CHARS,
   buildDailyLink,
   buildSeedLink,
+  claimSortieMode,
   coerceDailyRecord,
   dailyContract,
   dailyDateForSeed,
@@ -1320,5 +1321,76 @@ describe('both screens draw headless without throwing or emitting NaN', () => {
         }
       }
     }
+  })
+})
+
+describe('claiming a URL mode for a sortie', () => {
+  /**
+   * THE REGRESSION THESE PIN was M4's entire headline feature.
+   *
+   * `resolveRunMode` did its job, the title screen displayed the contract, and then
+   * the first keypress threw it away: `beginSortie()` was called with no argument, so
+   * `seed = withSeed ?? generateSeed()` rolled a fresh seed, and `launchSortie`
+   * overwrote the mode with `{ kind: 'free', seed, purist: false }`. Share links carry
+   * only `seed`/`r`/`daily` and never `screen=sortie`, so **every** shared seed, daily
+   * contract and replay landed on the title and was discarded.
+   *
+   * It survived because the decision lived in `main.ts`, which has no unit test — it
+   * is DOM-bound app wiring. Extracting it here is the actual fix; these assertions
+   * are what makes it stay fixed.
+   */
+  const FRESH = 'FRESHSEED2345'
+  const fresh = (): string => FRESH
+
+  it('flies a shared seed from a link rather than rolling a new one', () => {
+    const pending = { kind: 'shared', seed: 'K7F29XQM3RTV', purist: false } as const
+    const { mode } = claimSortieMode(pending, undefined, fresh)
+    expect(mode.seed).toBe('K7F29XQM3RTV')
+    expect(mode.kind).toBe('shared')
+  })
+
+  it('keeps a daily contract a daily, with its date', () => {
+    const pending = {
+      kind: 'daily',
+      seed: 'DA1LYSEED234',
+      purist: false,
+      date: '2026-07-26',
+      isToday: true,
+      alreadyFlown: false,
+    } as const
+    const { mode } = claimSortieMode(pending, undefined, fresh)
+    expect(mode).toEqual(pending)
+  })
+
+  it('carries purist through, so ?purist=1 means something', () => {
+    // Hardcoding `purist: false` was a separate half of the same bug: a purist link
+    // resolved as purist and was then flown as an ordinary run.
+    const pending = { kind: 'shared', seed: 'PVR1STSEED23', purist: true } as const
+    expect(claimSortieMode(pending, undefined, fresh).mode.purist).toBe(true)
+  })
+
+  it('lets a typed seed override a link the player is ignoring', () => {
+    // The seed-entry screen is the most explicit statement of intent available, so it
+    // outranks a URL — and it produces a `shared` run, because the seed came from
+    // outside and purist accounting has to know that.
+    const pending = { kind: 'shared', seed: 'FR0MTHEL1NK2', purist: false } as const
+    const { mode } = claimSortieMode(pending, 'typed-seed-x', fresh)
+    expect(mode.kind).toBe('shared')
+    expect(mode.seed).toBe(normalizeSeed('typed-seed-x'))
+  })
+
+  it('rolls a fresh free run when nothing is pending', () => {
+    const { mode } = claimSortieMode(null, undefined, fresh)
+    expect(mode).toEqual({ kind: 'free', seed: FRESH, purist: false })
+  })
+
+  it('consumes the pending mode, so the run after a death is a fresh one', () => {
+    // A daily is ONE attempt. Without this, dying and pressing confirm would re-fly
+    // the same contract for free — and `save.daily` would stop meaning anything.
+    const pending = { kind: 'shared', seed: 'K7F29XQM3RTV', purist: false } as const
+    const first = claimSortieMode(pending, undefined, fresh)
+    expect(first.nextPending).toBeNull()
+    const second = claimSortieMode(first.nextPending, undefined, fresh)
+    expect(second.mode).toEqual({ kind: 'free', seed: FRESH, purist: false })
   })
 })

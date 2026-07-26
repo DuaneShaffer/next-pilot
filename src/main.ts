@@ -44,7 +44,13 @@ import {
   newestFirst,
 } from './meta/personnel'
 import { fingerprintPool } from './meta/purist'
-import { dailyContract, resolveRunMode, shareReplay, type RunMode } from './meta/seedModes'
+import {
+  claimSortieMode,
+  dailyContract,
+  resolveRunMode,
+  shareReplay,
+  type RunMode,
+} from './meta/seedModes'
 import { ReplayRecorder } from './meta/replay'
 import { describeIncompatibility, checkReplayCompatibility } from './meta/simVersion'
 import { drawChoiceScreen } from './ui/choiceScreen'
@@ -290,6 +296,26 @@ function main(): void {
   let runMode: RunMode = resolved.mode
 
   /**
+   * The mode the URL asked for, waiting to be flown — consumed by the first sortie.
+   *
+   * REGRESSION THIS FIXES, and it was M4's headline feature: a `?seed=`, `?daily=1`
+   * or `?replay=` link resolved correctly, the title screen displayed it, and then the
+   * first keypress threw it away. `beginSortie()` is called from the title with no
+   * argument, `seed = withSeed ?? generateSeed()` rolled a fresh one, and
+   * `launchSortie` unconditionally overwrote `runMode` with `{ kind: 'free' }`. Share
+   * links carry only `seed`/`r`/`daily` and never `screen=sortie`, so **every** shared
+   * seed, daily contract and replay landed on the title and was discarded.
+   *
+   * Landing on the title rather than launching straight in is deliberate and stays:
+   * the title already names the contract, and a daily should be read before it is
+   * flown. What was missing is that confirming there has to fly the thing it named.
+   *
+   * Consumed once, then null: a daily contract is one attempt, and the run after a
+   * death is a fresh free run. That is also what makes `save.daily` meaningful.
+   */
+  let pendingMode: RunMode | null = resolved.mode.kind === 'free' ? null : resolved.mode
+
+  /**
    * A replay must be flown in the hull it was recorded in.
    *
    * The startup world is built before `runMode` is known, with no hull — which was
@@ -439,7 +465,13 @@ function main(): void {
     // pilot currently flying, so it can only change once that pilot is finished with.
     panelState.pilotNumber = save.pilotNumber
 
-    seed = withSeed ?? generateSeed()
+    // Precedence lives in `claimSortieMode`, a pure function in seedModes.ts, because
+    // this decision going wrong inside untestable app wiring is exactly how M4's
+    // headline feature shipped broken. See that function's header.
+    const claim = claimSortieMode(pendingMode, withSeed, generateSeed)
+    pendingMode = claim.nextPending
+    const claimed = claim.mode
+    seed = claimed.seed
     runPool = poolFor(unlockedSet(save.certifications.unlocked))
 
     // Its own named stream off the run seed, so the same seed always offers the same
@@ -452,19 +484,38 @@ function main(): void {
     // unbuyable wave-8 shop and the inert work-order card both already made — and it
     // would put a third input in the death-to-next-run path that UI.md rule 6 caps
     // at two.
-    if (!shouldShowHullSelect(hullOffer)) {
-      launchSortie(hullOffer[0] ?? LIEN_ID)
+    // A REPLAY HAS NO CHOICE TO MAKE. The hull is part of the recording — see
+    // `Replay.hullId` — so offering a selection would let the player pick a ship the
+    // input log was not flown in, which diverges immediately. Everything else about
+    // playback is already fixed by the recording; the hull is too.
+    if (claimed?.kind === 'replay') {
+      launchSortie(claimed.replay.hullId || LIEN_ID, claimed)
       return
     }
+
+    if (!shouldShowHullSelect(hullOffer)) {
+      launchSortie(hullOffer[0] ?? LIEN_ID, claimed)
+      return
+    }
+    pendingHullMode = claimed
     screen = 'hull-select'
     menuTick = 0
     keyboard.clearPressed()
   }
 
   /**
+   * The mode being carried across the hull-selection screen.
+   *
+   * `beginSortie` consumes `pendingMode` before the screen opens, so without somewhere
+   * to park it a shared seed would survive the seed roll and then be dropped one
+   * screen later — the same bug one step further along.
+   */
+  let pendingHullMode: RunMode = resolved.mode
+
+  /**
    * Build the run. Split out of `beginSortie` so a hull can be chosen in between.
    */
-  function launchSortie(hullId: string): void {
+  function launchSortie(hullId: string, mode: RunMode): void {
     currentHullId = Object.hasOwn(HULLS, hullId) ? hullId : LIEN_ID
     world = new World(seed, {
       ...content,
@@ -478,7 +529,11 @@ function main(): void {
     // lossless only because every run flew a Lien; a Collateral run played back as a
     // Lien fires 20 shots/second instead of 30 and diverges within a few ticks.
     recorder = new ReplayRecorder(seed, currentHullId)
-    runMode = { kind: 'free', seed, purist: false }
+    // Whatever `claimSortieMode` decided, unmodified. This used to be a hardcoded
+    // `{ kind: 'free', seed, purist: false }`, which is what discarded every daily,
+    // shared seed and replay — and hardcoding `purist: false` is separately what made
+    // `?seed=X&purist=1` mean nothing.
+    runMode = mode
     filed = false
     newlyCertified = []
     screen = 'sortie'
@@ -515,6 +570,29 @@ function main(): void {
   }
 
   function abandonSortie(): void {
+    /**
+     * ABANDONING A DAILY CONSUMES THE ATTEMPT.
+     *
+     * `save.daily` was written only in `fileCompletedRun`, which is reached only once
+     * `runState !== 'active'` — so pause → abandon → restart let a player re-roll the
+     * contract until wave 1 looked survivable. That is precisely what the `abandoned`
+     * outcome was added to prevent, and it was never written anywhere in `src/`, which
+     * also left the "`active` is treated as `lost`" branch in meta/personnel.ts dead.
+     *
+     * No incident is filed and the pilot number does not advance: the pilot was not
+     * lost, they stopped. What is spent is the contract, which is the only thing the
+     * re-roll was cheating.
+     */
+    if (runMode.kind === 'daily' && world.runState === 'active') {
+      save.daily = {
+        date: runMode.date,
+        ticks: world.stats.tick,
+        waveIndex: world.stats.waveIndex,
+        scrap: world.stats.scrap,
+        outcome: 'abandoned',
+      }
+      persistSave(save)
+    }
     screen = 'title'
     menuTick = 0
     audio.stopAll()
@@ -767,7 +845,7 @@ function main(): void {
         }
         if (keyboard.consumePressed('confirm')) {
           audio.confirm()
-          launchSortie(hullOffer[hullSelection] ?? LIEN_ID)
+          launchSortie(hullOffer[hullSelection] ?? LIEN_ID, pendingHullMode)
         }
         if (keyboard.consumePressed('cancel') || keyboard.consumePressed('pause')) {
           audio.cancel()
