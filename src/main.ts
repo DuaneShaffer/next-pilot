@@ -1082,6 +1082,19 @@ function main(): void {
       // smaller card, so the panel stays visible behind it.
       if (screen !== 'incident' && !choosing) drawPanel(ctx, world, panelState)
 
+      /**
+       * A card draws, and then PAUSE DRAWS OVER IT.
+       *
+       * This used to `return` here, so pressing pause while a reward card was open
+       * left the run paused with no pause menu on screen: input was being routed to
+       * `updatePauseMenu`, the card was still the only thing drawn, and every key the
+       * player tried did something invisible. Reported from play, and the ordering was
+       * the cause — not the duplicate copy of this block that sat directly below it,
+       * which was unreachable and harmless.
+       *
+       * Pause is the one screen that must always be on top: it is where a player goes
+       * when they want the game to stop doing something.
+       */
       if (choosing) {
         drawChoiceScreen(ctx, world, {
           // The simulation owns the cursor so a recorded run reproduces its picks;
@@ -1091,21 +1104,10 @@ function main(): void {
           items: ITEMS,
           awaitingRelease: world.choiceAwaitingRelease,
         })
-        return
+        if (screen !== 'paused') return
       }
 
 
-      if (choosing) {
-        drawChoiceScreen(ctx, world, {
-          // The simulation owns the cursor so a recorded run reproduces its picks;
-          // this screen renders that selection rather than holding one.
-          selected: world.choiceSelection,
-          tick: world.stats.tick,
-          items: ITEMS,
-          awaitingRelease: world.choiceAwaitingRelease,
-        })
-        return
-      }
 
       if (screen === 'paused') {
         drawPauseMenu(ctx, {

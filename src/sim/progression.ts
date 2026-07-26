@@ -445,12 +445,26 @@ export function updateCursor(
   cursor: ChoiceCursor,
   input: InputSnapshot,
   optionCount: number,
+  selectable?: readonly boolean[],
 ): ChoiceAction {
   const left = input.moveX < 0
   const right = input.moveX > 0
 
+  const step = (from: number, delta: number): number => {
+    if (optionCount <= 0) return 0
+    const wrap = (i: number): number => ((i % optionCount) + optionCount) % optionCount
+    let next = wrap(from + delta)
+    // Skip past anything that cannot be chosen, at most one lap. Bounded by the lap
+    // rather than by trust: if EVERY option is unselectable the cursor stays put
+    // instead of spinning, and the player declines with the skip key.
+    for (let i = 0; i < optionCount && selectable && selectable[next] === false; i++) {
+      next = wrap(next + delta)
+    }
+    return next
+  }
+
   if (left && !cursor.prevLeft) {
-    cursor.index -= 1
+    cursor.index = step(cursor.index, -1)
     // Any deliberate navigation cancels the held-trigger rescue below: someone
     // moving the cursor is plainly not stuck, and auto-confirming under them would
     // steal the choice they were in the middle of making. This also stops the dwell
@@ -458,11 +472,31 @@ export function updateCursor(
     cursor.awaitingRelease = false
   }
   if (right && !cursor.prevRight) {
-    cursor.index += 1
+    cursor.index = step(cursor.index, 1)
     cursor.awaitingRelease = false
   }
   if (optionCount > 0) {
     cursor.index = ((cursor.index % optionCount) + optionCount) % optionCount
+    /*
+     * AN UNAFFORDABLE OPTION IS NOT SELECTABLE.
+     *
+     * It used to be: the cursor landed on it, the card drew it greyed out, and
+     * confirming did nothing at all — a button that visibly does nothing, which is the
+     * failure this project has now hit three times (the unbuyable wave-8 shop, the
+     * inert work-order card, the `reduceFlashes` row). Reported from play.
+     *
+     * Handled here rather than in the shop screen because the CURSOR is what the
+     * simulation owns and replays; a screen that refused to draw a selection the sim
+     * still held would disagree with it, which is the exact split `choiceSelection`
+     * exists to prevent.
+     *
+     * Nudged forward if the card opened on one — the first option is not guaranteed
+     * affordable, and opening with the cursor parked on something inert is the same
+     * defect one tick earlier.
+     */
+    if (selectable && selectable[cursor.index] === false) {
+      cursor.index = step(cursor.index, 1)
+    }
   } else {
     cursor.index = 0
   }

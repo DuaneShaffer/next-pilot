@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SETTINGS, type Settings } from '../src/meta/save'
 import type { Measure } from '../src/render/text'
@@ -310,5 +311,45 @@ describe('setting display', () => {
         if (/\d/.test(value)) expect(unit.length, `${item.id}: "${value}"`).toBeGreaterThan(0)
       }
     }
+  })
+})
+
+describe('pause is the topmost screen', () => {
+  /**
+   * REPORTED FROM PLAY, and nothing here could have caught it.
+   *
+   * `main.ts` drew the reward card and then `return`ed, so pressing pause while a card
+   * was open left the run paused with no pause menu drawn: input was routed to the
+   * pause handler, the card was the only thing on screen, and every key the player
+   * pressed did something invisible. That is worse than an unresponsive screen — it is
+   * a responsive screen that shows none of its own state.
+   *
+   * The check is on the RENDER ORDER as a source-level fact, because the alternative is
+   * a fake: `main.ts` is DOM-bound app wiring with no unit test, and the whole reason
+   * this bug lived there is that nothing in this suite can drive it. A structural
+   * assertion over the file is a weaker instrument than a behavioural one, and it is
+   * the strongest one available — stated plainly rather than dressed up.
+   */
+  it('draws the pause menu after a choice card rather than returning first', () => {
+    const source = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8')
+
+    // The card's early return must be conditional on NOT being paused.
+    expect(source).toContain("if (screen !== 'paused') return")
+
+    // And the pause branch has to come after the choosing branch, or the guard above
+    // has nothing to fall through to.
+    const choosingAt = source.indexOf('drawChoiceScreen(ctx, world, {')
+    const pauseAt = source.indexOf('drawPauseMenu(ctx, {')
+    expect(choosingAt, 'the choice-screen draw was not found — has it moved?').toBeGreaterThan(0)
+    expect(pauseAt, 'the pause-menu draw was not found — has it moved?').toBeGreaterThan(0)
+    expect(pauseAt).toBeGreaterThan(choosingAt)
+  })
+
+  it('draws the choice screen exactly once', () => {
+    // There were two copies of that block, back to back; the second was unreachable.
+    // Harmless in itself, but it is how the ordering bug above stayed hard to see.
+    const source = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8')
+    const copies = source.split('drawChoiceScreen(ctx, world, {').length - 1
+    expect(copies).toBe(1)
   })
 })

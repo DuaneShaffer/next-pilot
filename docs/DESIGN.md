@@ -111,6 +111,53 @@ no guessing what an icon means:
 - **Repair dock** — restores integrity. No reward.
 - **Unlisted** — unknown modifiers. Higher certification chance.
 
+## The shield recharges — decided 2026-07-26
+
+**A shield that never comes back is not a shield, it is a second, smaller health bar.** It was
+built as a one-off buffer in M1 (`applyHullDamage`: "absorbs first and does not regenerate") and
+that reading has never been revisited. The name has been writing a promise the mechanic does not
+keep for four milestones.
+
+So: **shields recharge.** The consequences are worth stating before anyone implements it, because
+this is not a small change.
+
+**It reshapes what damage means.** Right now every point of damage is permanent, so the only
+questions are "how much can I take" and "can I heal". A recharging shield adds a third: *how long
+since I was last hit*. That is a genuinely different skill — disengaging becomes a play rather
+than a delay — and it is the axis the game currently has none of.
+
+**It interacts with the two structural findings already measured, and both cut the same way:**
+
+- **Integrity recovery is the game's dominant variable.** One recovery relic multiplies the clear
+  rate by 1.9–2.6×. A recharging shield is a *second* recovery source, permanently available to
+  every hull, so it cannot be tuned by feel — it has to be measured against that number, and the
+  recharge rate is likely to be the single most sensitive constant in the game.
+- **Boss bullet density is inert**, because the 45-tick invulnerability window caps intake at 1.33
+  hits/second. A recharge that outpaces that cap makes the pilot invulnerable to any pattern
+  below it; one that does not is nearly free to ignore. The window between those two is narrow and
+  needs finding by measurement, not by taste.
+
+**Items for it, which is what makes it a system rather than a stat.** `maxShield` already exists as
+a `StatKey`; recharge needs at least a rate, and probably a delay-before-recharge, since those two
+are the levers that let a shield item be *cursed* (fast recharge, tiny pool; huge pool that takes
+ten seconds to start). The `StatKey` union is deliberately closed, so this is two new keys and the
+bounds that go with them.
+
+**Two things it fixes for free**, which is part of why it is right:
+
+- **Surety finally works as designed.** `docs/DESIGN.md` gave it "converts absorbed shield damage
+  into weapon charge, so it *wants* to be grazed", and that shipped as flat damage because there is
+  no `onShieldAbsorbed` hook and, more fundamentally, because a non-recharging shield can only be
+  grazed a fixed number of times. A recharging shield makes the fantasy playable.
+- **`retaliation-coil`'s anti-synergy stops being a trap.** Its card says it fires only on
+  integrity loss, so a larger shield strictly *reduces* its triggers — an anti-synergy the player
+  has to be warned off. With recharge, shield capacity and retaliation are a real trade rather than
+  a mistake.
+
+**What must not change:** the shield still absorbs before integrity, so `applyHullDamage` keeps one
+damage path; and recharge is simulation state, so it ticks in whole ticks off the run seed like
+everything else. It is a sim change, so `SIM_VERSION` bumps and the corpus needs a proved re-base.
+
 ## Items and synergy
 
 **Design position: ~40 well-connected items beats 150 stat sticks.** The depth players actually

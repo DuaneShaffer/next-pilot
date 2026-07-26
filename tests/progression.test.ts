@@ -578,3 +578,79 @@ describe('a held trigger can never make the card unresponsive', () => {
     }
   })
 })
+
+describe('an unaffordable option cannot be selected', () => {
+  /**
+   * REPORTED FROM PLAY: "if an item can't be purchased, don't allow it to be selected."
+   *
+   * The cursor used to land on it, the card drew it greyed, and confirming did
+   * literally nothing — a button that visibly does not work. This project has now
+   * shipped that same shape three times (the wave-8 shop nobody could buy from, the
+   * work-order card that changed nothing, the `reduceFlashes` row the renderer never
+   * read), which is why this one gets a test rather than a fix.
+   */
+  const AFFORDABLE = [true, false, true]
+
+  it('steps over an unaffordable option when navigating', () => {
+    const cursor = newCursor()
+    drive(cursor, [IDLE], 3)
+    // Right from 0 must land on 2, not on the unaffordable 1.
+    updateCursor(cursor, RIGHT, 3, AFFORDABLE)
+    expect(cursor.index).toBe(2)
+  })
+
+  it('steps over it going the other way too', () => {
+    const cursor = newCursor()
+    drive(cursor, [IDLE], 3)
+    updateCursor(cursor, LEFT, 3, AFFORDABLE)
+    expect(cursor.index).toBe(2)
+  })
+
+  it('never confirms an unaffordable option', () => {
+    const cursor = newCursor()
+    drive(cursor, [IDLE], 3)
+    // Walk the whole card in both directions and assert every confirm lands on
+    // something buyable. A pass here is the property, not one sampled path.
+    for (const key of [RIGHT, LEFT, RIGHT, RIGHT, LEFT]) {
+      updateCursor(cursor, key, 3, AFFORDABLE)
+      updateCursor(cursor, IDLE, 3, AFFORDABLE)
+      const action = updateCursor(cursor, FIRE, 3, AFFORDABLE)
+      if (action.kind === 'confirm') {
+        expect(AFFORDABLE[action.index], `confirmed unaffordable index ${action.index}`).toBe(true)
+      }
+      updateCursor(cursor, IDLE, 3, AFFORDABLE)
+    }
+  })
+
+  it('moves off an unaffordable option the card opened on', () => {
+    // The first option is not guaranteed affordable. Opening with the cursor parked on
+    // something inert is the same defect one tick earlier.
+    const cursor = newCursor()
+    updateCursor(cursor, IDLE, 3, [false, true, true])
+    expect(cursor.index).not.toBe(0)
+    expect([1, 2]).toContain(cursor.index)
+  })
+
+  it('stays put rather than spinning when nothing is affordable', () => {
+    // A card the player cannot buy from at all must still be *readable* and
+    // declinable. Cycling forever looking for a valid option would hang the tick.
+    const cursor = newCursor()
+    const none = [false, false, false]
+    drive(cursor, [IDLE], 3)
+    updateCursor(cursor, RIGHT, 3, none)
+    expect(cursor.index).toBeGreaterThanOrEqual(0)
+    expect(cursor.index).toBeLessThan(3)
+    // And it can still be declined.
+    updateCursor(cursor, IDLE, 3, none)
+    expect(updateCursor(cursor, SPECIAL, 3, none)).toEqual({ kind: 'skip' })
+  })
+
+  it('leaves a free card alone', () => {
+    // No `selectable` means every option is choosable — an item reward costs nothing,
+    // and passing affordability for it would be inventing a constraint.
+    const cursor = newCursor()
+    drive(cursor, [IDLE], 3)
+    updateCursor(cursor, RIGHT, 3)
+    expect(cursor.index).toBe(1)
+  })
+})

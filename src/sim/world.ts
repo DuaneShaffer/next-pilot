@@ -898,7 +898,18 @@ export class World implements WorldView {
         : choice.kind === 'route'
           ? choice.routes.length
           : choice.offers.length
-    const action = updateCursor(this.cursor, input, optionCount)
+    /*
+     * Which options may be selected at all. Only a priced card has any.
+     *
+     * `cost > scrap` is the same comparison the confirm backstop below uses, and the
+     * two MUST agree: an option the cursor can reach but the world refuses is a button
+     * that does nothing, which is what this fixes.
+     */
+    const selectable =
+      choice.kind === 'shop'
+        ? choice.costs.map((cost) => (cost ?? 0) <= this.stats.scrap)
+        : undefined
+    const action = updateCursor(this.cursor, input, optionCount, selectable)
 
     if (action.kind === 'skip') {
       // Declining a ROUTE cannot mean "no route" — the run has to go somewhere. It
