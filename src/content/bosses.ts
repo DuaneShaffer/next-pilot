@@ -669,7 +669,10 @@ export const BOSSES: Record<string, BossDef> = {
           // pattern in the game: 36 degrees between shots is a gap the player can
           // walk through rather than thread.
           count: 10,
-          intervalTicks: 168,
+          // 180 rather than 168 (3.0 s rather than 2.8). See the fire-rate note on
+          // this boss's third phase: the whole fight is 22% longer than it was
+          // measured at, so every cycle here is stretched to match.
+          intervalTicks: 180,
           bulletSpeed: 88,
           damage: 8,
           firstDelayTicks: 120,
@@ -684,7 +687,7 @@ export const BOSSES: Record<string, BossDef> = {
         weapon: {
           kind: 'ring',
           count: 12,
-          intervalTicks: 150,
+          intervalTicks: 162,
           bulletSpeed: 92,
           damage: 8,
           firstDelayTicks: 72,
@@ -695,9 +698,9 @@ export const BOSSES: Record<string, BossDef> = {
           // had eight seconds of pure pattern reading. Lesson order matters as much
           // here as it does across the sector's regular enemies.
           kind: 'aimed',
-          intervalTicks: 96,
+          intervalTicks: 108,
           bulletSpeed: 130,
-          damage: 9,
+          damage: 8,
           firstDelayTicks: 108,
           windupTicks: 30,
         },
@@ -716,16 +719,38 @@ export const BOSSES: Record<string, BossDef> = {
           kind: 'spread',
           count: 5,
           spreadDegrees: 52,
-          intervalTicks: 108,
+          /**
+           * FIRE RATE AND DAMAGE BOTH CUT HERE, and this is where the reason is
+           * written down for the whole boss.
+           *
+           * Correcting the HP made this fight 17.2 s -> 20.3 s, an 18% increase.
+           * Measured over 300 aggressor runs on each of two seeds, deaths to this
+           * boss went 14 -> 45 and 24 -> 52, and 36 of each 45/52 happened in THIS
+           * phase. An 18% longer fight tripled its body count.
+           *
+           * That is not a phase-3 problem, it is what the numbers were saying all
+           * along: the fight's damage per second had been tuned — implicitly, by
+           * nobody, because nobody had measured it — so that a 17-second fight
+           * consumed almost exactly the health a median pilot had left. Any
+           * lengthening at all converts survivors into deaths at that margin.
+           *
+           * So the boss keeps its patterns and loses roughly the output the extra
+           * duration added: 1.8 s -> 2.2 s between fans at 8 rather than 9 damage,
+           * and the ring behind it slowed 4.0 s -> 5.0 s. Total damage per FIGHT is
+           * held near where it was; damage per second is not. Cutting the count or
+           * the spread instead would have changed what the phase asks the player to
+           * do, and the phase reads correctly — it is only priced wrong.
+           */
+          intervalTicks: 132,
           bulletSpeed: 125,
-          damage: 9,
+          damage: 8,
           firstDelayTicks: 66,
           windupTicks: 40,
         },
         secondary: {
           kind: 'ring',
           count: 14,
-          intervalTicks: 240,
+          intervalTicks: 300,
           bulletSpeed: 100,
           damage: 7,
           firstDelayTicks: 132,
@@ -770,9 +795,21 @@ export const BOSSES: Record<string, BossDef> = {
           kind: 'spread',
           count: 5,
           spreadDegrees: 44,
-          intervalTicks: 114,
+          /**
+           * The same correction the Repossessor's third phase carries, applied
+           * harder because this fight grew more: 15.6 s -> 21.5 s, a 38% increase.
+           *
+           * Measured over the same two 300-run sweeps, deaths to the Auditor went
+           * 25 -> 43 and 18 -> 49, and the phase they concentrated in MOVED: it was
+           * spread evenly (7/7/11) before and is now front-loaded on this opening
+           * phase (24/3/16 and 23/8/18). The opening is 42% of the fight, so it is
+           * the phase that absorbed most of the extra 6 seconds, and a five-shot
+           * aimed fan every 1.9 s is the densest thing a pilot with two items has
+           * met. 2.4 s at 7 damage is the same pattern at the price it was worth.
+           */
+          intervalTicks: 144,
           bulletSpeed: 128,
-          damage: 8,
+          damage: 7,
           firstDelayTicks: 108,
           windupTicks: 42,
         },
@@ -784,9 +821,9 @@ export const BOSSES: Record<string, BossDef> = {
         movementParams: { speed: 0, amplitude: 110, frequency: 0.22 },
         weapon: {
           kind: 'tracker',
-          intervalTicks: 90,
+          intervalTicks: 108,
           bulletSpeed: 110,
-          damage: 10,
+          damage: 9,
           firstDelayTicks: 78,
           windupTicks: 34,
         },
@@ -794,9 +831,9 @@ export const BOSSES: Record<string, BossDef> = {
           kind: 'spread',
           count: 3,
           spreadDegrees: 26,
-          intervalTicks: 132,
+          intervalTicks: 144,
           bulletSpeed: 134,
-          damage: 8,
+          damage: 7,
           firstDelayTicks: 120,
           windupTicks: 36,
         },
@@ -809,17 +846,17 @@ export const BOSSES: Record<string, BossDef> = {
         weapon: {
           kind: 'ring',
           count: 16,
-          intervalTicks: 132,
+          intervalTicks: 150,
           bulletSpeed: 108,
-          damage: 8,
+          damage: 7,
           firstDelayTicks: 72,
           windupTicks: 44,
         },
         secondary: {
           kind: 'aimed',
-          intervalTicks: 72,
+          intervalTicks: 84,
           bulletSpeed: 140,
-          damage: 9,
+          damage: 8,
           firstDelayTicks: 96,
           windupTicks: 28,
         },

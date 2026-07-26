@@ -203,17 +203,26 @@ describe('state hashing', () => {
    *   - M2 (`a84510e42a86be74` -> `14e21cacdce8283e`): `freezeTicks` and
    *     `telegraphTicks` entered the regression hash. Hitstop consumes real ticks
    *     and a telegraph is real reaction time.
-   *   - M5 (`14e21cacdce8283e` -> the constant below): `EnemyInstance.uid`,
+   *   - M5, digest generation 2 (`14e21cacdce8283e` -> `6975de91b40a3194`):
+   *     `EnemyInstance.uid`,
    *     `.secondary` and `.boss` entered the enemies component, and the stage,
    *     armed hazards, the hull, the inventory and the pending card entered the run
    *     component. Every one of them steers the next tick; see the header of
    *     `src/meta/snapshot.ts` for the field-by-field argument.
-   *   - Format 3 (`6975de91b40a3194` -> the constant below): `choiceResolve` entered
-   *     the run component. It is the digest's only view of the choice cursor, which
-   *     decides whether an untouched card auto-confirms or times out.
+   *   - Digest generation 3 (`6975de91b40a3194` -> `d686a388a1795250`):
+   *     `choiceResolve` entered the run component. It is the digest's only view of
+   *     the choice cursor, which decides whether an untouched card auto-confirms or
+   *     times out.
+   *   - Digest generation 4 (`d686a388a1795250` -> the constant below):
+   *     `choiceSelection` entered it too — the highlighted option, which decides
+   *     *what* an auto-confirm takes.
+   *
+   * The generation numbers are `DIGEST_GENERATION` in `src/meta/snapshot.ts`, and
+   * `tests/simVersion.test.ts` explains why a digest change and a sim change have to
+   * be counted separately.
    */
   it('matches a recorded digest for a known world', () => {
-    expect(hashWorld(worldView())).toBe('d686a388a1795250')
+    expect(hashWorld(worldView())).toBe('68587bac3c17901f')
   })
 
   it('includes the M2 timing state that hitstop and telegraphs introduced', () => {
