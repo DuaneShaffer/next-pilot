@@ -652,6 +652,27 @@ function buildOptionContent(
     // Mechanism text is never omitted, so an unknown id still gets a line rather
     // than rendering as a bare name — the failure has to be visible.
     const mechanism = def?.mechanism ?? 'No specification on file for this component.'
+    /*
+     * DROPPED WHEN THE RESOLVED ROWS ALREADY SAY IT, which is most pure-stat items.
+     *
+     * The resolved rows landed above this sentence and immediately recreated the defect
+     * the hull cards had just been cleaned of (roadmap #29): Barrel Liner drew
+     * `Shot speed 620 -> 740 u/s (+120)` and then said "+120 projectile speed, from 620
+     * to 740 units per second" directly underneath. One fact, twice, and only one of the
+     * two derived from the run — so a balance change updates the row and leaves the
+     * sentence selling the old item. That is finding R12's shape exactly.
+     *
+     * The sentence is dropped ONLY when the rows are strictly better: every stat the item
+     * moves has a row, and the item has no `effects`. An effect is behaviour a number
+     * cannot describe — extra projectiles, chaining, a timed window — so an item carrying
+     * one keeps its sentence, because the rows cannot say what it does. `flavour` is
+     * never dropped; it was never claiming to be a specification.
+     *
+     * Note this is a per-CARD decision, not a change to `ItemDef.mechanism`. The hangar
+     * has no resolved table under it and still prints the sentence in full.
+     */
+    const hasEffects = (def?.effects?.length ?? 0) > 0
+    const movedStats = new Set((def?.stats ?? []).map((modifier) => modifier.stat))
     const name = def?.name ?? prettifyId(offer.defId)
     const tierLabel = def?.tier ?? 'unlisted'
     // `caution`, never `danger`: a drawback the player is choosing to accept is
@@ -668,6 +689,9 @@ function buildOptionContent(
       added: def?.stats ?? [],
       ...(input.resolvedStats ? { resolved: input.resolvedStats } : {}),
     })
+    const rowsCoverEveryStat =
+      movedStats.size > 0 && [...movedStats].every((stat) => statRows.some((r) => r.stat === stat))
+    const mechanismText = !hasEffects && rowsCoverEveryStat ? '' : mechanism
     return {
       id: offer.defId,
       name,
@@ -679,7 +703,7 @@ function buildOptionContent(
       shortfall,
       priceInline:
         kind !== 'shop' || titleW + 14 + priceWidth(cost, shortfall, measure) <= TEXT_W,
-      mechanism: wrapText(mechanism, TEXT_W, MECH_SIZE, measure),
+      mechanism: mechanismText === '' ? [] : wrapText(mechanismText, TEXT_W, MECH_SIZE, measure),
       flavour: def?.flavour ? wrapText(def.flavour, TEXT_W, SUB_SIZE, measure) : [],
       interaction: offer.interactionText.flatMap((text) =>
         wrapText(text, TEXT_W - SYN_PAD * 2, SUB_SIZE, measure),

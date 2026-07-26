@@ -526,10 +526,45 @@ order · `meta/keybinds.ts:107` `ownerOf` returns one owner where its own repair
 two · `content/bosses.ts:736+` five stale per-boss HP comments that would re-introduce a
 documented 25-point clear-rate regression if a future author trusted them.
 
+## Post-M5 pass, 2026-07-26 — what shipped
+
+R1-R15 are all closed; `git log --oneline --grep='R7'` remains the authoritative status. On top of
+them, in the same day:
+
+- **Confirm left the fire key**, on the user's instruction, and took three mitigations with it: the
+  48-tick held-trigger dwell, the 20-second `CHOICE_TIMEOUT_TICKS` backstop, and the "release fire
+  to choose" footer line were all patches for one root cause nobody had removed. `InputSnapshot`
+  gained a seventh bit — **the packed byte is now full**, so an eighth action needs a wider
+  encoding. Cards no longer resolve themselves at all.
+- **The shield recharges**, bounded by a per-sector reserve rather than by the clock. The
+  measurement rewrote the design and is worth reading before touching the constants: there is no
+  continuous rate that is both visible and balanced. See `docs/DESIGN.md` and the table in
+  `src/sim/stats.ts`.
+- **No route pays scrap** (median 3,940 unspent at death made a currency reward unpriceable), and
+  the repair route pays 60% of maximum.
+- Item offer cards state resolved before/after **for this ship**, and the authored sentence is
+  dropped where the rows already say it — the same cut the hull cards took, arrived at from the
+  opposite direction.
+- The hazard warning now exists in the playfield, not only the panel.
+- A save that loads partially now says so instead of presenting itself as a fresh game.
+
+`SIM_VERSION` 3, `DIGEST_GENERATION` 6, `REPLAY_FORMAT_VERSION` 4, corpus re-recorded.
+
+**Nine findings this pass produced, none of them yet fixed:** D1-D6 below, plus the shield's
+suppression of every integrity-triggered effect, the HUD's silence about the recovery reserve, and
+a worst-sector death share reading 0.81 against a 0.35 criterion — which reads 0.79 with recovery
+switched off, so it predates the change and something else moved it.
+
 ## M6 — Polish and balance
 
 - Fix the 2026-07-26 review findings above, and the vacuous guards that hid them. R1 and R11
   come first: every balance pass below is measured with the instruments they break.
+- **Re-measure Repair Nanites and the worst-sector death share before any other balance work.**
+  Both figures on record were taken before the shield recharged, and the recharge is measured to
+  suppress exactly the effects Repair Nanites depends on. Every other number below is read through
+  those two.
+- **Show the shield recovery reserve on the HUD.** It is simulation state that decides whether
+  disengaging will work, and no screen draws it — so the mechanic's central decision is invisible.
 - Land **D1–D6** from "Proposed, unscheduled" below — the code the cross-run persistence decision
   (`docs/DESIGN.md`, 2026-07-26) found already breaking it. D1–D3 before the balance passes: the
   certified pool is an unrecorded simulation input, so the daily contract and every `purist` label

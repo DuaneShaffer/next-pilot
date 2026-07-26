@@ -73,7 +73,6 @@
 import { HULLS, HULL_ORDER, LIEN_ID } from '../content/hulls'
 import { ITEMS } from '../content/items'
 import type { HullDef, ItemDef, StatKey } from '../content/types'
-import { TICK_HZ } from '../core/loop'
 import type { Rng } from '../core/rng'
 import { VIRTUAL_H, VIRTUAL_W } from '../core/space'
 import { PULSE_HZ, pulse as breathe } from '../render/intensity'
@@ -85,6 +84,9 @@ import { STATS, STAT_KEYS, resolveStat, shotsPerSecond } from '../sim/stats'
 // `lineBounds` would mean the containment tests verify a different alignment
 // convention than the renderer uses.
 import { monoMeasure, type Rect, type TextLine } from './choiceScreen'
+// ONE display table, shared with the offer cards. See its note in statDelta.ts for what
+// happened while each screen kept its own.
+import { STAT_DISPLAY } from './statDelta'
 
 export type { Rect, TextLine } from './choiceScreen'
 export { lineBounds, monoMeasure } from './choiceScreen'
@@ -208,50 +210,6 @@ export function moveHullSelection(index: number, delta: number, count: number): 
 // the comparison
 // ---------------------------------------------------------------------------
 
-interface StatDisplay {
-  /** Short enough to share a half-column with its numbers. */
-  label: string
-  /** Rule 2. Never empty. */
-  unit: string
-  /**
-   * Raw stat value to the number a player thinks in.
-   *
-   * Only `fireIntervalTicks` really needs it, and it is the reason this hook exists:
-   * ticks are a simulation implementation detail (`formatSeconds` in
-   * `src/render/text.ts` makes the same argument for durations), and "3 → 2 ticks"
-   * next to a green arrow is a card asking the player to reason about the engine.
-   */
-  present?: (value: number) => number
-}
-
-/**
- * How each stat is written on a card.
- *
- * Total over `StatKey` on purpose: adding a stat to `src/sim/stats.ts` without
- * deciding how it reads is a compile error here rather than a bare number on screen.
- */
-const STAT_DISPLAY: Readonly<Record<StatKey, StatDisplay>> = {
-  fireIntervalTicks: { label: 'Fire rate', unit: 'shots/s', present: shotsPerSecond },
-  projectileDamage: { label: 'Shot damage', unit: 'dmg' },
-  projectileSpeed: { label: 'Shot speed', unit: 'u/s' },
-  projectilesPerShot: { label: 'Rounds per shot', unit: 'rounds' },
-  hullSpeed: { label: 'Hull speed', unit: 'u/s' },
-  maxIntegrity: { label: 'Max integrity', unit: 'hp' },
-  maxShield: { label: 'Max shield', unit: 'hp' },
-  // Both arrived with shield recovery, and both are presented in the unit the player
-  // thinks in rather than the one the sim counts in — see `present` above. A delay in
-  // ticks on a hull card is the card asking the player to reason about the engine.
-  shieldRegenPerSecond: { label: 'Shield regen', unit: 'hp/s' },
-  shieldRegenDelayTicks: { label: 'Regen delay', unit: 's', present: (v) => v / TICK_HZ },
-  // `hp/sector` rather than `hp` because the per-sector part is the whole point — a
-  // reserve read as a flat `hp` would look like a second shield bar. Abbreviated label,
-  // because `Regen reserve … hp/sector` with a signed delta overruns the card's column
-  // and the fit test catches it: the unit carries the meaning, so the label gives way.
-  shieldReservePerSector: { label: 'Reserve', unit: 'hp/sector' },
-  scrapMultiplier: { label: 'Scrap yield', unit: '%', present: (v) => v * 100 },
-  pickupRadius: { label: 'Pickup radius', unit: 'u' },
-  focusFactor: { label: 'Focus speed', unit: '%', present: (v) => v * 100 },
-}
 
 /** At most one decimal, and no trailing `.0`. Tabular figures stay scannable. */
 function numeral(value: number): string {

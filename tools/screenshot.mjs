@@ -274,7 +274,13 @@ const SHOTS = [
   {
     // A shop, which needs a build and some scrap first, so it is further in.
     name: 'shop-choice',
-    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=10&holdchoice=1`,
+    // `holdchoice=shop`, NOT `holdchoice=1`. The shop is at wave 13 and the first item
+    // card is at wave 7, so a whole-run hold parks the run on the item card and the shop
+    // is never reached — the capture then photographs whatever is on screen when the
+    // wait times out and reports a state it does not show. Exactly the failure recorded
+    // in the world-map shot below, which was fixed there and left here; the harness
+    // caught it as an unreached `expect` rather than shipping the wrong frame.
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=28&holdchoice=shop`,
     waitFor: 'choiceKind === "shop"',
     holdMs: 0,
     expect: 'choiceKind === "shop"',
@@ -305,8 +311,9 @@ const SHOTS = [
     // ship stops flying, and the run dies in sector one with 37 enemies on screen
     // while the world map it is waiting for is three seams away. Measured exactly
     // that. Any capture of a LATE card is unreachable by construction under a
-    // whole-run hold; it needs `holdchoice=<kind>`, which is a one-line change in
-    // `src/main.ts:176`.
+    // whole-run hold; it needs `holdchoice=<kind>`. The shop capture above had the same
+    // defect until it was found by its own `expect` firing, which is the harness doing
+    // the job R13 gave it.
   },
   {
     // Sector two, in progress. Proves the panel is describing the run and not the

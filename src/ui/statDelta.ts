@@ -98,7 +98,16 @@ interface StatPresentation {
  * deciding how it is written is a compile error here rather than a bare number on
  * screen.
  */
-const STAT_DISPLAY: Readonly<Record<StatKey, StatPresentation>> = {
+/**
+ * THE ONE TABLE. `src/ui/hullSelect.ts` imports it rather than keeping its own.
+ *
+ * It kept a private copy until the two disagreed in exactly the way a duplicated table
+ * always does: `shieldReservePerSector` shipped as "Regen reserve" on the item card and
+ * "Reserve" on the hull card, because the hull card's fit test rejected the longer label
+ * and only that copy was shortened. One stat, two names, on two screens the player reads
+ * within a minute of each other. Exported so there is nowhere for a second copy to live.
+ */
+export const STAT_DISPLAY: Readonly<Record<StatKey, StatPresentation>> = {
   fireIntervalTicks: { label: 'Fire rate', unit: 'shots/s', present: shotsPerSecond },
   projectileDamage: { label: 'Shot damage', unit: 'dmg' },
   projectileSpeed: { label: 'Shot speed', unit: 'u/s' },
@@ -119,7 +128,10 @@ const STAT_DISPLAY: Readonly<Record<StatKey, StatPresentation>> = {
   // The unit is per *sector*, and saying so is the whole information: "20 hp" next to a
   // regen rate would read as a pool rather than as a per-sector budget. Labelled exactly
   // as `hullSelect.ts` labels it, so the two screens name the same stat the same way.
-  shieldReservePerSector: { label: 'Regen reserve', unit: 'hp/sector', inertWhen: ['maxShield'] },
+  // 'Reserve', not 'Regen reserve': short enough for the hull card's column, which is
+  // the tightest consumer of this table. See the note above about the two screens each
+  // picking their own label while the table was duplicated.
+  shieldReservePerSector: { label: 'Reserve', unit: 'hp/sector', inertWhen: ['maxShield'] },
   // Ticks are an engine unit, exactly like `fireIntervalTicks`. Seconds is the number
   // a player can hold against the 2.5 s of quiet they are trying to buy.
   shieldRegenDelayTicks: {

@@ -203,7 +203,10 @@ describe('a number that moves but cannot matter', () => {
       added: FASTER,
     })[0]
     expect(entry?.direction).toBe('inert')
-    expect(entry?.deltaText).toBe('(no effect: regen reserve 0)')
+    // 'reserve', not 'regen reserve': the two screens' display tables were collapsed
+    // into one after they disagreed on this stat's label, and the shared table uses the
+    // shorter form because the hull card's column is the tightest consumer.
+    expect(entry?.deltaText).toBe('(no effect: reserve 0)')
   })
 
   it('does not flag it when there is a shield and a reserve', () => {

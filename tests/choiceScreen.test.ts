@@ -101,16 +101,80 @@ function everyTriple(): readonly (readonly string[])[] {
   return triples
 }
 
+/**
+ * Which items keep their authored sentence on this screen.
+ *
+ * A pure-stat item's sentence is dropped when the resolved rows already state every
+ * figure in it — see the note in `choiceScreen.ts`. An item carrying an `effects` entry
+ * keeps it, because a row cannot describe extra projectiles or a timed window.
+ */
+function keepsMechanism(def: ItemDef): boolean {
+  return (def.effects?.length ?? 0) > 0 || (def.stats?.length ?? 0) === 0
+}
+
 describe('mechanism first (UI rule 4)', () => {
-  it('surfaces every offered item’s mechanism verbatim', () => {
+  it('states every offered item’s mechanism verbatim, or shows the rows instead', () => {
     for (const ids of everyTriple()) {
       const result = layout({ offers: ids.map((id) => offer(id)) })
       result.options.forEach((option, index) => {
         const def = ITEMS[ids[index] as string] as ItemDef
-        expect(option.mechanismLines.length).toBeGreaterThan(0)
-        expect(collapse(option.mechanismLines.join(' '))).toBe(collapse(def.mechanism))
+        if (keepsMechanism(def)) {
+          expect(option.mechanismLines.length, def.id).toBeGreaterThan(0)
+          expect(collapse(option.mechanismLines.join(' '))).toBe(collapse(def.mechanism))
+        } else {
+          // Dropped, but never leaving a bare name: the rows have to be there instead.
+          expect(option.mechanismLines, def.id).toHaveLength(0)
+          expect(option.statRows.length, def.id).toBeGreaterThan(0)
+        }
       })
     }
+  })
+
+  it('never prints a figure in both a row and the sentence on the same card', () => {
+    /*
+     * THE GUARD FOR ROADMAP #29, WHICH CAME BACK HERE ONE CARD LATER.
+     *
+     * The hull cards were cleaned of exactly this — prose restating what a computed
+     * table below it prints — and then the resolved rows landed on the item cards
+     * above the authored sentence and recreated it. Barrel Liner drew
+     * `Shot speed 620 -> 740 u/s (+120)` and then said "+120 projectile speed, from
+     * 620 to 740 units per second" directly underneath: one fact twice, and only the
+     * row derived from the run, so a balance change updates the row and leaves the
+     * sentence selling the old item.
+     *
+     * Swept over every item rather than spot-checked, because the failure is per-item
+     * and a new item is exactly when it would return.
+     *
+     * TWO ITEMS ARE KNOWN EXCEPTIONS and are named rather than skipped silently.
+     * `harmonic-lance` and `buckshot-manifold` each carry an `effects` entry AND a stat,
+     * so the card must keep the sentence (a row cannot say "passes through 2 extra
+     * enemies") while a row also prints the stat. Rewriting their prose to drop the
+     * figure was tried and reverted: `src/ui/hangar.ts` shows the same sentence with no
+     * resolved table under it, and `tests/items.test.ts` rightly requires an item to
+     * state the numbers it applies. Closing this properly means giving the hangar
+     * resolved rows too — recorded, not bodged. The list must not grow without that
+     * work, which is what naming it here enforces.
+     */
+    const KNOWN_DUPLICATES: readonly string[] = ['harmonic-lance', 'buckshot-manifold']
+    const stillDuplicating: string[] = []
+    for (const id of ITEM_IDS) {
+      const result = layout({ offers: [offer(id)] })
+      const option = result.options[0]
+      expect(option).toBeDefined()
+      if (option === undefined || option.mechanismLines.length === 0) continue
+      const sentence = collapse(option.mechanismLines.join(' '))
+      for (const row of option.statRows) {
+        // The resolved "after" value is the figure a row and a sentence would collide
+        // on. An item keeping its sentence for an EFFECT may still legitimately mention
+        // a number the rows do not carry, so only the row's own numbers are checked.
+        const after = String(row.after)
+        if (after.length < 2) continue
+        if (sentence.includes(after)) stillDuplicating.push(`${id} (${row.stat}=${after})`)
+      }
+    }
+    expect([...new Set(stillDuplicating.map((entry) => entry.split(' ')[0]))].sort()).toEqual(
+      [...KNOWN_DUPLICATES].sort(),
+    )
   })
 
   it('never renders an option as a name alone', () => {
@@ -135,7 +199,9 @@ describe('mechanism first (UI rule 4)', () => {
   })
 
   it('draws the mechanism larger than the flavour, and the flavour last', () => {
-    const result = layout({ offers: [offer('machined-slugs')] })
+    // `split-shot` rather than a pure-stat item: an item whose figures the rows already
+    // carry has its sentence dropped, so it has no mechanism line to compare against.
+    const result = layout({ offers: [offer('split-shot')] })
     const option = result.options[0]
     expect(option).toBeDefined()
     const mech = option?.lines.find((line) => line.text === option?.mechanismLines[0])
@@ -160,8 +226,11 @@ describe('mechanism first (UI rule 4)', () => {
     expect(result.degrade).toBeGreaterThan(0)
     for (const option of result.options) {
       expect(option.flavourLines).toHaveLength(0)
-      expect(option.mechanismLines.length).toBeGreaterThan(0)
       expect(option.interactionLines.length).toBeGreaterThan(0)
+      // Whichever of the two the option carries must survive: the sentence for an
+      // effect-bearing item, the rows for a pure-stat one. Flavour is the only thing
+      // rule 4 lets go, and "the card kept neither" is the failure worth catching.
+      expect(option.mechanismLines.length + option.statRows.length).toBeGreaterThan(0)
     }
   })
 })
@@ -879,7 +948,9 @@ describe('resolved stat detail (UI rule 4, dynamically)', () => {
   it('puts the resolved numbers above the authored sentence', () => {
     // The sentence quotes the item; the rows quote the ship. The rows are read first
     // because they are the ones that are true of this run.
-    const result = layout({ offers: [offer('warheads')] })
+    // `harmonic-lance` carries a stat AND an effect, so it is one of the few cards that
+    // draws both a row and a sentence — which is what this ordering is about.
+    const result = layout({ offers: [offer('harmonic-lance')] })
     const option = result.options[0]
     const rowY = option?.lines.find((line) => line.text === option?.statRows[0]?.text)?.y
     const proseY = option?.lines.find((line) => line.text === option?.mechanismLines[0])?.y
@@ -946,9 +1017,12 @@ describe('resolved stat detail (UI rule 4, dynamically)', () => {
     expect(option?.statRows[0]?.direction).toBe('none')
     expect(texts(option)).toContain('Max shield  0 → 0 hp')
     expect(texts(option)).toContain(` ${NO_CHANGE_TEXT}`)
-    // The prose stays: rule 4 does not let the card drop the sentence, and the label
-    // above is what stops the two being read as one claim.
-    expect(option?.mechanismLines.join(' ')).toContain('+22 max shield')
+    // AND THE AUTHORED SENTENCE IS GONE, which is the opposite of what this test
+    // asserted when the rows first landed. It expected "+22 max shield" to still be on
+    // the card beside a row reading `Max shield 0 → 0 hp` — two contradictory claims
+    // about the same pick, with the row telling the truth. The sentence is dropped
+    // wherever the rows already state every figure in it; see `choiceScreen.ts`.
+    expect(option?.mechanismLines).toHaveLength(0)
   })
 
   it('says when a number rises but cannot matter on this build', () => {
@@ -1079,36 +1153,65 @@ describe('resolved stat detail (UI rule 4, dynamically)', () => {
   })
 
   it('collapses the rows onto one line instead of dropping them when space runs out', () => {
-    // The tightest the content can get: three long mechanisms, each carrying the
-    // longest interaction sentence, and two of the three items moving two stats. Rule 4
-    // lets flavour go and nothing else, so the rows give up their parentheticals —
-    // recomputable from the two numbers — rather than the numbers themselves.
+    /*
+     * SYNTHETIC CARDS, and the reason is worth stating because it looks like a cheat.
+     *
+     * This asserted the collapse against three named real items at `degrade === 3`. Two
+     * things then moved: pure-stat items lost their redundant sentence, which freed space,
+     * and a sweep of every pair of real items now finds that the only triples reaching
+     * degrade 3 carry a SINGLE stat row — and one row has nothing to collapse onto. So the
+     * behaviour is currently unreachable from the shipping content tables.
+     *
+     * That is a fact about today's item copy, not about the layout, and pinning the test to
+     * it would mean asserting nothing. A fabricated item with two stats and a long enough
+     * sentence exercises the branch directly. The real-content guarantee — that no card
+     * overflows and rows are never dropped — is covered by the sweeps elsewhere in this file.
+     */
     const longest = [...INTERACTIONS].sort((a, b) => b.text.length - a.text.length)
+    const bulky: ItemDef = {
+      id: 'synthetic-bulky',
+      name: 'Synthetic Bulky',
+      tier: 'rare',
+      tags: ['weapon'],
+      // Length tuned to the tightest level that still FITS. Longer sentences also reach
+      // degrade 3, but overflow with it — and a card that overflows is a different bug
+      // from a card that compacts, so asserting both at once would confuse the two.
+      mechanism:
+        'A long specification sentence kept on the card because this item carries an effect.',
+      flavour: 'Synthetic, for the layout, and never offered to a player.',
+      stats: [
+        { stat: 'projectileDamage', kind: 'add', value: 3 },
+        { stat: 'hullSpeed', kind: 'add', value: 40 },
+      ],
+      effects: [{ kind: 'pierce', on: 'onFire', count: 1 }],
+      weight: 1,
+    }
+    const items = { ...ITEMS, [bulky.id]: bulky }
     const result = layout({
       kind: 'shop',
+      items,
       offers: [
-        offer('cursed-hull', [longest[0]?.text ?? '']),
-        offer('retaliation-coil', [longest[1]?.text ?? '']),
-        offer('warheads', [longest[2]?.text ?? '']),
+        offer(bulky.id, [longest[0]?.text ?? '']),
+        offer(bulky.id, [longest[1]?.text ?? '']),
+        offer(bulky.id, [longest[2]?.text ?? '']),
       ],
       costs: [384, 192, 288],
       scrap: 200,
     })
     expect(result.degrade).toBe(3)
     expect(result.overflow).toBe(false)
-    const cursed = result.options[0]
-    expect(cursed?.statCompact).toBe(true)
-    expect(cursed?.statRows).toHaveLength(2)
+
+    const option = result.options[0]
+    expect(option?.statCompact).toBe(true)
+    expect(option?.statRows).toHaveLength(2)
     // Both stats are still on the card, and on one line.
-    const joined = texts(cursed).join('')
-    for (const row of cursed?.statRows ?? []) expect(joined).toContain(row.text)
+    const joined = texts(option).join('')
+    for (const row of option?.statRows ?? []) expect(joined).toContain(row.text)
     expect(joined).toContain(STAT_ROW_SEP)
-    const rowLines = (cursed?.lines ?? []).filter((line) =>
-      (cursed?.statRows ?? []).some((row) => row.text === line.text),
+    const rowLines = (option?.lines ?? []).filter((line) =>
+      (option?.statRows ?? []).some((row) => row.text === line.text),
     )
     expect(new Set(rowLines.map((line) => line.y)).size).toBe(1)
-    // An item with a single row has nothing to collapse.
-    expect(result.options[2]?.statRows.length).toBe(2)
   })
 
   it('gives a work order no rows and no label', () => {
