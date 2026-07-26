@@ -575,13 +575,26 @@ them, in the same day:
 
 `SIM_VERSION` 3, `DIGEST_GENERATION` 6, `REPLAY_FORMAT_VERSION` 4, corpus re-recorded.
 
-**Nine findings this pass produced:** D1-D6 below, plus the shield's suppression of every
-integrity-triggered effect, the HUD's silence about the recovery reserve, and ~~a worst-sector death
-share reading 0.81 against a 0.35 criterion — which reads 0.79 with recovery switched off, so it
-predates the change and something else moved it.~~ **The death-share finding was not a finding.**
-Nothing moved: 0.81 and 0.35 are two different numbers that the same criterion has always produced
-at the same time, one from the pooled probe set and one from the competent policy. Re-measured
-below.
+**What this pass produced, and where it went.** D1-D6 plus three more. **All nine are closed** —
+D1-D6, the shield's suppression of integrity-triggered effects (re-measured; Repair Nanites is
+x1.97, down from x2.59, and still the dominant variable by three times the shield's own ablation),
+and the HUD's silence about the recovery reserve (now a row on the shield meter's own axis).
+
+~~The ninth was a worst-sector death share reading 0.81 against a 0.35 criterion.~~ **That one was
+not a finding at all.** Nothing had moved: 0.81 and 0.35 are two numbers the same criterion has
+always produced simultaneously — one pooled over every probe policy, one from the competent policy
+alone — and they were compared to each other across a doc and a JSON field without checking they
+measured the same thing. The JSON now reports the competent policy so the two cannot disagree
+again. Recorded as an error rather than deleted, because comparing two statistics that share a name
+is a mistake worth being able to recognise a second time.
+
+**Six findings replaced them**, none of them yet fixed: the reserve is spent in the first lull of a
+sector and the HUD reads `SPENT` for the rest of it; `items` and `enemies` certification grants can
+never be live while the base pool is derived from the whole table; the hull screen changes *how
+many* decisions a run contains, which the cross-run persistence decision forbids; the packed input
+byte is full, blocking a `cancel` action and the Writ hull; UI.md rule 6 cited a Playwright test
+that does not exist; and the run has a real difficulty cliff at sector 3 that no criterion has ever
+named.
 
 ## Re-measurement pass, 2026-07-26 (after the shield shipped)
 
