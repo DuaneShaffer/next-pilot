@@ -156,6 +156,20 @@ const SHOTS = [
     pressAfter: ['ArrowRight'],
   },
   {
+    // Up from the title reaches seed entry, where a shared seed or the daily is flown.
+    name: 'seed-entry',
+    url: `/?seed=${SEED}`,
+    pressAfter: ['ArrowUp'],
+  },
+  {
+    // The share card sits one press off the incident report, not on the way to the
+    // next run — UI rule 6 keeps the loop "again".
+    name: 'share-card',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=random&ff=24`,
+    waitFor: 'screen === "incident"',
+    pressAfter: ['ArrowUp'],
+  },
+  {
     name: 'pause-menu',
     url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=12`,
     waitFor: 'enemyCount >= 2',

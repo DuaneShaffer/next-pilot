@@ -8,7 +8,7 @@
  */
 
 import { FixedLoop } from './core/loop'
-import { Keyboard, NEUTRAL_INPUT, type InputSnapshot } from './core/input'
+import { Keyboard, NEUTRAL_INPUT, unpackInput, type InputSnapshot } from './core/input'
 import { generateSeed, isValidSeed, normalizeSeed } from './core/seed'
 import { VIRTUAL_H, VIRTUAL_W } from './core/space'
 import { ENEMIES } from './content/enemies'
@@ -32,6 +32,9 @@ import {
   newestFirst,
 } from './meta/personnel'
 import { fingerprintPool } from './meta/purist'
+import { dailyContract, resolveRunMode, shareReplay, type RunMode } from './meta/seedModes'
+import { ReplayRecorder } from './meta/replay'
+import { describeIncompatibility, checkReplayCompatibility } from './meta/simVersion'
 import { drawChoiceScreen } from './ui/choiceScreen'
 import { drawHangar, moveHangarSelection } from './ui/hangar'
 import {
@@ -39,6 +42,16 @@ import {
   movePersonnelSelection,
   personnelScrollFor,
 } from './ui/personnel'
+import {
+  EMPTY_SEED_ENTRY,
+  drawSeedEntry,
+  drawShareCard,
+  moveShareSelection,
+  seedEntryReduce,
+  validateSeedDraft,
+  type SeedEntryState,
+  type ShareChoice,
+} from './ui/seedEntry'
 import { drawIncidentReport } from './ui/incidentReport'
 import {
   PAUSE_ITEMS,
@@ -50,7 +63,15 @@ import { drawTitleScreen } from './ui/titleScreen'
 
 const VERSION = 'v0.2.0 · m2'
 
-type Screen = 'title' | 'sortie' | 'paused' | 'incident' | 'hangar' | 'personnel'
+type Screen =
+  | 'title'
+  | 'sortie'
+  | 'paused'
+  | 'incident'
+  | 'hangar'
+  | 'personnel'
+  | 'seed-entry'
+  | 'share'
 
 /**
  * Turn an enemy def id into something a person would say.
@@ -119,7 +140,22 @@ function main(): void {
   const canvas = document.querySelector<HTMLCanvasElement>('#game')
   if (!canvas) throw new Error('Missing #game canvas element.')
 
-  const options = readUrlOptions(generateSeed())
+  const params = new URLSearchParams(location.search)
+  const preliminary = loadSave()
+  /**
+   * Resolve what kind of run this is BEFORE anything else reads the URL.
+   *
+   * Precedence is pinned in seedModes (replay > daily > shared > free) so a URL
+   * carrying contradictory intent produces one answer and a notice, rather than a run
+   * whose label disagrees with what it actually is.
+   */
+  const resolved = resolveRunMode({
+    params,
+    now: new Date(),
+    dailyRecord: preliminary.daily,
+    randomSeed: generateSeed,
+  })
+  const options = readUrlOptions(resolved.mode.seed)
   // Adopt the v1 storage key before a normal load, so a returning player's pilot
   // count survives. See the note in meta/save.ts about versioned keys.
   const save: Save = adoptLegacySave() ?? loadSave()
@@ -146,6 +182,40 @@ function main(): void {
   /** Guards double-filing: the run-ended transition can be reached more than once. */
   let filed = false
   let newlyCertified: readonly string[] = []
+  let seedEntry: SeedEntryState = EMPTY_SEED_ENTRY
+  let shareSelection: ShareChoice = 'seed'
+  let copiedChoice: ShareChoice | null = null
+
+  /**
+   * Records the run's inputs so it can be shared afterwards.
+   *
+   * Recording always, rather than on request: a player only knows a run was worth
+   * sharing once it is over, and by then the inputs are gone. One byte per tick is
+   * cheap enough that the alternative — asking first — is the wrong trade.
+   */
+  let recorder = new ReplayRecorder(options.seed)
+
+  /**
+   * How this run was started. Resolved once, from the URL and the save.
+   *
+   * The HUD labels the run from this, so a shared seed cannot silently present itself
+   * as a daily contract and vice versa.
+   */
+  let runMode: RunMode = resolved.mode
+
+  /**
+   * A sentence to show when the URL was not honoured.
+   *
+   * Either a rejected parameter combination, or a replay recorded on rules this build
+   * no longer has. Both are cases where the player asked for something specific and
+   * got something else, so neither may pass silently.
+   */
+  const startupNotice: string | null =
+    resolved.notice ??
+    (resolved.mode.kind === 'replay'
+      ? describeIncompatibility(checkReplayCompatibility(resolved.mode.replay.simVersion))
+      : null)
+  if (startupNotice !== null) console.info(`[next-pilot] ${startupNotice}`)
 
   /**
    * The pool this run draws from, fixed at the start of the sortie.
@@ -190,6 +260,28 @@ function main(): void {
    * same `RunSummary` so a certification and the history can never disagree about what
    * happened.
    */
+  /**
+   * The share offer for the run just finished.
+   *
+   * Recomputed rather than cached because it depends on the recorded length, and a
+   * stale offer would advertise a link the recorder can no longer produce.
+   */
+  function currentShare(): ReturnType<typeof shareReplay> {
+    return shareReplay(location.origin + location.pathname, recorder.toReplay(), runMode.purist)
+  }
+
+  /**
+   * Copy without assuming the clipboard exists.
+   *
+   * `navigator.clipboard` is undefined on insecure origins and can reject when the
+   * document is not focused. Either way the copy simply does not happen, and the card
+   * already shows the URL as text — so a failure costs the player a convenience, not
+   * the link.
+   */
+  function copyToClipboard(text: string): void {
+    void globalThis.navigator?.clipboard?.writeText(text).catch(() => {})
+  }
+
   function fileCompletedRun(): void {
     if (filed) return
     filed = true
@@ -210,6 +302,18 @@ function main(): void {
     )
     save.personnel = appended.history
 
+    // A daily contract is recorded so it cannot be re-rolled by quitting until the
+    // first wave looks survivable. `abandoned` exists for exactly that reason.
+    if (runMode.kind === 'daily') {
+      save.daily = {
+        date: runMode.date,
+        ticks: world.stats.tick,
+        waveIndex: world.stats.waveIndex,
+        scrap: world.stats.scrap,
+        outcome: world.runState === 'extracted' ? 'extracted' : 'lost',
+      }
+    }
+
     // The company calls the next pilot. Advancing here rather than at launch is what
     // makes the first pilot #001, and what makes the filed record carry the number of
     // the pilot it is actually about.
@@ -217,18 +321,20 @@ function main(): void {
     persistSave(save)
   }
 
-  function beginSortie(): void {
+  function beginSortie(withSeed?: string): void {
     // NOTE: the pilot number is NOT incremented here. It advances when a pilot is
     // lost, in fileCompletedRun — incrementing on launch meant a brand-new player's
     // first sortie was pilot 002 and #001 never existed at all. The number names the
     // pilot currently flying, so it can only change once that pilot is finished with.
     panelState.pilotNumber = save.pilotNumber
 
-    seed = generateSeed()
+    seed = withSeed ?? generateSeed()
     runPool = poolFor(unlockedSet(save.certifications.unlocked))
     world = new World(seed, { ...content, workOrders: runPool.workOrders })
     sceneStars = new Starfield(seed)
     resetFeelState(feel)
+    recorder = new ReplayRecorder(seed)
+    runMode = { kind: 'free', seed, purist: false }
     filed = false
     newlyCertified = []
     screen = 'sortie'
@@ -276,12 +382,24 @@ function main(): void {
     // Held choices get neutral input so nothing confirms and the card stays up for
     // the capture. Everything else still runs, so the frame is a real one.
     const holding = options.holdChoice && world.pendingChoice !== null
-    const input: InputSnapshot = holding
-      ? NEUTRAL_INPUT
-      : options.autopilot
-        ? options.autopilot(world)
-        : keyboard.snapshot()
+    // A replay drives the sim from its recorded log; nothing else may touch input
+    // while one is playing, or the run stops being the run that was shared.
+    const replayInput =
+      runMode.kind === 'replay' && world.stats.tick < runMode.replay.inputs.length
+        ? unpackInput(runMode.replay.inputs[world.stats.tick] ?? 0)
+        : null
 
+    const input: InputSnapshot = replayInput
+      ? replayInput
+      : holding
+        ? NEUTRAL_INPUT
+        : options.autopilot
+          ? options.autopilot(world)
+          : keyboard.snapshot()
+
+    // Recorded before the tick, so a replay's byte N is the input that produced
+    // tick N — the same alignment playback assumes.
+    recorder.record(input)
     sceneStars.update()
     world.tick(input)
 
@@ -361,11 +479,59 @@ function main(): void {
           personnelScroll = 0
           screen = 'personnel'
         }
+        if (keyboard.consumePressed('up')) {
+          audio.confirm()
+          seedEntry = EMPTY_SEED_ENTRY
+          screen = 'seed-entry'
+        }
         return
       }
 
       if (screen === 'paused') {
         updatePauseMenu()
+        return
+      }
+
+      if (screen === 'seed-entry') {
+        menuTick++
+        if (keyboard.consumePressed('left')) seedEntry = seedEntryReduce(seedEntry, { kind: 'move', dx: -1, dy: 0 })
+        if (keyboard.consumePressed('right')) seedEntry = seedEntryReduce(seedEntry, { kind: 'move', dx: 1, dy: 0 })
+        if (keyboard.consumePressed('up')) seedEntry = seedEntryReduce(seedEntry, { kind: 'move', dx: 0, dy: -1 })
+        if (keyboard.consumePressed('down')) seedEntry = seedEntryReduce(seedEntry, { kind: 'move', dx: 0, dy: 1 })
+        if (keyboard.consumePressed('confirm')) {
+          const validation = validateSeedDraft(seedEntry)
+          if (validation.status === 'complete' && validation.seed !== null) {
+            audio.confirm()
+            beginSortie(validation.seed)
+          } else {
+            seedEntry = seedEntryReduce(seedEntry, { kind: 'commit' })
+          }
+        }
+        if (keyboard.consumePressed('special')) seedEntry = seedEntryReduce(seedEntry, { kind: 'erase' })
+        if (keyboard.consumePressed('cancel') || keyboard.consumePressed('pause')) {
+          audio.cancel()
+          screen = 'title'
+        }
+        return
+      }
+
+      if (screen === 'share') {
+        menuTick++
+        const share = currentShare()
+        if (keyboard.consumePressed('up')) shareSelection = moveShareSelection(shareSelection, -1, share)
+        if (keyboard.consumePressed('down')) shareSelection = moveShareSelection(shareSelection, 1, share)
+        if (keyboard.consumePressed('confirm')) {
+          const url = shareSelection === 'replay' ? share.url : share.seedUrl
+          if (url !== null) {
+            audio.confirm()
+            copyToClipboard(url)
+            copiedChoice = shareSelection
+          }
+        }
+        if (keyboard.consumePressed('cancel') || keyboard.consumePressed('pause')) {
+          audio.cancel()
+          screen = 'incident'
+        }
         return
       }
 
@@ -403,10 +569,17 @@ function main(): void {
 
       if (screen === 'incident') {
         menuTick++
-        // UI rule 6: one input from death to the next sortie.
+        // UI rule 6: one input from death to the next sortie. Sharing is a second,
+        // optional path rather than a step on the way — the loop stays "again".
         if (keyboard.consumePressed('confirm')) {
           audio.confirm()
           beginSortie()
+        }
+        if (keyboard.consumePressed('up')) {
+          audio.confirm()
+          shareSelection = 'seed'
+          copiedChoice = null
+          screen = 'share'
         }
         return
       }
@@ -431,6 +604,26 @@ function main(): void {
           pilotNumber: save.pilotNumber,
           tick: menuTick,
           version: VERSION,
+        })
+        return
+      }
+
+      if (screen === 'seed-entry') {
+        drawSeedEntry(ctx, {
+          entry: seedEntry,
+          daily: dailyContract(new Date(), save.daily),
+          tick: menuTick,
+        })
+        return
+      }
+
+      if (screen === 'share') {
+        drawShareCard(ctx, {
+          mode: runMode,
+          share: currentShare(),
+          selected: shareSelection,
+          copied: copiedChoice,
+          tick: menuTick,
         })
         return
       }

@@ -188,17 +188,61 @@ measured until M5.
   unmeasured line. `tests/textFits.test.ts` now walks **every authored string in the
   project** and measures it against its real container.
 
-## M4 — Progression, seeds, replays
+## M4 — Progression, seeds, replays ✅
 
-- Versioned save with migrations and a migration test from a v1 fixture
-- Certifications that expand the pool; hangar screen listing unlock conditions explicitly
-- Personnel files: browsable history of dead pilots
-- Daily contract, seed entry, shareable seed URLs
-- Replay recording, playback, and URL encoding
-- Purist mode
+- [x] Versioned save with migrations — v3, tested through the whole v1→v2→v3 chain from a
+      hand-written v1 payload
+- [x] Certifications that expand the pool; hangar listing unlock conditions explicitly
+- [x] Personnel files: browsable history of dead pilots
+- [x] Daily contract, seed entry, shareable seed URLs
+- [x] Replay recording, playback, and URL encoding
+- [x] Purist mode
 
-**Exit:** a v1 save loads in the current build; a replay URL round-trips and reproduces a run
-exactly; the daily seed is identical across two machines' clocks.
+**Exit criteria, all met:** a v1 save loads in the current build; a replay URL round-trips
+and reproduces a run exactly; the daily seed is identical across two machines' clocks
+(derived from the UTC date, no server). 896 tests.
+
+**The decision that mattered most was made before the feature shipped.** Replay URLs
+change what breaking the corpus costs. Until M4 it was free — hitstop changed timing,
+items changed every run, and three fixtures were re-recorded each time — because nobody
+outside the repository held a replay. So `SIM_VERSION` now travels with every replay and
+playback refuses a mismatch in both directions. The dangerous case is not a rejected
+replay but an accepted one: a run recorded before a balance change decodes *perfectly*
+and then diverges silently, and the viewer watches a plausible run that is not the one
+that was shared.
+
+`tests/simVersion.test.ts` is the process guard. A canonical scripted run is hashed
+against the real content tables, and if that hash moves without `SIM_VERSION` moving the
+test fails with the exact steps. "Remember to bump the version" is not a process.
+
+**Certifications make the design constraint unrepresentable.** A `PoolGrant` is
+`{ slice, id }` — two fields, nowhere to write a magnitude — so "+5% damage forever"
+cannot be typed rather than merely being discouraged. Eight of ten grant M5 content and
+say so on screen.
+
+**Measured, not assumed:** a twitchy run encodes to **7,626 characters** against a
+2,000-char budget derived from the smallest cap a shared link actually meets (IE's
+address bar, IIS's request line, QR capacity, mail-client linkification). Human play is
+closer to that worst case than to a bot's, so the share card measures the finished URL
+and offers the seed link instead rather than emitting something that dies silently in a
+chat client.
+
+**Honest limits on purist mode**, from the module that implements it: a modified client
+can write any record it likes, and nothing here proves a *human* flew the run. It
+certifies which pool a run drew from and must not be described as an anti-TAS measure.
+
+**Bugs found in existing code while wiring this:**
+
+- `normalizeSeed('not a seed at all')` returned a **valid seed**. The folding written for
+  voice and OCR ambiguity was aggressive enough to manufacture a run out of prose, and
+  pasting a share *link* mined twelve characters of hostname into a valid-looking seed
+  for the wrong run. `looksLikeSeed` now gates repair.
+- `World` held the work-order list as a literal, so two certifications with authored copy
+  and passing tests could never have any effect.
+- The pilot number incremented at **launch**, so a new player's first sortie was pilot
+  002 and #001 never existed. Found by looking at the personnel screen.
+- Two agents independently invented different vocabularies for "the pool" — a gap in the
+  contract I failed to define before fanning out. Unified rather than adapted.
 
 **← The vertical slice ends here. Everything above should be genuinely good before M5 begins.**
 
