@@ -520,6 +520,18 @@ export const ENEMIES: Record<string, EnemyDef> = {
    *
    * Speed 26 (barely above the mine's 22) so the decision can always be
    * deferred — a strongbox you are not ready for is still there in ten seconds.
+   *
+   * ## The burst is 10 shards at 5, not 12 at 6, and the measurement says why
+   *
+   * "Killing one at point blank costs about half a shield" was the intent, and 12 x 6
+   * is 72 against a 40-point shield — so a pilot who ate even half a burst lost the
+   * whole shield and some integrity. Measured, this was 15% and 21% of every death in
+   * a sector that already owned 43-47% of the deaths in the run: the second largest
+   * named cause in it.
+   *
+   * 10 x 5 is 50, so half a burst is 25 and the sentence above becomes true. The
+   * lesson is unchanged and the trap still bites; it no longer ends runs in the
+   * sector where a pilot has the least health and the fewest items to fix it.
    */
   strongbox: {
     id: 'strongbox',
@@ -532,7 +544,7 @@ export const ENEMIES: Record<string, EnemyDef> = {
     movementParams: { speed: 26 },
     weapon: { kind: 'none', intervalTicks: 0, bulletSpeed: 0, damage: 0, firstDelayTicks: 0, windupTicks: 0 },
     shape: 'mine',
-    deathBurst: { count: 12, bulletSpeed: 116, damage: 6 },
+    deathBurst: { count: 10, bulletSpeed: 116, damage: 5 },
   },
 
   /**
@@ -562,7 +574,12 @@ export const ENEMIES: Record<string, EnemyDef> = {
     movementParams: { speed: 118, holdYFraction: 0.19 },
     weapon: {
       kind: 'aimed',
-      intervalTicks: 60, // 1s. It is only on screen for ~4s, so this is ~4 shots.
+      // 72 rather than 60, so ~3 aimed shots per crossing rather than ~4. Third
+      // named cause of death in the run's cliff sector at 9-13%, and the shot count
+      // is the honest lever: the threat is stated above as "where it is rather than
+      // how long it lives", and a crosser landing four aimed shots is being paid for
+      // its uptime rather than for its position.
+      intervalTicks: 72, // 1.2s. It is on screen for ~4s, so this is ~3 shots.
       bulletSpeed: 142,
       damage: 7,
       firstDelayTicks: 42, // 0.7s — it has crossed a visible distance before firing.
@@ -582,8 +599,30 @@ export const ENEMIES: Record<string, EnemyDef> = {
    * shot count, opposite question, which is the cheapest way to make a familiar
    * silhouette teach something new.
    *
-   * 240 HP is 2.5s at 96 dps. holdTicks 540 (9s) so a tollgate the pilot decides
+   * 240 HP is 2.5s at 96 dps. holdTicks 420 (7s) so a tollgate the pilot decides
    * to run past eventually leaves, exactly as sector 1's does.
+   *
+   * ## Retuned against the measured death distribution, not against feel
+   *
+   * The Tally took 47.0% and 43.1% of every death in a 300-run sweep on each of two
+   * seeds, against a 35% ceiling that says no sector may be a cliff, and it is
+   * entered at the lowest health of any sector (57% / 63%). This enemy was the
+   * largest single named cause inside it, at 31% and 21% of the sector's deaths.
+   *
+   * Three numbers moved, each aimed at a different part of why:
+   *
+   * - `holdTicks` 540 -> 420. The stated design is "a tollgate the pilot decides to
+   *   run past eventually leaves". Nine seconds against a 1.4-second cadence is six
+   *   volleys, which is not a decision to run past — it is a wall that outlasts the
+   *   decision. Seven seconds is five.
+   * - `intervalTicks` 84 -> 96 (1.4s -> 1.6s). The answer to this turret is to LEAVE
+   *   THE COLUMN, and at 1.4 s the pilot who commits to leaving is still inside the
+   *   next volley. A gap has to be wide enough to contain the manoeuvre the enemy is
+   *   asking for, or the telegraph is decorative.
+   * - `damage` 8 -> 7. The smallest of the three and last on purpose: a 3-shot column
+   *   at 146 u/s should still hurt. It went to 6 on a second pass, when the sector
+   *   was still at 41.8% of every death in the run and this was still its largest
+   *   named cause at 23%.
    */
   tollgate: {
     id: 'tollgate',
@@ -593,12 +632,12 @@ export const ENEMIES: Record<string, EnemyDef> = {
     contactDamage: 18,
     scrap: 24,
     movement: 'hover',
-    movementParams: { speed: 60, holdYFraction: 0.22, holdTicks: 540 },
+    movementParams: { speed: 60, holdYFraction: 0.22, holdTicks: 420 },
     weapon: {
       kind: 'spread',
-      intervalTicks: 84, // 1.4s
+      intervalTicks: 96, // 1.6s
       bulletSpeed: 146,
-      damage: 8,
+      damage: 6,
       count: 3,
       spreadDegrees: 14,
       firstDelayTicks: 72,

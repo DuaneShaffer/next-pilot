@@ -325,12 +325,14 @@ describe('compareToBaseline', () => {
   })
 
   it('states the composite figures the per-stat rows hide', () => {
-    // Probate trades 28 integrity for 20 shield and lands at 132 against 140 — nearly
-    // level, and nothing in a two-row table says so.
+    // Probate trades 36 integrity for 20 shield and lands at 124 against 140 — close
+    // enough that a two-row table reads as a wash, which is exactly what this figure
+    // exists to contradict. The write-down was -28% until a sweep measured the hull
+    // at +29 pp above the roster mean on the strength of its starting relic alone.
     const probate = compareToBaseline(getHull('probate'))
     expect(probate.baseEffectiveHealth).toBe(140)
-    expect(probate.effectiveHealth).toBe(132)
-    expect(probate.net).toContain('140 → 132 effective hp (-8)')
+    expect(probate.effectiveHealth).toBe(124)
+    expect(probate.net).toContain('140 → 124 effective hp (-16)')
     expect(probate.net).toContain('unchanged')
 
     const collateral = compareToBaseline(getHull('collateral'))
@@ -433,10 +435,10 @@ describe('every hull states its drawback on the card', () => {
   })
 
   it('shows starting scrap with its unit', () => {
-    // Arrears begins funded. A player who finds 150 cr they did not know about has
+    // Arrears begins funded. A player who finds 320 cr they did not know about has
     // been told something after the fact that they needed before it.
     const card = layout({ offer: ['arrears'] }).cards[0]
-    expect(card?.startingLines.join(' ')).toContain('150 cr')
+    expect(card?.startingLines.join(' ')).toContain('320 cr')
     expect(card?.lines.some((line) => line.text === HULL_STARTS_LABEL)).toBe(true)
   })
 
@@ -577,8 +579,14 @@ describe('degradation and defects', () => {
 
   it('never drops the mechanism, the trade table or the net line', () => {
     // The parts that make the card inform rather than sell. Asserted at the tightest
-    // level the cascade has, against the tallest offer the layout can be handed.
-    const tightest = layout({ offer: ['arrears', 'probate', 'surety'] })
+    // level the cascade has, against an offer that reaches it.
+    //
+    // WHICH TRIO REACHES LEVEL 2 IS A FUNCTION OF HOW LONG THE HULL PROSE IS, so it
+    // moves when a hull is retuned: this was arrears/probate/surety until Surety's
+    // mechanism lost a clause (its flat +1 damage was removed on a sweep) and the trio
+    // started fitting at level 1. The assertion is about what level 2 must still
+    // contain, so the offer is chosen to reach level 2 rather than pinned to a trio.
+    const tightest = layout({ offer: ['arrears', 'probate', 'collateral'] })
     expect(tightest.overflow).toBe(false)
     expect(tightest.degrade).toBe(2)
     for (const card of tightest.cards) {
@@ -593,7 +601,7 @@ describe('degradation and defects', () => {
     // Level 2 gives up the relic's mechanism sentence and NEVER its name or tier —
     // "you are holding something and I will not say what" is the betrayal the brief
     // names, and it would be worse than the sentence being missing.
-    const tightest = layout({ offer: ['arrears', 'probate', 'surety'] })
+    const tightest = layout({ offer: ['arrears', 'probate', 'collateral'] })
     expect(tightest.degrade).toBe(2)
     const probate = tightest.cards.find((card) => card.id === 'probate')
     const nanites = ITEMS['repair-nanites']
@@ -608,9 +616,9 @@ describe('degradation and defects', () => {
   })
 
   it('keeps starting scrap at every degradation level', () => {
-    for (const offer of [['arrears'], ['arrears', 'probate', 'surety']]) {
+    for (const offer of [['arrears'], ['arrears', 'probate', 'collateral']]) {
       const card = layout({ offer }).cards.find((entry) => entry.id === 'arrears')
-      expect(card?.startingLines.join(' '), offer.join(',')).toContain('150 cr')
+      expect(card?.startingLines.join(' '), offer.join(',')).toContain('320 cr')
     }
   })
 

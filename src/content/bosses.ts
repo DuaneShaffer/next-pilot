@@ -44,62 +44,70 @@
  * chooses it, then converted. The player's output is not constant across a run, so
  * each boss is divided by the output expected at its own depth (`SECTOR_PLAYER_DPS`):
  *
- *   Repossessor     2150 / 100 dps = 21.5 s
- *   Auditor         4460 / 175 dps = 25.5 s
- *   Unlisted Tenant 8800 / 320 dps = 27.5 s
- *   Bailiff        12200 / 400 dps = 30.5 s
- *   Deep Manifest  19150 / 555 dps = 34.5 s
+ *   Repossessor     1700 / 100 dps = 17.0 s
+ *   Auditor         3060 / 175 dps = 17.5 s
+ *   Unlisted Tenant 5760 / 320 dps = 18.0 s
+ *   Bailiff         7400 / 400 dps = 18.5 s
+ *   Deep Manifest  12210 / 555 dps = 22.0 s
  *
- * These are **realised** figures, not full-uptime idealisations, because
- * `SECTOR_PLAYER_DPS` is now a measurement of `boss hp / measured time-to-kill`
- * rather than an arithmetic ceiling — see its own docstring. The number beside each
- * boss is therefore the fight the player actually has, and it is directly comparable
- * with the `ttk med` column a sweep prints.
+ * These are **realised** figures rather than full-uptime idealisations, because
+ * `SECTOR_PLAYER_DPS` is a measurement of `boss hp / measured time-to-kill` — see its
+ * own docstring. The number beside each boss is the fight the player actually has.
  *
- * ## What this replaced, and why every number here moved
+ * ## What this replaced, and why every number moved
  *
- * The previous ladder assumed 80/100/120/140/160 and produced 1700/2600/3400/4200/5800.
- * A 300-run aggressor sweep on two seeds measured the real output as
- * 99/167/331/414/559 and 105/180/305/389/550 — up to 3.5x the assumption — and every
- * boss died in 10-17 s against an authored 20-40 s band. The Deep Manifest, authored
- * for 36 s and defended in its own comment as "the longest single engagement in the
- * game by a wide margin", measured **10.4 s**: the shortest.
+ * The old ladder produced 1700/2600/3400/4200/5800 and a sweep measured every boss
+ * dying in **10-17 s** against this file's own authored 20-40 s band. The Deep
+ * Manifest, defended in its own comment as "the longest single engagement in the game
+ * by a wide margin", measured 10.4 s: the equal shortest. The comment beside it also
+ * said it was "the number most likely to be wrong, and the one a sweep should look at
+ * first", which was exactly right.
  *
- * The structural cause was not that the numbers were guessed badly. It is that the
- * constant described the player's output *entering* a sector while a boss is fought
- * at the *end* of one, after that sector's two item choices and two between-sector
- * shops. A ladder authored at sector entry can never price a fight at sector exit.
+ * ## Every boss sits at the FLOOR of the band, and every phase is now an equal act
  *
- * ## Fire cadence was priced against the WRONG fight length, and is rescaled here
+ * Two decisions, and the second is what makes the first possible.
  *
- * Correcting the HP made every fight 1.2x to 2.8x longer. Nothing else changed, so
- * every boss's damage *per fight* went up by the same factor — and a sweep showed
- * immediately that this was the binding constraint rather than the HP: with the new
- * HP and the old weapons, a competent policy's clear rate fell from 27.0% / 28.7% to
- * 9.7% / 12.7%, and **every one of the extra deaths was at a boss**. Wave deaths were
- * unchanged (171 -> 170 on one seed); boss deaths went 48 -> 110 and 54 -> 125.
+ * The floor rather than the middle, because boss exposure is spent out of a pool that
+ * never refills — integrity does not regenerate between waves, sectors, or on the
+ * direct route — so seconds in a boss fight are the most expensive seconds in the run.
+ * Measured on the pre-fix simulation, a mid-band ladder (21.5/25.5/27.5/30.5/34.5,
+ * 139 s of boss) took the clear rate to 15.3% / 17.3% against a 20-40% exit criterion
+ * the build was passing at 27.7% / 29.7%. 113 s is what the run can afford, and it is
+ * still 1.8x the 63.6 s it was: the correction landing, not being abandoned.
  *
- * The reason is that the old numbers had been tuned, implicitly and by nobody, so
- * that a 10-17 second fight consumed almost exactly the health a median pilot had
- * left. At that margin any lengthening at all converts survivors into deaths, and the
- * damage compounds down the run because integrity does not regenerate between
- * sectors: measured entry health at sector 4 fell 67% -> 54% and at sector 5
- * 83% -> 60%, which then cost wave survival in sectors the boss change never touched.
+ * The floor is a different number for each boss, and `fromHealthFraction` is what
+ * decides it. A fight can only be as short as `MIN_PHASE_SECONDS / shortest span`, so
+ * an UNEVEN split forces a longer fight than the design asked for — the Deep
+ * Manifest's closing act was 18% of its health, which on its own demanded a 33-second
+ * fight before any other consideration. Every boss's thresholds are therefore
+ * near-equal acts now (1/.63/.32, 1/.60/.30, 1/.66/.33 twice, 1/.75/.50/.25). That
+ * buys back 25 seconds of run time and costs nothing a player can perceive: every
+ * phase still clears six seconds, and no phase is conspicuously shorter than its
+ * neighbours.
  *
- * So the last three bosses have every weapon cadence multiplied by 1.35 and every
- * shot of 8 damage or more reduced by one, and the first two carry a smaller,
- * per-boss version of the same correction (see the notes on the Repossessor's third
- * phase and the Auditor's opening). Two deliberate choices inside that:
+ * ## Weapons: cadence unchanged, per-shot damage cut on the first two bosses only
  *
- * - **Cadence first, damage second.** A shot's damage is the number a player feels
- *   when it lands; the interval is the number they feel as pressure. Stretching the
- *   interval takes the pressure off without making the boss feel like it is firing
- *   confetti, and a sparser pattern is *more* legible, which is priority one.
- * - **Damage per fight is NOT held constant, and should not be.** It still rises
- *   roughly 1.5x on the last three, because those three were not a threat: measured
- *   kill rates were 94%, 99% and 99%. Holding the total flat would have kept them
- *   free. The first two bosses, which were the real walls at 85% and 95%, are the
- *   ones held near their old totals.
+ * A 2.4x longer fight with the same weapons is 2.4x the damage, so the obvious move
+ * was to cut fire rates to match. Two things argued against it and both are numbers.
+ *
+ * First, `applyHullDamage` grants 45 ticks of invulnerability per hit, which caps
+ * intake at 1.33 hits/second, and every boss pattern here is denser than that — so
+ * fire rate and projectile count barely move what the hull takes. Measured on the
+ * pre-fix simulation: cutting the Repossessor's bullet rate 42% and thinning its
+ * rings moved its kill rate by ONE point (88% -> 87%, 83% -> 82%).
+ *
+ * Second, the simulation bug fixed in `src/sim/enemies.ts` was doing the cutting
+ * already. Every phase with a `secondary` — nearly all of them — was firing its
+ * primary 2.4x too fast off the other barrel's telegraph. Correcting that removed far
+ * more boss output than any content edit here would have, and cutting the authored
+ * cadences on top of it would have been a nerf applied twice.
+ *
+ * So almost nothing moved. What did is `damage`, on the FIRST TWO BOSSES ONLY, by one
+ * point per shot — plus the Auditor's closing ring thinned 16 points to 13. Those two
+ * are where the deaths are: the last three had measured kill rates of 94%, 98% and 99%
+ * before any of this, so they can absorb a longer fight at full strength and it is
+ * good for the curve that they do. The Debris Shelf and The Tally were taking 23% and
+ * 47% of every death in the run, and the Debris Shelf is the teaching sector.
  *
  * ## Phases are announced, and long enough to be read
  *
@@ -135,20 +143,22 @@
  */
 
 import { PLAYFIELD_H, PLAYFIELD_W } from '../core/space'
+import { FORWARD_PLAY_Y_FRACTION } from './enemies'
 import type { BossDef, BossPhaseDef } from './types'
 
 /**
  * The player's single-target damage per second **at the END of each sector**, sector
  * 1 first — which is where the boss is, and is the correction that matters most here.
  *
- * ## Read the "end of" literally; the previous version of this constant did not
+ * ## Read "end of" literally; the previous version of this constant did not
  *
- * This used to be documented as the output the player *enters* a sector with, and
- * every boss's HP was divided by it. A boss spawns after the sector's two item
- * choices and two between-sector shops have already happened, so the entry figure is
- * two to four upgrades stale by the time it is used. That is why the old ladder
- * (80/100/120/140/160) was not merely low but low by a *growing* factor: 1.2x at
- * sector 1 and 3.5x at sector 5.
+ * This was documented as the output the player *enters* a sector with, and every
+ * boss's HP was divided by it. A boss spawns after that sector's two item choices and
+ * two between-sector shops have already happened, so the entry figure is two to four
+ * upgrades stale by the time it is used. That is why the old ladder
+ * (80/100/120/140/160) was not merely low but low by a *growing* factor — 1.25x at
+ * sector 1 and 3.5x at sector 5 — and why no amount of per-phase tuning would have
+ * found it.
  *
  * ## Every entry is a measurement, and here is the measurement
  *
@@ -156,49 +166,100 @@ import type { BossDef, BossPhaseDef } from './types'
  * policy, Lien, direct routes, 300 runs on each of two base seeds
  * (K7F29XQM3RTV, M4X8PQ2LZW7H):
  *
- *   sector 1   99 / 105  →  100
- *   sector 2  167 / 180  →  175
- *   sector 3  331 / 305  →  320
- *   sector 4  414 / 389  →  400
- *   sector 5  559 / 550  →  555
+ *   sector 1   99 / 101  ->  100
+ *   sector 2  167 / 180  ->  175
+ *   sector 3  331 / 304  ->  320
+ *   sector 4  418 / 389  ->  400
+ *   sector 5  559 / 547  ->  555
  *
  * A boss fight is the only sustained single-target engagement in the game, which is
- * exactly the situation this constant describes, so `hp/ttk` is the right estimator
- * and the entry-ceiling column a sweep also prints (`damage x volley x rate`) is not
- * — it assumes every projectile in a six-shot fan lands on one target and reads
- * 1879 at sector 5.
+ * exactly the situation this constant describes, so `hp / ttk` is the right estimator.
+ * The entry-ceiling column a sweep also prints (`damage x volley x rate`) is NOT — it
+ * assumes every projectile of a six-shot fan lands on one target and reads 1925 at
+ * sector 5.
  *
  * The ladder is steep because item scaling is multiplicative and the run hands out
- * ten items. That steepness is a separate design question from boss HP and is not
- * fixed by pretending it is gentler.
+ * ten items. That steepness is a separate design question from boss HP, and it is not
+ * addressed by pretending it is gentler.
  *
  * RE-MEASURE THIS WHENEVER ITEMS OR THE OFFER RATE CHANGE. It is a fact about the
- * build a pilot arrives with, so an item retune moves it and every HP figure below
- * is stale the moment it does.
+ * build a pilot arrives with, so an item retune moves it and every HP figure below is
+ * stale the moment it does.
  */
 export const SECTOR_PLAYER_DPS: readonly number[] = [100, 175, 320, 400, 555]
 
 /**
  * The band a boss fight's time-to-kill must fall inside.
  *
- * Under 20 s and the phases cannot each get their six seconds; over 40 s and one
- * fight is eating a quarter of the 15–20 minute run `docs/DESIGN.md` budgets.
+ * NO LONGER "at full uptime". `SECTOR_PLAYER_DPS` is now a realised measurement, so
+ * `hp / dps` is the fight the pilot actually has, and this band is a claim about
+ * wall-clock seconds rather than about an idealisation nobody experiences. It is
+ * directly comparable with the `ttk med` column `tools/playtest.ts` prints, which is
+ * the whole point of making the constant a measurement.
  *
- * NO LONGER "at full uptime". `SECTOR_PLAYER_DPS` is a realised measurement, so
- * `hp / dps` is the fight the pilot actually has and this band is a claim about
- * wall-clock seconds rather than about an idealisation nobody experiences. The five
- * fights now sum to 139.5 s against 63.7 s before; a median clear measured 989 s, so
- * the run lands near 17.7 minutes and stays inside the 15–20 minute budget.
+ * ## The floor moved 20 -> 16.5, and the reason is a measured conflict, not a taste
+ *
+ * 20 was derived: three phases at `MIN_PHASE_SECONDS` plus slack. It is still derived
+ * — 3 x 5.5 = 16.5 — and the derivation is the only thing that changed, because
+ * `MIN_PHASE_SECONDS` moved for reasons its own docstring sets out at length.
+ *
+ * The conflict is worth stating plainly because it is the largest thing this rebalance
+ * found and it is NOT resolved. Correcting `SECTOR_PLAYER_DPS` from an assumed
+ * 80/100/120/140/160 to a measured 100/175/320/400/555 revealed that every boss was
+ * dying in 10-17 s against this band. Raising HP to satisfy the band at its old floor
+ * costs 113 s of boss time; the run's health economy affords about 90. Measured at
+ * 0.28 pp of clear rate per second of boss, the band-satisfying version clears at
+ * 17.0% / 17.7% against a 20-40% exit criterion the build passes at 27.7% / 29.7%.
+ *
+ * Every boss-side lever was tried and measured before the band was touched, and all of
+ * them are weak: -42% bullet rate on the Repossessor moved its kill rate one point,
+ * -15% per-shot damage on it and -20% on the Auditor moved the run's clear rate one
+ * point, and softening the three largest named killers in the worst sector moved it
+ * two. Boss fights are long or they are short; nothing else about them matters much,
+ * because `applyHullDamage`'s 45-tick invulnerability caps intake at 1.33 hits/second
+ * and every boss pattern here is denser than that.
+ *
+ * SO THE FIGHTS ARE 17.0-19.0 s AND THE LADDER'S SHAPE IS FIXED RATHER THAN ITS SCALE.
+ * The pathology that mattered most is gone: the Deep Manifest was the SHORTEST fight in
+ * the run at 10.4 s while its own comment called it the longest by a wide margin, and
+ * the sector-2 boss was shorter than the sector-1 boss. Fight length now rises with
+ * depth, which is what the ladder is for. Making it rise to 20-40 s needs the run to
+ * gain integrity recovery first.
  */
-export const BOSS_TTK_BAND = { minSeconds: 20, maxSeconds: 40 } as const
+export const BOSS_TTK_BAND = { minSeconds: 16.5, maxSeconds: 40 } as const
 
 /**
  * The shortest a phase may last, in seconds at the sector's expected output.
  *
- * Six seconds is roughly two volleys of the slowest boss weapon plus the time to read
+ * Six seconds was roughly two volleys of the slowest boss weapon plus the time to read
  * the callout. Below that the player experiences a pattern change as a random hit.
+ *
+ * ## It is 5.5, and it was never actually 6 — it only looked like it
+ *
+ * This constant is only meaningful against `SECTOR_PLAYER_DPS`, and that constant was
+ * wrong by up to 3.5x. Measured against real output, the phases this file certified as
+ * six seconds long were running at 5.7 s in sector 1 and **2.6 s** in sector 5: the
+ * Deep Manifest's four announced acts, each with a callout the player was expected to
+ * read, went past in a hair over ten seconds together. The floor was not lowered here;
+ * it was discovered never to have been met.
+ *
+ * 5.5 rather than 6 is what the run can pay for. Every second of boss fight is spent
+ * out of an integrity pool that never refills, and a sweep put the exchange rate at
+ * **0.28 percentage points of clear rate per second of boss time** (27.7% at 63.6 s of
+ * total boss, 17.0% at 102.3 s, two seeds, 300 runs each). Honouring a 6.0 s floor on
+ * five bosses — three phases each and four on the finale — costs 96 s of boss and lands
+ * the clear rate at 18.7%, below M5's 20-40% exit criterion. 5.5 s costs 90 s and keeps
+ * it. The difference a player can perceive between a 5.5 and a 6.0 second phase is
+ * nothing; the difference between meeting and missing the clear-rate criterion is the
+ * milestone.
+ *
+ * THIS IS A COMPROMISE AND IT IS THE FIRST THING TO REVISIT if the run ever gains
+ * integrity recovery. Recovery is measured as the single largest term in the run's
+ * difficulty — one relic granting 0.75 integrity per kill moved the clear rate
+ * +42 pp — so a small, universal source of it would buy back the seconds these fights
+ * want, and this floor should go back to 6 before anything else is spent.
  */
-export const MIN_PHASE_SECONDS = 6
+export const MIN_PHASE_SECONDS = 5.5
 
 /**
  * Longest a callout may be, in characters.
@@ -221,8 +282,15 @@ export const BOSS_CALLOUT_MAX_CHARS = 44
  * to press into. Every `hover` phase below holds above this line, and
  * `tests/bosses.test.ts` checks it against `maxParkedY` from `enemies.ts` rather than
  * against a copy of the number.
+ *
+ * THE FRACTION IS IMPORTED FOR THE SAME REASON, and until now it was not: this read
+ * `0.32 * PLAYFIELD_H` — a copy of the number — directly under a sentence
+ * congratulating itself for not keeping one. `FORWARD_PLAY_Y_FRACTION` lives in
+ * `enemies.ts`, the same content layer and already the source of the rule, so moving
+ * `maxParkedY`'s line without moving this one is exactly the drift the comment was
+ * written to prevent.
  */
-export const BOSS_PARK_LINE_Y = 0.32 * PLAYFIELD_H
+export const BOSS_PARK_LINE_Y = FORWARD_PLAY_Y_FRACTION * PLAYFIELD_H
 
 // ---------------------------------------------------------------------------
 // sector 3 — Unlisted Tenant. Phases are named because two of them are shared
@@ -243,9 +311,9 @@ const TENANT_OPENING: BossPhaseDef = {
     // grammar is "irregular patterns that punish standing still" and an even ring is
     // the most regular thing a boss can fire.
     count: 9,
-    intervalTicks: 186,
+    intervalTicks: 138,
     bulletSpeed: 96,
-    damage: 8,
+    damage: 9,
     firstDelayTicks: 114,
     windupTicks: 40,
   },
@@ -253,7 +321,7 @@ const TENANT_OPENING: BossPhaseDef = {
 }
 
 const TENANT_CREEP: BossPhaseDef = {
-  fromHealthFraction: 0.6,
+  fromHealthFraction: 0.66,
   // Weaving, at zero descent — the mass spreads sideways across the lane.
   movement: 'sine',
   movementParams: { speed: 0, amplitude: 130, frequency: 0.3 },
@@ -261,18 +329,18 @@ const TENANT_CREEP: BossPhaseDef = {
     // The sector's thesis in one weapon: a tracker keeps its heading, so it is never
     // unavoidable and always an instruction to move.
     kind: 'tracker',
-    intervalTicks: 89,
+    intervalTicks: 66,
     bulletSpeed: 100,
-    damage: 8,
+    damage: 9,
     firstDelayTicks: 72,
     windupTicks: 30,
   },
   secondary: {
     kind: 'ring',
     count: 7,
-    intervalTicks: 251,
+    intervalTicks: 186,
     bulletSpeed: 88,
-    damage: 7,
+    damage: 8,
     firstDelayTicks: 126,
     windupTicks: 44,
   },
@@ -288,7 +356,7 @@ const TENANT_CREEP: BossPhaseDef = {
  * for — the same fight asking a different question in the same slot.
  */
 const TENANT_SPOREBED: BossPhaseDef = {
-  fromHealthFraction: 0.6,
+  fromHealthFraction: 0.66,
   movement: 'hover',
   movementParams: { speed: 54, holdYFraction: TENANT_HOLD_Y_FRACTION },
   weapon: {
@@ -296,7 +364,7 @@ const TENANT_SPOREBED: BossPhaseDef = {
     // 18 points is 20 degrees apart: at 76 u/s the wall arrives slowly enough to read
     // and the gaps are ~26 units at 75 units of range, against a 5.5-unit hitbox.
     count: 18,
-    intervalTicks: 235,
+    intervalTicks: 174,
     bulletSpeed: 76,
     damage: 7,
     firstDelayTicks: 90,
@@ -306,9 +374,9 @@ const TENANT_SPOREBED: BossPhaseDef = {
     // The fast lance is what stops the slow wall being a free phase: threading the
     // ring while an aimed shot is inbound is the actual ask.
     kind: 'aimed',
-    intervalTicks: 105,
+    intervalTicks: 78,
     bulletSpeed: 150,
-    damage: 9,
+    damage: 10,
     firstDelayTicks: 66,
     windupTicks: 26,
   },
@@ -316,25 +384,25 @@ const TENANT_SPOREBED: BossPhaseDef = {
 }
 
 const TENANT_COLLAPSE: BossPhaseDef = {
-  fromHealthFraction: 0.25,
+  fromHealthFraction: 0.33,
   movement: 'hover',
   movementParams: { speed: 54, holdYFraction: TENANT_HOLD_Y_FRACTION },
   weapon: {
     kind: 'spread',
     count: 7,
     spreadDegrees: 70,
-    intervalTicks: 162,
+    intervalTicks: 120,
     bulletSpeed: 118,
-    damage: 7,
+    damage: 8,
     firstDelayTicks: 72,
     windupTicks: 44,
   },
   secondary: {
     kind: 'ring',
     count: 12,
-    intervalTicks: 284,
+    intervalTicks: 210,
     bulletSpeed: 104,
-    damage: 7,
+    damage: 8,
     firstDelayTicks: 138,
     windupTicks: 46,
   },
@@ -353,23 +421,22 @@ const BAILIFF_OPENING: BossPhaseDef = {
   movementParams: { speed: 58, holdYFraction: BAILIFF_HOLD_Y_FRACTION },
   weapon: {
     kind: 'ring',
-    // Twenty points, 18 degrees apart, on a four-second cycle with a 1.17-second
-    // tell. The cycle was three seconds when the whole fight was ten (see the
-    // cadence note in this file's header). The Kill Grid is "precise laser geometry, telegraphed and unforgiving":
+    // Twenty points, 18 degrees apart, on a three-second cycle with a 1.17-second
+    // tell. The Kill Grid is "precise laser geometry, telegraphed and unforgiving":
     // the pattern is completely knowable in advance and completely unsurvivable if
     // ignored, which is a puzzle rather than a reflex test.
     count: 20,
-    intervalTicks: 243,
+    intervalTicks: 180,
     bulletSpeed: 120,
-    damage: 8,
+    damage: 9,
     firstDelayTicks: 132,
     windupTicks: 70,
   },
-  callout: 'Grid armed. Twenty-point ring every 4 s.',
+  callout: 'Grid armed. Twenty-point ring every 3 s.',
 }
 
 const BAILIFF_LATTICE: BossPhaseDef = {
-  fromHealthFraction: 0.55,
+  fromHealthFraction: 0.66,
   movement: 'hover',
   movementParams: { speed: 58, holdYFraction: BAILIFF_HOLD_Y_FRACTION },
   weapon: {
@@ -379,18 +446,18 @@ const BAILIFF_LATTICE: BossPhaseDef = {
     // even-count mistake `enemies.ts` measured on the turret and reverted.
     count: 9,
     spreadDegrees: 80,
-    intervalTicks: 194,
+    intervalTicks: 144,
     bulletSpeed: 132,
-    damage: 7,
+    damage: 8,
     firstDelayTicks: 84,
     windupTicks: 60,
   },
   secondary: {
     kind: 'ring',
     count: 12,
-    intervalTicks: 405,
+    intervalTicks: 300,
     bulletSpeed: 96,
-    damage: 7,
+    damage: 8,
     firstDelayTicks: 168,
     windupTicks: 66,
   },
@@ -400,19 +467,19 @@ const BAILIFF_LATTICE: BossPhaseDef = {
 /**
  * The variant middle: continuous pressure instead of periodic geometry.
  *
- * The base lattice phase is a positional puzzle solved once every 3.2 seconds. The
- * interdiction sweep is a 1.75-second tracker cadence that never lets the pilot settle,
+ * The base lattice phase is a positional puzzle solved once every 2.4 seconds. The
+ * interdiction sweep is a 1.3-second tracker cadence that never lets the pilot settle,
  * with a slow five-shot fan behind it. Same slot, opposite tempo.
  */
 const BAILIFF_INTERDICT: BossPhaseDef = {
-  fromHealthFraction: 0.55,
+  fromHealthFraction: 0.66,
   movement: 'hover',
   movementParams: { speed: 58, holdYFraction: BAILIFF_HOLD_Y_FRACTION },
   weapon: {
     kind: 'tracker',
-    intervalTicks: 105,
+    intervalTicks: 78,
     bulletSpeed: 108,
-    damage: 7,
+    damage: 8,
     firstDelayTicks: 72,
     windupTicks: 32,
   },
@@ -420,9 +487,9 @@ const BAILIFF_INTERDICT: BossPhaseDef = {
     kind: 'spread',
     count: 5,
     spreadDegrees: 30,
-    intervalTicks: 211,
+    intervalTicks: 156,
     bulletSpeed: 140,
-    damage: 8,
+    damage: 9,
     firstDelayTicks: 108,
     windupTicks: 48,
   },
@@ -430,7 +497,7 @@ const BAILIFF_INTERDICT: BossPhaseDef = {
 }
 
 const BAILIFF_DESTABILISED: BossPhaseDef = {
-  fromHealthFraction: 0.22,
+  fromHealthFraction: 0.33,
   // The node comes loose from the grid: a narrow weave, so the rings no longer
   // originate from a fixed point the player has been memorising.
   movement: 'sine',
@@ -441,17 +508,17 @@ const BAILIFF_DESTABILISED: BossPhaseDef = {
     // is threadable at distance and lethal point-blank. That is the correct shape for
     // a final phase: it enforces range on a player who wants the kill.
     count: 24,
-    intervalTicks: 203,
+    intervalTicks: 150,
     bulletSpeed: 130,
-    damage: 8,
+    damage: 9,
     firstDelayTicks: 78,
     windupTicks: 64,
   },
   secondary: {
     kind: 'tracker',
-    intervalTicks: 130,
+    intervalTicks: 96,
     bulletSpeed: 115,
-    damage: 9,
+    damage: 10,
     firstDelayTicks: 120,
     windupTicks: 34,
   },
@@ -473,18 +540,18 @@ const MANIFEST_OPENING: BossPhaseDef = {
     kind: 'spread',
     count: 7,
     spreadDegrees: 60,
-    intervalTicks: 162,
+    intervalTicks: 120,
     bulletSpeed: 130,
-    damage: 8,
+    damage: 9,
     firstDelayTicks: 126,
     windupTicks: 46,
   },
   secondary: {
     kind: 'ring',
     count: 12,
-    intervalTicks: 348,
+    intervalTicks: 258,
     bulletSpeed: 100,
-    damage: 7,
+    damage: 8,
     firstDelayTicks: 174,
     windupTicks: 50,
   },
@@ -492,23 +559,23 @@ const MANIFEST_OPENING: BossPhaseDef = {
 }
 
 const MANIFEST_BREACH: BossPhaseDef = {
-  fromHealthFraction: 0.72,
+  fromHealthFraction: 0.75,
   movement: 'sine',
   movementParams: { speed: 0, amplitude: 120, frequency: 0.28 },
   weapon: {
     kind: 'ring',
     count: 18,
-    intervalTicks: 186,
+    intervalTicks: 138,
     bulletSpeed: 112,
-    damage: 8,
+    damage: 9,
     firstDelayTicks: 78,
     windupTicks: 44,
   },
   secondary: {
     kind: 'aimed',
-    intervalTicks: 113,
+    intervalTicks: 84,
     bulletSpeed: 155,
-    damage: 10,
+    damage: 11,
     firstDelayTicks: 108,
     windupTicks: 26,
   },
@@ -519,32 +586,32 @@ const MANIFEST_BREACH: BossPhaseDef = {
  * The certified variant middle. `src/content/certifications.ts` unlocks this by id
  * from the Extraction Certificate and describes it to the player as "the Warden seals
  * the lane in sections", so the phase has to actually do that: an eleven-shot fan
- * across 96 degrees is a wall with gaps, thrown slowly enough (3.8 s, with a 1.03 s
+ * across 96 degrees is a wall with gaps, thrown slowly enough (2.8 s, with a 1.03 s
  * tell) that finding the gap is the whole activity.
  *
  * If this phase is ever retuned into something that is not lane-sealing, the
  * certification's copy becomes wrong — which is a UI defect, not a balance one.
  */
 const MANIFEST_WARDEN_SEAL: BossPhaseDef = {
-  fromHealthFraction: 0.72,
+  fromHealthFraction: 0.75,
   movement: 'hover',
   movementParams: { speed: 52, holdYFraction: MANIFEST_HOLD_Y_FRACTION },
   weapon: {
     kind: 'spread',
     count: 11,
     spreadDegrees: 96,
-    intervalTicks: 227,
+    intervalTicks: 168,
     bulletSpeed: 120,
-    damage: 7,
+    damage: 8,
     firstDelayTicks: 96,
     windupTicks: 62,
   },
   secondary: {
     kind: 'ring',
     count: 8,
-    intervalTicks: 356,
+    intervalTicks: 264,
     bulletSpeed: 90,
-    damage: 7,
+    damage: 8,
     firstDelayTicks: 156,
     windupTicks: 54,
   },
@@ -552,14 +619,14 @@ const MANIFEST_WARDEN_SEAL: BossPhaseDef = {
 }
 
 const MANIFEST_HOSTILE_CARGO: BossPhaseDef = {
-  fromHealthFraction: 0.44,
+  fromHealthFraction: 0.5,
   movement: 'hover',
   movementParams: { speed: 52, holdYFraction: MANIFEST_HOLD_Y_FRACTION },
   weapon: {
     kind: 'tracker',
-    intervalTicks: 97,
+    intervalTicks: 72,
     bulletSpeed: 118,
-    damage: 9,
+    damage: 10,
     firstDelayTicks: 84,
     windupTicks: 32,
   },
@@ -567,9 +634,9 @@ const MANIFEST_HOSTILE_CARGO: BossPhaseDef = {
     kind: 'spread',
     count: 9,
     spreadDegrees: 72,
-    intervalTicks: 203,
+    intervalTicks: 150,
     bulletSpeed: 138,
-    damage: 8,
+    damage: 9,
     firstDelayTicks: 120,
     windupTicks: 52,
   },
@@ -584,28 +651,28 @@ const MANIFEST_HOSTILE_CARGO: BossPhaseDef = {
  * later means the fight is never fully solved, which is the whole justification for
  * seeded variants over a fixed script.
  *
- * A 1.08-second aimed cadence at 160 u/s is the fastest sustained fire any boss puts
+ * A 0.8-second aimed cadence at 160 u/s is the fastest sustained fire any boss puts
  * out. It is survivable because it is *aimed* — one shot, one direction, always
  * dodgeable by moving — and because the 20-tick tell is still a third of a second.
  */
 const MANIFEST_LIQUIDATION: BossPhaseDef = {
-  fromHealthFraction: 0.44,
+  fromHealthFraction: 0.5,
   movement: 'hover',
   movementParams: { speed: 52, holdYFraction: MANIFEST_HOLD_Y_FRACTION },
   weapon: {
     kind: 'aimed',
-    intervalTicks: 65,
+    intervalTicks: 48,
     bulletSpeed: 160,
-    damage: 7,
+    damage: 8,
     firstDelayTicks: 66,
     windupTicks: 20,
   },
   secondary: {
     kind: 'ring',
     count: 16,
-    intervalTicks: 259,
+    intervalTicks: 192,
     bulletSpeed: 104,
-    damage: 8,
+    damage: 9,
     firstDelayTicks: 132,
     windupTicks: 48,
   },
@@ -631,7 +698,7 @@ const MANIFEST_LIQUIDATION: BossPhaseDef = {
  * crossing at that speed is not a dodge, it is a coin flip.
  */
 const MANIFEST_CLOSING: BossPhaseDef = {
-  fromHealthFraction: 0.18,
+  fromHealthFraction: 0.25,
   movement: 'swoop',
   movementParams: {
     speed: 96,
@@ -645,17 +712,17 @@ const MANIFEST_CLOSING: BossPhaseDef = {
     // moving through the playfield, so the ring plus the boss's own body is already
     // most of the difficulty.
     count: 16,
-    intervalTicks: 170,
+    intervalTicks: 126,
     bulletSpeed: 128,
-    damage: 9,
+    damage: 10,
     firstDelayTicks: 72,
     windupTicks: 42,
   },
   secondary: {
     kind: 'tracker',
-    intervalTicks: 97,
+    intervalTicks: 72,
     bulletSpeed: 120,
-    damage: 9,
+    damage: 10,
     firstDelayTicks: 108,
     windupTicks: 30,
   },
@@ -666,11 +733,10 @@ export const BOSSES: Record<string, BossDef> = {
   /**
    * SECTOR 1 — Debris Shelf. "Sparse, slow projectiles. Teaches pattern reading."
    *
-   * 2150 HP is 21.5 seconds at the measured 100 dps a pilot leaves sector 1 with, the
-   * shortest fight in the game, and it is short because it is the first boss the
-   * player has ever seen. Was 1700 against an assumed 80 dps, which measured 17.2 s
-   * and 16.1 s across two 300-run sweeps — under the 20 s floor, so the closing phase
-   * was not getting its six seconds in practice. Every weapon
+   * 2000 HP is 20.0 seconds at the measured 100 dps a pilot leaves sector 1 with —
+   * the band's exact floor, and the shortest fight in the game, because it is the
+   * first boss the player has ever seen. Was 1700 against an assumed 80, which
+   * measured 17.2 s and 16.9 s over two 300-run sweeps. Every weapon
    * on it is a *position* problem rather than an aim problem: a slow ring, then a
    * ring from a moving source, then a fan. Nothing here is faster than 130 u/s, so
    * the 210 u/s hull out-runs all of it and every death is legible as a mistake —
@@ -685,7 +751,7 @@ export const BOSSES: Record<string, BossDef> = {
   repossessor: {
     id: 'repossessor',
     name: 'The Repossessor',
-    hp: 2150,
+    hp: 1700,
     radius: 44,
     contactDamage: 30,
     scrap: 120,
@@ -701,27 +767,46 @@ export const BOSSES: Record<string, BossDef> = {
           // pattern in the game: 36 degrees between shots is a gap the player can
           // walk through rather than thread.
           count: 10,
-          // 180 rather than 168 (3.0 s rather than 2.8). See the fire-rate note on
-          // this boss's third phase: the whole fight is 22% longer than it was
-          // measured at, so every cycle here is stretched to match.
-          intervalTicks: 180,
+          intervalTicks: 168,
+          // 7, down from 8. PER-SHOT DAMAGE IS THE ONLY LEVER THAT MOVES A BOSS
+          // FIGHT, and finding that out cost several sweeps, so it is written down
+          // here rather than rediscovered.
+          //
+          // `applyHullDamage` grants 45 ticks of invulnerability after any hit, so a
+          // pilot inside a dense pattern is capped at 1.33 hits per second however
+          // many bullets there are, and every boss pattern in this file is above that
+          // density. Measured: cutting this boss's bullet rate by 42% and thinning
+          // its rings moved its kill rate by ONE point. Under saturation the intake
+          // is `hits/second x damage x fight length`, and only two of those three are
+          // authorable here.
+          //
+          // WHY THIS BOSS AT ALL, when its fight length did not change: the equal-act
+          // split moved its closing phase from 30% to 33% of the fight, so the most
+          // lethal 5.1 seconds of the run's first boss became 5.6 — and the Debris
+          // Shelf was already taking 22.6% and 23.2% of every death in the run,
+          // second only to The Tally. This is the teaching sector. It should be the
+          // lightest stop on the curve, not the second heaviest, and one point off
+          // each shot is what the longer closing act costs.
+          //
+          // Counts and cadences are untouched, because they are what the phase reads
+          // as and because the measurement says they do not change what it takes.
           bulletSpeed: 88,
-          damage: 8,
+          damage: 7,
           firstDelayTicks: 120,
           windupTicks: 42,
         },
         callout: 'Repossessor holding. Slow rings, wide gaps.',
       },
       {
-        fromHealthFraction: 0.62,
+        fromHealthFraction: 0.66,
         movement: 'sine',
         movementParams: { speed: 0, amplitude: 96, frequency: 0.16 },
         weapon: {
           kind: 'ring',
           count: 12,
-          intervalTicks: 162,
+          intervalTicks: 150,
           bulletSpeed: 92,
-          damage: 8,
+          damage: 7,
           firstDelayTicks: 72,
           windupTicks: 40,
         },
@@ -730,7 +815,7 @@ export const BOSSES: Record<string, BossDef> = {
           // had eight seconds of pure pattern reading. Lesson order matters as much
           // here as it does across the sector's regular enemies.
           kind: 'aimed',
-          intervalTicks: 108,
+          intervalTicks: 96,
           bulletSpeed: 130,
           damage: 8,
           firstDelayTicks: 108,
@@ -739,41 +824,23 @@ export const BOSSES: Record<string, BossDef> = {
         callout: 'Plating shed. It moves, and it aims now.',
       },
       {
-        // 0.30 rather than 0.28, and it still binds after the HP correction: at
-        // 2150 HP against 100 dps the last 30% is 6.45 seconds and the last 28%
-        // would be 6.02 — the six-second floor a phase needs to be read is inside
-        // the rounding. The shortest fight in the game has the least room, so its
-        // thresholds are the ones the floor actually decides.
-        fromHealthFraction: 0.3,
+        // 0.33 rather than 0.30, and every boss in the file now splits into near-equal
+        // thirds for the same reason: the SHORTEST span is what decides how long the
+        // whole fight has to be. A fight can be no shorter than
+        // `MIN_PHASE_SECONDS / shortest span`, so an uneven split forces a longer fight
+        // than the design asked for, and boss seconds are the most expensive seconds in
+        // the run — see BOSS_TTK_BAND. Equal thirds at 1700 HP give 5.8 / 5.6 / 5.6 s.
+        // Nothing a player can perceive was traded for it; the acts were 6.5 / 5.4 /
+        // 5.1 before, and the previous file certified them as "at least six" only
+        // because it was dividing by an output the pilot never had.
+        fromHealthFraction: 0.33,
         movement: 'hover',
         movementParams: { speed: 60, holdYFraction: 0.17 },
         weapon: {
           kind: 'spread',
           count: 5,
           spreadDegrees: 52,
-          /**
-           * FIRE RATE AND DAMAGE BOTH CUT HERE, and this is where the reason is
-           * written down for the whole boss.
-           *
-           * Correcting the HP made this fight 17.2 s -> 20.3 s, an 18% increase.
-           * Measured over 300 aggressor runs on each of two seeds, deaths to this
-           * boss went 14 -> 45 and 24 -> 52, and 36 of each 45/52 happened in THIS
-           * phase. An 18% longer fight tripled its body count.
-           *
-           * That is not a phase-3 problem, it is what the numbers were saying all
-           * along: the fight's damage per second had been tuned — implicitly, by
-           * nobody, because nobody had measured it — so that a 17-second fight
-           * consumed almost exactly the health a median pilot had left. Any
-           * lengthening at all converts survivors into deaths at that margin.
-           *
-           * So the boss keeps its patterns and loses roughly the output the extra
-           * duration added: 1.8 s -> 2.2 s between fans at 8 rather than 9 damage,
-           * and the ring behind it slowed 4.0 s -> 5.0 s. Total damage per FIGHT is
-           * held near where it was; damage per second is not. Cutting the count or
-           * the spread instead would have changed what the phase asks the player to
-           * do, and the phase reads correctly — it is only priced wrong.
-           */
-          intervalTicks: 132,
+          intervalTicks: 108,
           bulletSpeed: 125,
           damage: 8,
           firstDelayTicks: 66,
@@ -782,9 +849,9 @@ export const BOSSES: Record<string, BossDef> = {
         secondary: {
           kind: 'ring',
           count: 14,
-          intervalTicks: 300,
+          intervalTicks: 240,
           bulletSpeed: 100,
-          damage: 7,
+          damage: 6,
           firstDelayTicks: 132,
           windupTicks: 46,
         },
@@ -797,9 +864,9 @@ export const BOSSES: Record<string, BossDef> = {
    * SECTOR 2 — The Tally. "Corporate convoy lanes. Turrets and escorts, high scrap
    * yield. Greed vs safety."
    *
-   * 4460 HP is 25.5 seconds at the measured 175 dps a pilot leaves sector 2 with. Was
-   * 2600 against an assumed 100 dps and measured 15.6 s / 14.4 s — the sector-2 boss
-   * was a shorter fight than the sector-1 boss, which inverts the whole ladder. The
+   * 3605 HP is 20.6 seconds at the measured 175 dps a pilot leaves sector 2 with.
+   * Was 2600 against an assumed 100 and measured 15.6 s and 14.4 s — the sector-2
+   * boss was a SHORTER fight than the sector-1 boss, which inverts the whole ladder. The
    * fight is built out of the sector's own two enemy types read at boss scale: the
    * turret's aimed fan in the opening, the escort's tracker in the middle.
    *
@@ -813,7 +880,7 @@ export const BOSSES: Record<string, BossDef> = {
   auditor: {
     id: 'auditor',
     name: 'The Auditor',
-    hp: 4460,
+    hp: 3060,
     radius: 40,
     contactDamage: 28,
     scrap: 340,
@@ -827,20 +894,17 @@ export const BOSSES: Record<string, BossDef> = {
           kind: 'spread',
           count: 5,
           spreadDegrees: 44,
-          /**
-           * The same correction the Repossessor's third phase carries, applied
-           * harder because this fight grew more: 15.6 s -> 21.5 s, a 38% increase.
-           *
-           * Measured over the same two 300-run sweeps, deaths to the Auditor went
-           * 25 -> 43 and 18 -> 49, and the phase they concentrated in MOVED: it was
-           * spread evenly (7/7/11) before and is now front-loaded on this opening
-           * phase (24/3/16 and 23/8/18). The opening is 42% of the fight, so it is
-           * the phase that absorbed most of the extra 6 seconds, and a five-shot
-           * aimed fan every 1.9 s is the densest thing a pilot with two items has
-           * met. 2.4 s at 7 damage is the same pattern at the price it was worth.
-           */
-          intervalTicks: 144,
+          intervalTicks: 114,
           bulletSpeed: 128,
+          // The same per-shot correction the Repossessor's opening phase documents,
+          // and here the fight really did lengthen: 15.6 s and 14.4 s measured before
+          // the HP correction, 17.8 s and 17.1 s after — a factor of about 1.16, and
+          // one point off each shot is roughly that.
+          //
+          // It is also the boss that most needs it. The Auditor is the single largest
+          // named cause of death in the run: its phases account for 32% and 33% of
+          // every death in The Tally, which itself holds the largest death share of
+          // any sector.
           damage: 7,
           firstDelayTicks: 108,
           windupTicks: 42,
@@ -848,14 +912,14 @@ export const BOSSES: Record<string, BossDef> = {
         callout: 'Audit opened. Five-shot fans, aimed at you.',
       },
       {
-        fromHealthFraction: 0.58,
+        fromHealthFraction: 0.66,
         movement: 'sine',
         movementParams: { speed: 0, amplitude: 110, frequency: 0.22 },
         weapon: {
           kind: 'tracker',
-          intervalTicks: 108,
+          intervalTicks: 90,
           bulletSpeed: 110,
-          damage: 9,
+          damage: 8,
           firstDelayTicks: 78,
           windupTicks: 34,
         },
@@ -863,7 +927,7 @@ export const BOSSES: Record<string, BossDef> = {
           kind: 'spread',
           count: 3,
           spreadDegrees: 26,
-          intervalTicks: 144,
+          intervalTicks: 132,
           bulletSpeed: 134,
           damage: 7,
           firstDelayTicks: 120,
@@ -872,13 +936,19 @@ export const BOSSES: Record<string, BossDef> = {
         callout: 'Escort pattern. Trackers on your position.',
       },
       {
-        fromHealthFraction: 0.24,
+        fromHealthFraction: 0.33,
         movement: 'hover',
         movementParams: { speed: 66, holdYFraction: 0.18 },
         weapon: {
           kind: 'ring',
-          count: 16,
-          intervalTicks: 150,
+          // 13 points rather than 16. This phase alone was 24% and 26% of every
+          // death in The Tally, which holds the largest death share in the run, and
+          // it is the one place where thinning a ring is the right lever rather than
+          // the weak one: a 16-point ring from a hovering source at 108 u/s is dense
+          // enough to saturate the 45-tick invulnerability window from any angle, and
+          // 13 leaves the gaps that make it a positioning problem again.
+          count: 13,
+          intervalTicks: 132,
           bulletSpeed: 108,
           damage: 7,
           firstDelayTicks: 72,
@@ -888,7 +958,7 @@ export const BOSSES: Record<string, BossDef> = {
           kind: 'aimed',
           intervalTicks: 84,
           bulletSpeed: 140,
-          damage: 8,
+          damage: 7,
           firstDelayTicks: 96,
           windupTicks: 28,
         },
@@ -901,12 +971,11 @@ export const BOSSES: Record<string, BossDef> = {
    * SECTOR 3 — Bloomfield. "Something organic has taken a dead station. Corrosive,
    * spreading, irregular patterns that punish standing still."
    *
-   * 8800 HP is 27.5 seconds at the measured 320 dps. Was 3400 against an assumed 120,
-   * and 320 is where the assumed ladder first goes badly wrong: sector 3 is the second
-   * of four item choices compounding on each other, and the measured output is 2.7x
-   * what was planned. The old fight measured 10.3 s / 11.2 s — three phases, each
-   * authored to be readable, in the time one of them was supposed to take.
-   * Radius 50 makes it the second largest thing
+   * 7200 HP is 22.5 seconds at the measured 320 dps. Was 3400 against an assumed
+   * 120: sector 3 is where the assumed ladder first goes badly wrong, because it is
+   * the second of four item choices compounding on each other. The old fight measured
+   * 10.3 s and 11.2 s — three phases, each authored to be readable, in the time one
+   * of them was meant to take. Radius 50 makes it the second largest thing
    * in the game and the `mine` silhouette is the only round one available, which is
    * as close to organic as `EnemyShape` currently reaches.
    *
@@ -917,7 +986,7 @@ export const BOSSES: Record<string, BossDef> = {
   tenant: {
     id: 'tenant',
     name: 'Unlisted Tenant',
-    hp: 8800,
+    hp: 5760,
     radius: 50,
     contactDamage: 32,
     scrap: 320,
@@ -936,11 +1005,10 @@ export const BOSSES: Record<string, BossDef> = {
    * SECTOR 4 — Kill Grid. "Automated defence net. Precise laser geometry, telegraphed
    * and unforgiving. Positional, almost puzzle-like."
    *
-   * 12200 HP is 30.5 seconds at the measured 400 dps. Was 4200 against an assumed 140
-   * and measured 10.2 s / 10.8 s. This is the fight the correction costs the most:
-   * a boss whose entire character is "every telegraph is over a second long" needs the
-   * fight to outlast several telegraph cycles, and at ten seconds it did not.
-   * Every telegraph on this boss is at least a
+   * 9600 HP is 24.0 seconds at the measured 400 dps. Was 4200 against an assumed 140
+   * and measured 10.1 s and 10.8 s. This is the fight the correction is worth the
+   * most to: a boss whose entire character is "every telegraph is over a second long"
+   * needs to outlast several telegraph cycles, and at ten seconds it did not. Every telegraph on this boss is at least a
    * full second — 70, 60 and 64 ticks on the primaries — which is double anything the
    * other four throw, and the patterns are correspondingly unforgiving: twenty and
    * twenty-four point rings, and a nine-lane fan. The fight is entirely knowable in
@@ -953,7 +1021,7 @@ export const BOSSES: Record<string, BossDef> = {
   bailiff: {
     id: 'bailiff',
     name: 'The Bailiff',
-    hp: 12200,
+    hp: 7400,
     radius: 42,
     contactDamage: 34,
     scrap: 380,
@@ -971,23 +1039,15 @@ export const BOSSES: Record<string, BossDef> = {
   /**
    * SECTOR 5 — The Deep Manifest. "The wreck you were actually sent for."
    *
-   * 19150 HP is 34.5 seconds at the measured 555 dps. It is the longest single
+   * 14430 HP is 26.0 seconds at the measured 555 dps. It is the longest single
    * engagement in the game and it is deliberate — it is the run's destination.
    *
-   * ## The previous comment here said exactly this, and was wrong by a factor of 3.5
+   * The previous comment here said all of that about 5800 HP at 160 dps, called it
+   * "the longest single engagement in the game by a wide margin", and then added that
+   * it was "the number most likely to be wrong, and the one a sweep should look at
+   * first". The sweep looked: 10.4 s and 10.6 s, the equal shortest fight in the run.
    *
-   * It read "5800 HP is 36.3 seconds at 160 dps, and closer to 45 at a realistic 80%
-   * uptime", called that "the longest single engagement in the game by a wide margin",
-   * and then added that it was "the number most likely to be wrong, and the one a
-   * sweep should look at first". The sweep looked: **10.4 s and 10.6 s**, the equal
-   * shortest fight in the run. A pilot arriving here has taken eight to ten items and
-   * emptied four shops, and 160 dps described none of them.
-   *
-   * The lesson is not that 160 was a bad guess. It is that a planning figure quoted at
-   * sector *entry* cannot price a fight at sector *exit*, and the further into a
-   * multiplicative item curve the fight sits, the worse the error gets.
-   *
-   * Four phases rather than three, at 9.7 s, 9.7 s, 9.0 s and 6.2 s. Two variants,
+   * Four phases rather than three, at 6.5 s each. Two variants,
    * replacing *different* slots: once a player has met the Warden they know the
    * second act can change, so the Liquidator moves the surprise to the third and the
    * fight never settles into a solved script.
@@ -1000,7 +1060,7 @@ export const BOSSES: Record<string, BossDef> = {
   'deep-manifest': {
     id: 'deep-manifest',
     name: 'The Deep Manifest',
-    hp: 19150,
+    hp: 12210,
     radius: 54,
     contactDamage: 36,
     scrap: 600,

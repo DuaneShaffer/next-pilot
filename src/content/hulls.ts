@@ -153,16 +153,32 @@ export const HULLS: Record<string, HullDef> = {
    * everything and the extra 42 buys *reaction margin*, which is the currency Thrust
    * Trim sells one third of.
    *
-   * -30 integrity and -15 shield is 140 effective health down to 95, a 32% cut, and
-   * that number is deliberately the same cut `cursed-hull` takes. It is the figure
-   * the sector-1 fairness budget was reasoned against: four survivable contact
-   * mistakes at the 35-damage ceiling becomes two. A fast hull that also survived
-   * would not be a trade.
+   * -20 integrity and -10 shield is 140 effective health down to 110, a 21% cut.
    *
-   * 150 starting scrap is ~19% of a full sector-1 yield (~800). Enough to reach the
-   * first supply run with a real choice already available, which is what "funded"
-   * has to mean if it is going to shape play rather than read as a rounding
-   * adjustment.
+   * ## It was -32% (95 effective health), and that made it the worst hull by far
+   *
+   * Over 300 aggressor runs on each of two base seeds, Arrears cleared at 18.7% and
+   * 22.0% against hull means of 43.9% and 47.7% — **-25.3 pp and -25.7 pp**, against
+   * a 15 pp M5 budget. It was also weakest in sector one *alone*, so this was never a
+   * late-scaling problem.
+   *
+   * The comparison that sized the fix: Collateral takes a 29% cut to effective health
+   * and lands within 2 pp of the mean, because it is paid in +50% output. Surety
+   * takes a 50% increase and landed +14 pp. Arrears was taking Collateral's price and
+   * being paid in speed and scrap, and the measurement says those are worth a
+   * fraction of what damage is worth — at 210 u/s the hull already out-runs the
+   * fastest sector-1 projectile (130 u/s) by 1.62x, so +42 buys reaction margin the
+   * pilot largely already had.
+   *
+   * So the cut comes down to 21% and the funding goes up. Arrears is still the second
+   * most fragile hull in the roster, which is its identity; it is no longer paying
+   * Collateral's price for a third of Collateral's return.
+   *
+   * 320 starting scrap is ~40% of a full sector-1 yield (~800), and against a
+   * measured median cheapest shop option of 190 it is the difference between
+   * "something is affordable" and "the thing you want is". That is the half of the
+   * fantasy that can be paid out in a number, so it is where the compensation goes
+   * rather than into more speed, which measurably buys little.
    *
    * ## THE PART THAT IS MISSING, AND IT IS THE DESIGNED DRAWBACK
    *
@@ -183,14 +199,14 @@ export const HULLS: Record<string, HullDef> = {
     id: 'arrears',
     name: 'Arrears',
     mechanism:
-      '+42 hull speed, 210 to 252, and 150 scrap in hand at launch. Max integrity 100 to 70 and max shield 40 to 25, so effective health falls 140 to 95.',
+      '+42 hull speed, 210 to 252, and 320 scrap in hand at launch. Max integrity 100 to 80 and max shield 40 to 30, so effective health falls 140 to 110.',
     flavour: 'The advance against your recovery has already been drawn. By someone else.',
     stats: [
       { stat: 'hullSpeed', kind: 'add', value: 42 },
-      { stat: 'maxIntegrity', kind: 'add', value: -30 },
-      { stat: 'maxShield', kind: 'add', value: -15 },
+      { stat: 'maxIntegrity', kind: 'add', value: -20 },
+      { stat: 'maxShield', kind: 'add', value: -10 },
     ],
-    startingScrap: 150,
+    startingScrap: 320,
   },
 
   /**
@@ -209,8 +225,21 @@ export const HULLS: Record<string, HullDef> = {
    * meaningfully less of it, so the economy tightens without a `scrapMultiplier`
    * penalty that would read as arbitrary punishment.
    *
-   * +1 projectile damage (4 to 5, so 100 dps) is the upside, and the comment below
-   * is the reason it is a flat number instead of the mechanic the design asked for.
+   * ## THE +1 PROJECTILE DAMAGE IS GONE, on this file's own instructions
+   *
+   * The tuning note at the bottom of this comment said: "if a sweep says Surety
+   * over-clears, the number to turn is the damage, not the shield". The sweep said so
+   * — 58.0% and 63.3% against hull means of 43.9% and 47.7%, **+14.1 pp and
+   * +15.7 pp**, the second largest departure in the roster and outside the 15 pp
+   * budget on one of the two seeds.
+   *
+   * So the flat +1 is removed and Surety fires the base 4 damage at 80 dps. What is
+   * left is exactly the hull the design describes: 210 effective health, all of it in
+   * the resource that absorbs first, bought with 155 u/s and half the pickup area.
+   * Nothing on the card ever claimed the +1 was the shield conversion, so nothing on
+   * the card has to be walked back.
+   *
+   * The reserve dial below is unchanged and still unused.
    *
    * ## THE MISSING HALF: shield damage does not become weapon charge
    *
@@ -243,11 +272,10 @@ export const HULLS: Record<string, HullDef> = {
     id: 'surety',
     name: 'Surety',
     mechanism:
-      '+70 max shield, 40 to 110, so effective health rises 140 to 210, and +1 projectile damage, 4 to 5. Hull speed 210 to 155 and pickup radius 34 to 24.',
+      '+70 max shield, 40 to 110, so effective health rises 140 to 210. Hull speed 210 to 155 and pickup radius 34 to 24.',
     flavour: 'The bond is posted against the hull. The hull is expected to come back.',
     stats: [
       { stat: 'maxShield', kind: 'add', value: 70 },
-      { stat: 'projectileDamage', kind: 'add', value: 1 },
       { stat: 'hullSpeed', kind: 'add', value: -55 },
       { stat: 'pickupRadius', kind: 'add', value: -10 },
     ],
@@ -256,14 +284,29 @@ export const HULLS: Record<string, HullDef> = {
   /**
    * INHERITS A DEAD PILOT'S RELIC, ON A WRITTEN-DOWN HULL.
    *
-   * -28% max integrity as a `mul` rather than an `add`, deliberately. The fold order
+   * ## The write-down is -36%, up from -28%, and the relic is what it pays for
+   *
+   * Probate was the roster's strongest hull at +29.4 pp and +28.0 pp above the hull
+   * mean over 300 aggressor runs on each of two seeds, and nothing in its stat line
+   * accounted for it: effective health 132 against Lien's 140, identical incoming
+   * damage rate. The whole gap was that it arrived at each sector near full health
+   * (100/93/100/96/100% against Lien's 100/58/63/67/83%) because Repair Nanites is
+   * the roster's only integrity recovery and it compounds over fifteen minutes.
+   *
+   * That was confirmed rather than inferred: handing the baseline Lien the same
+   * starting item and changing nothing else took it from 15.3% / 17.3% to 58.0% /
+   * 59.0%. The relic was cut 73% on the strength of that measurement (see
+   * `items.ts`), and this hull additionally pays more for holding it. Effective
+   * health lands at 124 against Lien's 140 rather than 132.
+   *
+   * -36% max integrity as a `mul` rather than an `add`, deliberately. The fold order
    * sums adds before applying muls, so a Plating Shim on a Probate is
-   * (100 + 18) x 0.72 = 85 rather than 90: the write-down stays proportional to
+   * (100 + 18) x 0.64 = 76 rather than 82: the write-down stays proportional to
    * whatever the build becomes instead of being outgrown by the third integrity item.
    * `cursed-hull` uses `mul` for the same reason and the two compose predictably.
    *
-   * +20 max shield is the estate's other half. Effective health lands at 132 against
-   * Lien's 140 — almost level — but the *composition* is different in a way that
+   * +20 max shield is the estate's other half. Effective health lands at 124 against
+   * Lien's 140 — close but under — and the *composition* is different in a way that
    * shapes play: the shrunken half is integrity, which is the half that ends runs and
    * the half Repair Nanites refills. A Probate holding the relic tops out sooner, so
    * the trickle is worth less late in a fight and worth more between waves. That is
@@ -290,10 +333,10 @@ export const HULLS: Record<string, HullDef> = {
     id: 'probate',
     name: 'Probate',
     mechanism:
-      '-28% max integrity, 100 to 72, and +20 max shield, 40 to 60. Starts holding the Repair Nanites relic.',
+      '-36% max integrity, 100 to 64, and +20 max shield, 40 to 60. Starts holding the Repair Nanites relic.',
     flavour: "The estate was settled. The hull was the only asset anybody wanted.",
     stats: [
-      { stat: 'maxIntegrity', kind: 'mul', value: 0.72 },
+      { stat: 'maxIntegrity', kind: 'mul', value: 0.64 },
       { stat: 'maxShield', kind: 'add', value: 20 },
     ],
     startingItems: ['repair-nanites'],

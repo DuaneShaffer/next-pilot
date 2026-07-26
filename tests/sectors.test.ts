@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DODGEABLE_BULLET_SPEED, ENEMIES, getEnemy } from '../src/content/enemies'
 import { BOSSES } from '../src/content/bosses'
-import { HAZARDS, getHazard } from '../src/content/hazards'
+import { HAZARDS, HAZARDS_AWAITING_MECHANICS, getHazard } from '../src/content/hazards'
 import { STAGES } from '../src/content/runs'
 import { RUN_STAGES, SECTORS, STANDARD_RUN, getSector } from '../src/content/sectors'
 import { TICK_HZ } from '../src/core/loop'
@@ -403,6 +403,13 @@ describe('hazards', () => {
      * can see it.
      */
     for (const [key, def] of hazardEntries) {
+      // A cadence a player cannot count in whole seconds is a cadence the card cannot
+      // state honestly, so content has to choose periods that land on one. This is
+      // newly checkable: `intervalTicks` only became the full period in the
+      // `HazardField` fix, and before it a card saying "every 5 seconds" fired every 8
+      // while passing this test, because the text agreed with the field and only the
+      // field was wrong.
+      expect(def.intervalTicks % TICK_HZ, `${key} is not a whole number of seconds`).toBe(0)
       const seconds = def.intervalTicks / TICK_HZ
       expect(def.description, `${key} does not state its cadence`).toContain(`${seconds} second`)
       if (def.damage > 0) {
@@ -420,6 +427,24 @@ describe('hazards', () => {
       expect(sentences.length, `${key} states a cost but no trade-off`).toBeGreaterThanOrEqual(2)
       expect(def.description.length, `${key} is too long for a route card`).toBeLessThanOrEqual(190)
     }
+  })
+
+  it('names a real hazard in every awaiting-mechanics entry', () => {
+    // The same guard `tests/hulls.test.ts` puts on HULLS_AWAITING_MECHANICS. A list of
+    // missing mechanics is only useful if it still points at something; an entry for a
+    // hazard that has been renamed or deleted reads as a known gap nobody will find.
+    for (const entry of HAZARDS_AWAITING_MECHANICS) {
+      expect(Object.hasOwn(HAZARDS, entry.id), `unknown hazard: ${entry.id}`).toBe(true)
+      expect(entry.needs.length, entry.id).toBeGreaterThan(40)
+    }
+    // Stated as a fixed list so that implementing one of these hooks forces this test
+    // to be revisited rather than silently leaving a pessimistic card in place.
+    expect(HAZARDS_AWAITING_MECHANICS.map((entry) => entry.id).sort()).toEqual([
+      'convoy-wake',
+      'grid-sweep',
+      'hold-rot',
+      'spore-bloom',
+    ])
   })
 
   it('resolves by id and throws on an unknown one', () => {

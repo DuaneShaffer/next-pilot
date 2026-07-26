@@ -1031,15 +1031,59 @@ export const ITEMS: Record<string, ItemDef> = {
    * Relic rather than rare because it is the roster's only integrity recovery, and
    * both of its declared interactions turn it into the engine of a whole build.
    */
+  /**
+   * THE STRONGEST ITEM IN THE GAME BY A FACTOR OF SEVERAL, and it was not close.
+   *
+   * This is the roster's only integrity recovery, and integrity does not come back
+   * any other way — not between waves, not between sectors, not on the direct route.
+   * A five-sector run is therefore a single 140-point attrition budget, and one item
+   * turns that budget into an income.
+   *
+   * ## The measurement, because "it felt strong" is not a reason here
+   *
+   * Ablation, `tools/playtest.ts`, aggressor policy, 300 runs on each of two base
+   * seeds: the baseline Lien was given this item at launch and nothing else changed.
+   *
+   *   full-run clear rate      15.3% / 17.3%  ->  58.0% / 59.0%   (+42.7 / +41.7 pp)
+   *   entry health, sector 3          62% / 61%  ->  89% / 89%
+   *   entry health, sector 5          71% / 76%  ->  94% / 97%
+   *   share of all deaths in sector 2  41.7% / 35.5%  ->  26.2% / 24.4%
+   *
+   * An item that triples the clear rate is not an item, it is the game's difficulty
+   * setting wearing a card. It also explained a separate failure that no design
+   * document had predicted: Probate starts holding this relic and was clearing 29 pp
+   * above the hull mean, which nothing in Probate's own stat line accounts for — its
+   * effective health is 132 against Lien's 140 and its incoming damage rate is
+   * identical. The entire gap was arriving at each sector near full health.
+   *
+   * ## 10% x 2 rather than 25% x 3, in two measured steps
+   *
+   * 0.20 integrity per kill against 0.75, a 73% cut. The first step was 15% x 2 and it
+   * was not enough: Probate, the hull that starts holding this relic, went from +29 pp
+   * above the hull mean to +18.6 pp, against a 15 pp exit criterion it still missed.
+   * That is the honest scale of the problem — a 60% cut to the strongest item in the
+   * game left it the strongest item in the game by a wide margin, because it is the
+   * only one that plays against a resource nothing else restores.
+   *
+   * For the record of the first step: 0.30 integrity per kill against 0.75, a 60% cut. At roughly 60 kills a sector
+   * that is 18 integrity back per sector rather than 45 — worth more over a full run
+   * than any other defensive item in the roster, which a relic should be, and no
+   * longer worth more than the run's entire damage budget.
+   *
+   * TWO SMALL NUMBERS RATHER THAN ONE BIG ONE, deliberately. Halving the chance alone
+   * keeps a 3-point tick a player notices but makes it rare; halving the amount alone
+   * keeps the frequency and makes each tick worth nothing. Moving both keeps the
+   * feedback frequent enough to read as a mechanic and small enough to be an item.
+   */
   'repair-nanites': {
     id: 'repair-nanites',
     name: 'Repair Nanites',
     tier: 'relic',
     tags: ['defence'],
     mechanism:
-      'Each kill has a 25% chance to restore 3 integrity — about 0.75 integrity per kill.',
+      'Each kill has a 10% chance to restore 2 integrity — about 0.2 integrity per kill.',
     flavour: 'Rated for hull repair. Certified for nothing that is currently breathing.',
-    effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 3, chance: 0.25 }],
+    effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 2, chance: 0.1 }],
     weight: 3,
   },
 

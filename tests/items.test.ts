@@ -120,9 +120,9 @@ const PROMISED_TOTALS: Record<string, Partial<ReturnType<typeof summariseEffects
   'overkill-warheads': { overkillFraction: 0.9 },
   'magnet-coin-op': { fireRateWindowBonus: 0.35, fireRateWindowTicks: 420 },
   'coil-curse': { retaliateCount: 14, pierceCount: 1 },
-  'curse-nanites': { repairAmount: 8, repairChance: 0.45 },
+  'curse-nanites': { repairAmount: 5, repairChance: 0.35 },
   'warhead-fragments': { pierceCount: 1, splitShotCount: 2 },
-  'shield-nanites': { repairAmount: 7, repairChance: 0.35 },
+  'shield-nanites': { repairAmount: 4, repairChance: 0.28 },
 
   // M5. Interactions whose consequence is entirely `stats` have an empty entry:
   // there are no effect totals to promise, and the stat side is covered by
@@ -139,7 +139,7 @@ const PROMISED_TOTALS: Record<string, Partial<ReturnType<typeof summariseEffects
   'tithe-magnet': { fireRateWindowBonus: 0.25, fireRateWindowTicks: 600 },
   'hauler-tithe': { fireRateWindowBonus: 0.22, fireRateWindowTicks: 480 },
   'twin-lance': { pierceCount: 2 },
-  'exposed-nanites': { repairAmount: 7, repairChance: 0.4 },
+  'exposed-nanites': { repairAmount: 4, repairChance: 0.3 },
   'liquidation-overkill': { overkillFraction: 1 },
   'sealed-dispersal': {},
   'hauler-plating': {},

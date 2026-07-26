@@ -236,10 +236,14 @@ export const INTERACTIONS: readonly InteractionDef[] = [
    * DESIGN.md's "Cursed Hull + Repair Nanites", minus the ramp it cannot express
    * (see the header note).
    *
-   * Recovery: `amount` sums (3 + 5 = 8) and `chance` takes the max (0.45 beats the
-   * item's 0.25), so 0.45 x 8 = about 3.6 integrity per kill against the item's 0.75.
-   * Against a 55-integrity hull that is a fundamentally different resource: 15 kills
-   * is a full heal, and sector 1 has ~70 kills in it. The curse stops being a life
+   * Recovery: `amount` sums (2 + 3 = 5) and `chance` takes the max (0.35 beats the
+   * item's 0.10), so 0.35 x 5 = about 1.75 integrity per kill against the item's 0.2.
+   * Against a 55-integrity hull that is a fundamentally different resource: 31 kills
+   * is a full heal, and sector 1 has ~70 kills in it.
+   *
+   * SCALED WITH THE RELIC rather than independently. Repair Nanites measured +42 pp
+   * of clear rate on its own and was cut 60%; leaving this pair at 3.6 per kill would
+   * have turned the item's nerf into a buff for the build that was already strongest. The curse stops being a life
    * total and becomes a throughput problem — the hull is fine as long as things keep
    * dying, which is exactly the play pattern the +2 damage is there to support.
    *
@@ -251,9 +255,9 @@ export const INTERACTIONS: readonly InteractionDef[] = [
   {
     id: 'curse-nanites',
     requires: ['cursed-hull', 'repair-nanites'],
-    text: 'Kills restore 8 integrity instead of 3, at a 45% chance instead of 25% — about 3.6 integrity per kill against 0.75 — and projectiles gain +2 damage, 9 per shot once the curse multiplies it.',
+    text: 'Kills restore 5 integrity instead of 2, at a 35% chance instead of 10% — about 1.75 integrity per kill against 0.2 — and projectiles gain +2 damage, 9 per shot once the curse multiplies it.',
     stats: [{ stat: 'projectileDamage', kind: 'add', value: 2 }],
-    effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 5, chance: 0.45 }],
+    effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 3, chance: 0.35 }],
   },
 
   /**
@@ -288,11 +292,11 @@ export const INTERACTIONS: readonly InteractionDef[] = [
    * large shield is a buffer that only pays off if something behind it refills.
    * Repair Nanites is that something.
    *
-   * 40 + 35 + 20 = 95 shield, and recovery of 0.35 x (3 + 4) = 2.45 integrity per
+   * 40 + 35 + 20 = 95 shield, and recovery of 0.28 x (2 + 2) = 1.12 integrity per
    * kill — `amount` sums, `chance` takes the max. Effective health 195, refilling at
-   * roughly 2.5 a kill against sector 1's chip damage (Skiff 6, Escort 7, Turret 7
+   * roughly 1.1 a kill against sector 1's chip damage (Skiff 6, Escort 7, Turret 7
    * per pellet) — so a pilot who keeps
-   * killing outruns incoming fire and only dies to the big avoidable hits, the
+   * killing blunts incoming fire and mostly dies to the big avoidable hits, the
    * 22-24 damage collisions. That is the intended failure mode: this build makes
    * bullets survivable and mistakes fatal, which is the inverse of the cursed route.
    *
@@ -302,9 +306,9 @@ export const INTERACTIONS: readonly InteractionDef[] = [
   {
     id: 'shield-nanites',
     requires: ['heavy-shield', 'repair-nanites'],
-    text: 'Max shield rises to 95, and kills restore 7 integrity instead of 3 at a 35% chance instead of 25% — about 2.5 integrity recovered per kill behind a 95-point buffer.',
+    text: 'Max shield rises to 95, and kills restore 4 integrity instead of 2 at a 28% chance instead of 10% — about 1.1 integrity recovered per kill behind a 95-point buffer.',
     stats: [{ stat: 'maxShield', kind: 'add', value: 20 }],
-    effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 4, chance: 0.35 }],
+    effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 2, chance: 0.28 }],
   },
 
   // ==========================================================================
@@ -562,17 +566,17 @@ export const INTERACTIONS: readonly InteractionDef[] = [
    * paying 40 points of its health bar to a pool its own relic cannot touch — and
    * Exposed Core removes exactly that 40 in exchange for +35% damage.
    *
-   * `amount: 4` increments (3 + 4 = 7 per kill) and `chance: 0.4` is a TOTAL (max,
-   * replacing 0.25). 0.4 x 7 = 2.8 integrity per kill against the relic's 0.75, on a
-   * 100-integrity hull with no buffer: 36 kills is a full heal and sector 1 has ~70 in
+   * `amount: 2` increments (2 + 2 = 4 per kill) and `chance: 0.3` is a TOTAL (max,
+   * replacing 0.10). 0.3 x 4 = 1.2 integrity per kill against the relic's 0.2, on a
+   * 100-integrity hull with no buffer: 84 kills is a full heal and sector 1 has ~70 in
    * it. The hull is fine exactly as long as things keep dying, which is the same
    * throughput bargain `curse-nanites` makes and a much sharper version of it.
    */
   {
     id: 'exposed-nanites',
     requires: ['exposed-core', 'repair-nanites'],
-    text: 'With no shield to absorb, every hit lands on integrity — so kills now restore 7 integrity instead of 3, at a 40% chance instead of 25%, about 2.8 per kill.',
-    effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 4, chance: 0.4 }],
+    text: 'With no shield to absorb, every hit lands on integrity — so kills now restore 4 integrity instead of 2, at a 30% chance instead of 10%, about 1.2 per kill.',
+    effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 2, chance: 0.3 }],
   },
 
   /**

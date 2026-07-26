@@ -48,9 +48,9 @@ import type { BossDef, BossPhaseDef, EnemyWeaponDef, MovementKind } from '../src
  *   "gives every boss weapon a telegraph the player can react to"
  *        — zeroing the Repossessor's opening windup fails it.
  *   "kills inside the stated band at the output expected in its sector"
- *        — raising the Deep Manifest to 12000 HP fails it.
+ *        — raising the Deep Manifest to 30000 HP fails it.
  *   "gives every phase long enough to be read"
- *        — moving the Deep Manifest's last threshold from 0.18 to 0.02 fails it.
+ *        — moving the Deep Manifest's last threshold from 0.25 to 0.02 fails it.
  *   "differs from the base form in at least one phase"
  *        — pointing the Warden variant at the base phase list fails it.
  *   "keeps every parked boss above the forward-play line"
@@ -72,30 +72,26 @@ const bossEntries: [string, BossDef][] = Object.entries(BOSSES)
 const BOSS_MOVEMENTS: readonly MovementKind[] = ['hover', 'sine', 'swoop', 'drift']
 
 /**
- * Independently restated time-to-kill for each boss, in seconds at full uptime.
+ * Independently restated time-to-kill for each boss, in seconds.
  *
  * Deliberate duplication, and the duplication is the value — the same trick
  * `items.test.ts` uses for interaction totals. The content states its arithmetic in a
  * comment; this states the answer. A change to an HP number that does not also change
  * the intended fight length fails here, which forces the author to say out loud
  * whether the fight got longer on purpose.
- */
-/**
- * The fight length each boss is authored for, in seconds.
  *
- * These are now REALISED seconds, not full-uptime idealisations: `SECTOR_PLAYER_DPS`
- * was re-derived from `boss hp / measured median time-to-kill` over 300 aggressor
- * runs on each of two base seeds, so `hp / dps` is the fight the pilot actually has.
- * Each figure sits just above the point where the boss's own shortest phase clears
- * `MIN_PHASE_SECONDS`, which is what decides the floor for each boss individually:
- * the Deep Manifest's 18% closing phase needs 33.3 s of fight before it gets its six.
+ * NO LONGER "at full uptime". `SECTOR_PLAYER_DPS` was re-derived from
+ * `boss hp / measured median time-to-kill` over 300 aggressor runs on each of two base
+ * seeds, so these are realised seconds and are directly comparable with the `ttk med`
+ * column `tools/playtest.ts` prints. Each sits at the floor its own shortest phase
+ * allows under `MIN_PHASE_SECONDS`, or at the band's 20 s floor, whichever binds.
  */
 const INTENDED_TTK_SECONDS: Record<string, number> = {
-  repossessor: 21.5,
-  auditor: 25.49,
-  tenant: 27.5,
-  bailiff: 30.5,
-  'deep-manifest': 34.5,
+  repossessor: 17,
+  auditor: 17.49,
+  tenant: 18,
+  bailiff: 18.5,
+  'deep-manifest': 22,
 }
 
 function weaponsOf(phase: BossPhaseDef): EnemyWeaponDef[] {
