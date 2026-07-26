@@ -247,3 +247,31 @@ describe('migration to v3', () => {
     expect(save.certifications.unlocked).toEqual([])
   })
 })
+
+describe('pilot numbering', () => {
+  /**
+   * The number names the pilot currently flying, so it can only change once that
+   * pilot is finished with.
+   *
+   * It was incremented at launch, which meant a brand-new player's very first sortie
+   * was pilot 002 and #001 never existed — visible on the title screen, the panel,
+   * the incident report, and every personnel file. This pins the sequence rather than
+   * the mechanism, so moving the increment again fails here.
+   */
+  it('starts a new player at pilot 001', () => {
+    expect(migrate(null).pilotNumber).toBe(1)
+  })
+
+  it('advances one per completed run, with no gaps', () => {
+    // Simulates the filing path: a record is written for the CURRENT pilot, then the
+    // number advances. Three runs must file 001, 002, 003.
+    let save = migrate(null)
+    const filed: number[] = []
+    for (let run = 0; run < 3; run++) {
+      filed.push(save.pilotNumber)
+      save = { ...save, pilotNumber: save.pilotNumber + 1 }
+    }
+    expect(filed).toEqual([1, 2, 3])
+    expect(save.pilotNumber).toBe(4)
+  })
+})

@@ -70,6 +70,7 @@
  *    every stored record instantly "unverifiable".
  */
 
+import { POOL_SLICES, type PoolSlice } from '../content/certifications'
 import { SIM_VERSION } from './simVersion'
 
 /**
@@ -80,20 +81,28 @@ import { SIM_VERSION } from './simVersion'
  * fingerprint distinguishes an item id from an identically-named enemy id, and so a
  * future category is an additive change rather than a silent collision.
  */
-export const POOL_CATEGORIES = [
-  'hull',
-  'weapon',
-  'item',
-  'interaction',
-  'enemy',
-  'work-order',
-  'sector',
-] as const
+/**
+ * Pool categories, taken from the canonical pool definition rather than restated.
+ *
+ * This module first defined its own vocabulary — hull/weapon/item/interaction/
+ * enemy/work-order/sector — while `content/certifications.ts` independently defined
+ * items/enemies/workOrders/hulls/bossVariants/hazards for the same concept. Two
+ * agents filled a gap in the contract at the same time, and the result was two
+ * incompatible descriptions of one thing, which only surfaced when the app layer
+ * tried to hand one to the other.
+ *
+ * One vocabulary now, and it is the one the game actually grants against, because a
+ * fingerprint has to cover exactly what a certification can widen. Anything a
+ * certification cannot add does not belong in the pool.
+ */
+export const POOL_CATEGORIES = POOL_SLICES
 
-export type PoolCategory = (typeof POOL_CATEGORIES)[number]
+/** One vocabulary, re-exported so callers need not know which module owns it. */
+export type PoolCategory = PoolSlice
 
 /** The set of content ids a run was allowed to draw from, by category. */
-export type RunPool = Readonly<Record<PoolCategory, readonly string[]>>
+export type RunPool = Readonly<Record<PoolSlice, readonly string[]>>
+type RunPoolLocal = RunPool
 
 /**
  * Format tag for the canonical text.
@@ -104,14 +113,13 @@ export type RunPool = Readonly<Record<PoolCategory, readonly string[]>>
  */
 const FINGERPRINT_FORMAT = 'NPPOOL1'
 
-export const EMPTY_POOL: RunPool = Object.freeze({
-  hull: [],
-  weapon: [],
-  item: [],
-  interaction: [],
-  enemy: [],
-  'work-order': [],
-  sector: [],
+export const EMPTY_POOL: RunPoolLocal = Object.freeze({
+  items: [],
+  enemies: [],
+  workOrders: [],
+  hulls: [],
+  bossVariants: [],
+  hazards: [],
 })
 
 /**
@@ -122,8 +130,8 @@ export const EMPTY_POOL: RunPool = Object.freeze({
  * category would mean the fingerprint changed when a category was merely *filled
  * in* rather than when the pool changed.
  */
-export function makePool(parts: Partial<Record<PoolCategory, readonly string[]>>): RunPool {
-  const out: Record<PoolCategory, readonly string[]> = { ...EMPTY_POOL }
+export function makePool(parts: Partial<Record<PoolSlice, readonly string[]>>): RunPoolLocal {
+  const out: Record<PoolSlice, readonly string[]> = { ...EMPTY_POOL }
   for (const category of POOL_CATEGORIES) {
     out[category] = parts[category] ?? []
   }
@@ -140,7 +148,7 @@ export function makePool(parts: Partial<Record<PoolCategory, readonly string[]>>
  * Ids are deduplicated and sorted, so a pool is a set: the order content tables
  * happen to be declared in must never change whether a run counts as purist.
  */
-export function canonicalPoolText(pool: RunPool): string {
+export function canonicalPoolText(pool: RunPoolLocal): string {
   const lines: string[] = [FINGERPRINT_FORMAT]
   for (const category of POOL_CATEGORIES) {
     const ids = pool[category] ?? []

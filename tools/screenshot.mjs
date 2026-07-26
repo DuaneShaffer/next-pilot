@@ -55,6 +55,16 @@ const MIME = {
  * capture, which is how we get a screen mid-combat rather than at rest.
  */
 const SHOTS = [
+  {
+    // FIRST deliberately. localStorage persists across navigations within a browser
+    // context, so every capture after a bot run sees genuinely earned certifications.
+    // Placing this first is the only way to see what a new player sees — and it is
+    // how I confirmed that "7 of 10 certified" was the pipeline working rather than a
+    // bug, which I had already started to report as one.
+    name: 'hangar-fresh',
+    url: `/?seed=${SEED}`,
+    pressAfter: ['ArrowLeft'],
+  },
   { name: 'title', url: `/?seed=${SEED}`, settleMs: 500 },
   { name: 'sortie-idle', url: `/?seed=${SEED}&screen=sortie`, settleMs: 300 },
   { name: 'sortie-firing', url: `/?seed=${SEED}&screen=sortie`, keys: ['Space'], settleMs: 900 },
@@ -133,6 +143,17 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=10&holdchoice=1`,
     waitFor: 'choiceKind === "shop"',
     holdMs: 0,
+  },
+  {
+    // Reachable from the title: left to the hangar, right to personnel files.
+    name: 'hangar',
+    url: `/?seed=${SEED}`,
+    pressAfter: ['ArrowLeft'],
+  },
+  {
+    name: 'personnel',
+    url: `/?seed=${SEED}`,
+    pressAfter: ['ArrowRight'],
   },
   {
     name: 'pause-menu',
@@ -307,6 +328,8 @@ async function capture() {
             screen: api.screen,
             choiceKind: api.choiceKind,
             heldItems: api.heldItems,
+            certified: api.certifiedCount,
+            filedRuns: api.filedRuns,
             seed: api.seed,
             stats: api.stats,
             runState: api.runState,
@@ -323,6 +346,7 @@ async function capture() {
           `${file}  screen=${state?.screen ?? '?'} run=${state?.runState ?? '-'} ` +
             `tick=${state?.stats?.tick ?? '?'} enemies=${state?.enemies ?? '?'} ` +
             `hull=${state?.integrity ?? '?'} items=${state?.heldItems ?? '?'} ` +
+            `cert=${state?.certified ?? '?'} filed=${state?.filedRuns ?? '?'} ` +
             `choice=${state?.choiceKind ?? '-'} dropped=${droppedWhileRunning}`,
         )
 

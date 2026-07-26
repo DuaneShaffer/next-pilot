@@ -31,22 +31,18 @@ import { SIM_VERSION } from '../src/meta/simVersion'
 
 /** The base pool an unmodified build would offer. Small on purpose. */
 const BASE_POOL: RunPool = makePool({
-  hull: ['lien'],
-  item: ['machined-slugs', 'thrust-trim', 'plating-shim'],
-  interaction: ['scrap-engine'],
-  enemy: ['skiff', 'turret'],
-  'work-order': ['supply-run'],
-  sector: ['debris-shelf'],
+  hulls: ['lien'],
+  items: ['machined-slugs', 'thrust-trim', 'plating-shim'],
+  enemies: ['skiff', 'turret'],
+  workOrders: ['supply-run'],
 })
 
 /** The same build with a certification unlocked: one more hull, one more item. */
 const CERTIFIED_POOL: RunPool = makePool({
-  hull: ['lien', 'arrears'],
-  item: ['machined-slugs', 'thrust-trim', 'plating-shim', 'coin-op-cannon'],
-  interaction: ['scrap-engine'],
-  enemy: ['skiff', 'turret'],
-  'work-order': ['supply-run'],
-  sector: ['debris-shelf'],
+  hulls: ['lien', 'arrears'],
+  items: ['machined-slugs', 'thrust-trim', 'plating-shim', 'coin-op-cannon'],
+  enemies: ['skiff', 'turret'],
+  workOrders: ['supply-run'],
 })
 
 function subject(overrides: Partial<PuristSubject> = {}): PuristSubject {
@@ -70,12 +66,10 @@ describe('the pool fingerprint', () => {
     // could change a fingerprint, then reordering `ITEMS` would silently strip the
     // purist badge off every stored record — a cosmetic edit invalidating history.
     const shuffled = makePool({
-      sector: ['debris-shelf'],
-      'work-order': ['supply-run'],
-      enemy: ['turret', 'skiff', 'turret'],
-      interaction: ['scrap-engine'],
-      item: ['plating-shim', 'machined-slugs', 'thrust-trim', 'machined-slugs'],
-      hull: ['lien'],
+      workOrders: ['supply-run'],
+      enemies: ['turret', 'skiff', 'turret'],
+      items: ['plating-shim', 'machined-slugs', 'thrust-trim', 'machined-slugs'],
+      hulls: ['lien'],
     })
     expect(fingerprintPool(shuffled)).toBe(fingerprintPool(BASE_POOL))
   })
@@ -88,15 +82,15 @@ describe('the pool fingerprint', () => {
     // Without the category prefix an enemy named `turret` and an item named
     // `turret` would be the same pool member, and a certification that added one
     // could hide behind the other.
-    const asItem = makePool({ item: ['turret'] })
-    const asEnemy = makePool({ enemy: ['turret'] })
+    const asItem = makePool({ items: ['turret'] })
+    const asEnemy = makePool({ enemies: ['turret'] })
     expect(fingerprintPool(asItem)).not.toBe(fingerprintPool(asEnemy))
   })
 
   it('ignores empty and blank ids rather than hashing them', () => {
     const withBlanks = makePool({
       ...BASE_POOL,
-      item: [...BASE_POOL.item, ''],
+      items: [...BASE_POOL.items, ''],
     })
     expect(fingerprintPool(withBlanks)).toBe(fingerprintPool(BASE_POOL))
   })
@@ -109,8 +103,8 @@ describe('the pool fingerprint', () => {
     // Two hex strings say nothing about WHICH item was extra. The canonical text is
     // the only thing that turns a mismatch into an answer.
     const text = canonicalPoolText(CERTIFIED_POOL)
-    expect(text).toContain('item:coin-op-cannon')
-    expect(text).toContain('hull:arrears')
+    expect(text).toContain('items:coin-op-cannon')
+    expect(text).toContain('hulls:arrears')
     for (const category of POOL_CATEGORIES) {
       for (const id of CERTIFIED_POOL[category]) {
         expect(text).toContain(`${category}:${id}`)
@@ -290,7 +284,7 @@ describe('the empty pool', () => {
   })
 
   it('is not mutated by makePool', () => {
-    makePool({ item: ['injected'] })
-    expect(EMPTY_POOL.item).toEqual([])
+    makePool({ items: ['injected'] })
+    expect(EMPTY_POOL.items).toEqual([])
   })
 })

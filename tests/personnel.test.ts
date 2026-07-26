@@ -57,9 +57,9 @@ import {
 } from '../src/ui/personnel'
 
 const BASE_POOL: RunPool = makePool({
-  hull: ['lien'],
-  item: ['machined-slugs', 'thrust-trim'],
-  enemy: ['skiff', 'turret'],
+  hulls: ['lien'],
+  items: ['machined-slugs', 'thrust-trim'],
+  enemies: ['skiff', 'turret'],
 })
 const BASE_FINGERPRINT = fingerprintPool(BASE_POOL)
 
@@ -967,7 +967,7 @@ describe('purist status on the screen', () => {
   it('is derived from the base pool the caller supplies', () => {
     const purist = recordOf({ poolFingerprint: BASE_FINGERPRINT })
     const expanded = recordOf({
-      poolFingerprint: fingerprintPool(makePool({ ...BASE_POOL, item: ['certified-only'] })),
+      poolFingerprint: fingerprintPool(makePool({ ...BASE_POOL, items: ['certified-only'] })),
     })
 
     const puristText = layoutScreen({ records: [purist], view: 'detail' }).detail
@@ -985,7 +985,7 @@ describe('purist status on the screen', () => {
 
   it('cannot be forced by a field on the record', () => {
     const forged = {
-      ...recordOf({ poolFingerprint: fingerprintPool(makePool({ item: ['certified-only'] })) }),
+      ...recordOf({ poolFingerprint: fingerprintPool(makePool({ items: ['certified-only'] })) }),
       purist: true,
     } as unknown as PersonnelRecord
     const text = layoutScreen({ records: [forged], view: 'detail' }).detail

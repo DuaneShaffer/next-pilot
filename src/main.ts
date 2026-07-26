@@ -24,7 +24,21 @@ import { drawScene } from './render/scene'
 import { Starfield } from './render/starfield'
 import { BOTS, isBotName, type BotPolicy } from './sim/bots'
 import { World, type RunContent } from './sim/world'
+import { BASE_POOL, CERTIFICATIONS, getCertification } from './content/certifications'
+import { fileRun, poolFor, summariseRun, unlockedSet } from './meta/certifications'
+import {
+  appendPersonnelRecord,
+  buildPersonnelRecord,
+  newestFirst,
+} from './meta/personnel'
+import { fingerprintPool } from './meta/purist'
 import { drawChoiceScreen } from './ui/choiceScreen'
+import { drawHangar, moveHangarSelection } from './ui/hangar'
+import {
+  drawPersonnelScreen,
+  movePersonnelSelection,
+  personnelScrollFor,
+} from './ui/personnel'
 import { drawIncidentReport } from './ui/incidentReport'
 import {
   PAUSE_ITEMS,
@@ -36,7 +50,7 @@ import { drawTitleScreen } from './ui/titleScreen'
 
 const VERSION = 'v0.2.0 · m2'
 
-type Screen = 'title' | 'sortie' | 'paused' | 'incident'
+type Screen = 'title' | 'sortie' | 'paused' | 'incident' | 'hangar' | 'personnel'
 
 /**
  * Turn an enemy def id into something a person would say.
@@ -126,6 +140,21 @@ function main(): void {
   const titleStars = new Starfield(`${seed}:title`, VIRTUAL_W, VIRTUAL_H)
   let menuTick = 0
   let pauseSelection = 0
+  let hangarSelection = 0
+  let personnelSelection = 0
+  let personnelScroll = 0
+  /** Guards double-filing: the run-ended transition can be reached more than once. */
+  let filed = false
+  let newlyCertified: readonly string[] = []
+
+  /**
+   * The pool this run draws from, fixed at the start of the sortie.
+   *
+   * Captured once rather than recomputed, so certifying something mid-run cannot
+   * change the run in progress — and so the fingerprint filed in the personnel record
+   * describes the pool that was actually played.
+   */
+  let runPool = poolFor(unlockedSet(save.certifications.unlocked))
 
   const panelState: PanelState = {
     pilotNumber: save.pilotNumber,
@@ -153,16 +182,55 @@ function main(): void {
     viewport.resize(window.innerWidth - 24, window.innerHeight - 24, window.devicePixelRatio)
   }
 
-  function beginSortie(): void {
-    // A fresh pilot each run — the company's headcount is the meta-progression.
+  /**
+   * File a finished run: certifications earned, and the pilot's record.
+   *
+   * Called exactly once per run, at the transition out of 'active', because both
+   * stores are append-only and filing twice would double-count a death. Both read the
+   * same `RunSummary` so a certification and the history can never disagree about what
+   * happened.
+   */
+  function fileCompletedRun(): void {
+    if (filed) return
+    filed = true
+
+    const summary = summariseRun(world, SECTOR_ONE.waves.length)
+    const result = fileRun(summary, save.certifications)
+    save.certifications = result.state
+    newlyCertified = result.newlyUnlocked.map((id) => getCertification(id)?.name ?? id)
+
+    const appended = appendPersonnelRecord(
+      save.personnel,
+      buildPersonnelRecord(world, {
+        pilotNumber: save.pilotNumber,
+        hullId: panelState.hullName.toLowerCase(),
+        sectorId: SECTOR_ONE.id,
+        poolFingerprint: fingerprintPool(runPool),
+      }),
+    )
+    save.personnel = appended.history
+
+    // The company calls the next pilot. Advancing here rather than at launch is what
+    // makes the first pilot #001, and what makes the filed record carry the number of
+    // the pilot it is actually about.
     save.pilotNumber += 1
     persistSave(save)
+  }
+
+  function beginSortie(): void {
+    // NOTE: the pilot number is NOT incremented here. It advances when a pilot is
+    // lost, in fileCompletedRun — incrementing on launch meant a brand-new player's
+    // first sortie was pilot 002 and #001 never existed at all. The number names the
+    // pilot currently flying, so it can only change once that pilot is finished with.
     panelState.pilotNumber = save.pilotNumber
 
     seed = generateSeed()
-    world = new World(seed, content)
+    runPool = poolFor(unlockedSet(save.certifications.unlocked))
+    world = new World(seed, { ...content, workOrders: runPool.workOrders })
     sceneStars = new Starfield(seed)
     resetFeelState(feel)
+    filed = false
+    newlyCertified = []
     screen = 'sortie'
     menuTick = 0
     loop.resetClock()
@@ -226,6 +294,7 @@ function main(): void {
 
     // The run ending is the sim's decision; this only follows it.
     if (world.runState !== 'active') {
+      fileCompletedRun()
       screen = 'incident'
       menuTick = 0
       // Drain any held key so the death-screen prompt can't be consumed by the
@@ -278,11 +347,57 @@ function main(): void {
           audio.confirm()
           beginSortie()
         }
+        // Left and right off the title reach the two record screens. Deliberately not
+        // a menu: the title's one primary action stays "fly", and these are somewhere
+        // to go rather than something to get past (UI rule 6's spirit).
+        if (keyboard.consumePressed('left')) {
+          audio.confirm()
+          hangarSelection = 0
+          screen = 'hangar'
+        }
+        if (keyboard.consumePressed('right')) {
+          audio.confirm()
+          personnelSelection = 0
+          personnelScroll = 0
+          screen = 'personnel'
+        }
         return
       }
 
       if (screen === 'paused') {
         updatePauseMenu()
+        return
+      }
+
+      if (screen === 'hangar') {
+        menuTick++
+        if (keyboard.consumePressed('up')) {
+          hangarSelection = moveHangarSelection(hangarSelection, -1, CERTIFICATIONS.length)
+        }
+        if (keyboard.consumePressed('down')) {
+          hangarSelection = moveHangarSelection(hangarSelection, 1, CERTIFICATIONS.length)
+        }
+        if (keyboard.consumePressed('cancel') || keyboard.consumePressed('pause')) {
+          audio.cancel()
+          screen = 'title'
+        }
+        return
+      }
+
+      if (screen === 'personnel') {
+        menuTick++
+        const count = save.personnel.length
+        if (keyboard.consumePressed('up')) {
+          personnelSelection = movePersonnelSelection(personnelSelection, -1, count)
+        }
+        if (keyboard.consumePressed('down')) {
+          personnelSelection = movePersonnelSelection(personnelSelection, 1, count)
+        }
+        personnelScroll = personnelScrollFor(personnelSelection, personnelScroll, count)
+        if (keyboard.consumePressed('cancel') || keyboard.consumePressed('pause')) {
+          audio.cancel()
+          screen = 'title'
+        }
         return
       }
 
@@ -316,6 +431,37 @@ function main(): void {
           pilotNumber: save.pilotNumber,
           tick: menuTick,
           version: VERSION,
+        })
+        return
+      }
+
+      if (screen === 'hangar') {
+        drawHangar(ctx, {
+          unlocked: unlockedSet(save.certifications.unlocked),
+          progress: save.certifications.progress,
+          waveCount: SECTOR_ONE.waves.length,
+          selected: hangarSelection,
+          tick: menuTick,
+        })
+        return
+      }
+
+      if (screen === 'personnel') {
+        drawPersonnelScreen(ctx, {
+          // Newest first for reading; the store is oldest-first so appends are cheap.
+          records: newestFirst(save.personnel),
+          selected: personnelSelection,
+          scroll: personnelScroll,
+          view: 'list',
+          tick: menuTick,
+          basePool: BASE_POOL,
+          names: {
+            items: Object.fromEntries(Object.values(ITEMS).map((i) => [i.id, i.name])),
+            enemies: Object.fromEntries(Object.values(ENEMIES).map((e) => [e.id, e.name])),
+            sectors: { [SECTOR_ONE.id]: SECTOR_ONE.name },
+          },
+          skipped: 0,
+          dropped: 0,
         })
         return
       }
@@ -394,6 +540,7 @@ function main(): void {
           sector: panelState.sector,
           sectorCount: panelState.sectorCount,
           waveCount: SECTOR_ONE.waves.length,
+          ...(newlyCertified.length > 0 ? { certifications: newlyCertified } : {}),
         })
       }
     },
@@ -464,6 +611,13 @@ function main(): void {
       },
       get heldItems() {
         return world.inventory.length
+      },
+      /** Certifications filed. Lets a capture prove a fresh save really is fresh. */
+      get certifiedCount() {
+        return save.certifications.unlocked.length
+      },
+      get filedRuns() {
+        return save.personnel.length
       },
       get stats() {
         return { ...world.stats, ...loop.getStats() }
