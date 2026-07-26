@@ -8,12 +8,18 @@
  * looking. `drawHazardWarning` is the cue that fixes that, and every claim made for it
  * is asserted here against what it actually draws.
  *
- * Four of these are written to fail loudly if the cue is quietly weakened later:
+ * Five of these are written to fail loudly if the cue is quietly weakened later:
  *
  *   - the countdown must SHRINK, monotonically, and never reach zero while the window
  *     is open (a cue that vanishes early is worse than none);
  *   - a global hazard must not be given a fake direction;
  *   - severity must survive colour being removed entirely;
+ *   - the panel and the playfield must give one hazard ONE severity. They did not: the
+ *     panel row spent `dangerText` on every warning while the alarm derived severity
+ *     from the kind, so a `grid-sweep` or `manifest-blackout` warning had the two
+ *     surfaces contradicting each other about the same hazard in the same frame. The
+ *     assertions below ask both surfaces the same question and require the same answer,
+ *     for every kind, which is a thing a future kind cannot get half-right;
  *   - geometry must not depend on `tick`, which is what keeps the rule-10 suite's alpha
  *     measurement a measurement of the axis this effect actually varies on. The engine
  *     plume shipped an 8.59 Hz strobe by modulating AREA while that suite watched
@@ -25,9 +31,9 @@ import { PLAYFIELD_H, PLAYFIELD_W } from '../src/core/space'
 import type { HazardKind } from '../src/content/types'
 import type { HazardView, WorldView } from '../src/sim/entities'
 import { HAZARD_WARNING_TICKS } from '../src/sim/hazards'
-import { drawHazardWarning } from '../src/render/hazards'
+import { drawHazardBlock, drawHazardWarning, hazardStatus } from '../src/render/hazards'
 import { drawScene } from '../src/render/scene'
-import { Palette } from '../src/render/palette'
+import { Palette, withAlpha } from '../src/render/palette'
 import { Starfield } from '../src/render/starfield'
 
 // ---------------------------------------------------------------------------
@@ -465,6 +471,126 @@ describe('severity does not depend on telling red from amber', () => {
     for (const kind of ['interdiction', 'blackout'] as const) {
       expect(fills(kind), kind).toContain(Palette.caution)
       expect(fills(kind), kind).not.toContain(Palette.danger)
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// one hazard, one severity, whichever surface is asked
+// ---------------------------------------------------------------------------
+
+/**
+ * The two surfaces are checked against EACH OTHER, not each against a constant.
+ *
+ * A pair of tests that each pinned its own surface to its own expected colour is
+ * exactly what let the contradiction ship: both passed, and neither could see the
+ * other. These read the answer out of one surface and require the other to match it.
+ */
+describe('the panel row and the playfield alarm cannot disagree', () => {
+  const KINDS: readonly HazardKind[] = ['debris', 'corrosion', 'interdiction', 'blackout']
+
+  /** The panel row for one hazard, drawn with room for its prose. */
+  const panelRow = (kind: HazardKind, phase: HazardView['phase'] = 'warning'): Recorded[] => {
+    const { ctx, calls } = makeStub()
+    drawHazardBlock(ctx, {
+      x: 260,
+      y: 400,
+      w: 164,
+      hazards: [hazard({ hazardKind: kind, phase, ticksToChange: 40 })],
+      tick: 0,
+      available: 120,
+    })
+    return calls
+  }
+
+  it('colours the alarm strip in whatever the panel row calls the same hazard', () => {
+    for (const kind of KINDS) {
+      const panel = hazardStatus(hazard({ hazardKind: kind, phase: 'warning' }))
+      const { ctx, calls } = makeStub()
+      drawHazardWarning(ctx, [hazard({ hazardKind: kind })], 0)
+      expect(pips(calls, panel.mark), kind).not.toHaveLength(0)
+      // And never in the severity it did NOT claim: agreeing on one colour while also
+      // drawing the other one would be the same contradiction with an extra step.
+      const other = panel.harmful ? Palette.caution : Palette.danger
+      expect(pips(calls, other), kind).toHaveLength(0)
+    }
+  })
+
+  it('spends danger on the two kinds that take integrity, and caution on the two that do not', () => {
+    // world.ts: `corrosion` calls applyHullDamage and `debris` spawns damaging bullets;
+    // the `interdiction` and `blackout` arm is a comment and applies nothing. This is the
+    // fact both surfaces are now reading, so it is asserted once here in plain terms.
+    for (const kind of ['corrosion', 'debris'] as const) {
+      const status = hazardStatus(hazard({ hazardKind: kind, phase: 'warning' }))
+      expect(status.harmful, kind).toBe(true)
+      expect(status.mark, kind).toBe(Palette.danger)
+      expect(status.color, kind).toBe(Palette.dangerText)
+    }
+    for (const kind of ['interdiction', 'blackout'] as const) {
+      const status = hazardStatus(hazard({ hazardKind: kind, phase: 'warning' }))
+      expect(status.harmful, kind).toBe(false)
+      expect(status.mark, kind).toBe(Palette.caution)
+      expect(status.color, kind).toBe(Palette.caution)
+      // Still the reaction window. Not dangerous is not the same as not urgent, and
+      // collapsing the two would cost the player the second they have to move.
+      expect(status.urgent, kind).toBe(true)
+      expect(status.word, kind).toBe('INBOUND')
+    }
+  })
+
+  it('never paints a panel row danger-red for a hazard that cannot take integrity', () => {
+    for (const kind of ['interdiction', 'blackout'] as const) {
+      const styles = panelRow(kind).flatMap((c) => [c.fillStyle, String(c.args[0] ?? '')])
+      for (const style of styles) {
+        expect(style, `${kind}: ${style}`).not.toContain(Palette.danger)
+        expect(style, `${kind}: ${style}`).not.toContain(Palette.dangerText)
+      }
+    }
+  })
+
+  it('bands the row in the severity colour rather than always in danger', () => {
+    // The band is the widest rect in the row — it spans the full content width plus the
+    // bleed either side, where everything else is a 2-unit edge bar or a glyph.
+    const bandFill = (kind: HazardKind): string => {
+      const band = rects(panelRow(kind)).reduce((a, b) => (b.w > a.w ? b : a))
+      return band.fill
+    }
+    // withAlpha's alpha rides the pulse, so the assertion is on the hue it derives from.
+    const rgbOf = (hex: string): string => withAlpha(hex, 1).replace(/[\d.]+\)$/, '')
+    expect(bandFill('debris')).toContain(rgbOf(Palette.danger))
+    expect(bandFill('blackout')).toContain(rgbOf(Palette.caution))
+    expect(bandFill('blackout')).not.toContain(rgbOf(Palette.danger))
+  })
+
+  it('marks panel severity with fill as well as hue, for the ~5% who cannot see the hue', () => {
+    // `danger` and `caution` are the one palette pair that cannot be separated by hue for
+    // a protanope or deuteranope, so the panel needs the notch's equivalent: a warning
+    // triangle that is FILLED when the hazard costs integrity and hollow when it does
+    // not. Shape still carries the phase; fill carries the cost.
+    const marker = (kind: HazardKind): string =>
+      panelRow(kind)
+        .map((c) => c.name)
+        .filter((n) => n === 'closePath' || n === 'fill' || n === 'stroke')
+        .join(',')
+    expect(marker('debris')).toBe('closePath,fill')
+    expect(marker('corrosion')).toBe('closePath,fill')
+    expect(marker('interdiction')).toBe('closePath,stroke')
+    expect(marker('blackout')).toBe('closePath,stroke')
+  })
+
+  it('leaves idle and active rows alone, whatever the hazard costs', () => {
+    // Severity applies to the reaction window. An idle row is not a threat and an active
+    // one has already done whatever it does, so both stay off the danger role entirely —
+    // and both keep their own marker shape, which is what separates the three phases.
+    for (const kind of KINDS) {
+      for (const phase of ['idle', 'active'] as const) {
+        const status = hazardStatus(hazard({ hazardKind: kind, phase }))
+        expect(status.urgent, `${kind}/${phase}`).toBe(false)
+        expect(status.harmful, `${kind}/${phase}`).toBe(false)
+        expect(status.mark, `${kind}/${phase}`).not.toBe(Palette.danger)
+      }
+      expect(panelRow(kind, 'idle').map((c) => c.name)).toContain('arc')
+      expect(panelRow(kind, 'active').map((c) => c.name)).not.toContain('arc')
     }
   })
 })

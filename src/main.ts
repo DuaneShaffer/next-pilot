@@ -45,7 +45,7 @@ import { BOTS, isBotName, isRouteStyle, type BotPolicy } from './sim/bots'
 import { World, type RunContent } from './sim/world'
 import type { PendingChoiceKind } from './sim/entities'
 import { BASE_POOL, CERTIFICATIONS, getCertification } from './content/certifications'
-import { fileRun, poolFor, summariseRun, unlockedSet } from './meta/certifications'
+import { fileRun, poolForRun, summariseRun, unlockedSet } from './meta/certifications'
 import {
   appendPersonnelRecord,
   buildPersonnelRecord,
@@ -53,6 +53,7 @@ import {
 } from './meta/personnel'
 import { fingerprintPool } from './meta/purist'
 import {
+  certificationsForMode,
   claimSortieMode,
   dailyContract,
   resolveRunMode,
@@ -443,13 +444,23 @@ function main(): void {
   if (startupNotice !== null) console.info(`[next-pilot] ${startupNotice}`)
 
   /**
-   * The pool this run draws from, fixed at the start of the sortie.
+   * The pool this run draws from, fixed at the start of the sortie, and the exact
+   * certifications that produced it.
    *
    * Captured once rather than recomputed, so certifying something mid-run cannot
    * change the run in progress — and so the fingerprint filed in the personnel record
    * describes the pool that was actually played.
+   *
+   * THE MODE DECIDES WHICH IDS APPLY, not the save alone. A daily contract and a
+   * `?purist=1` link fly the base pool whatever this pilot has certified, and a replay
+   * flies the pool it was recorded with. That decision is `certificationsForMode`, a
+   * pure function in seedModes.ts, because it lived here as "read the save" for a
+   * whole milestone and nothing in the suite could see it: two pilots were handed
+   * different hulls on the same daily contract and the share card said PURIST over a
+   * run that was not.
    */
-  let runPool = poolFor(unlockedSet(save.certifications.unlocked))
+  let runCertified = poolForRun(certificationsForMode(runMode, save.certifications.unlocked))
+  let runPool = runCertified.pool
 
   const panelState: PanelState = {
     pilotNumber: save.pilotNumber,
@@ -564,7 +575,8 @@ function main(): void {
     pendingMode = claim.nextPending
     const claimed = claim.mode
     seed = claimed.seed
-    runPool = poolFor(unlockedSet(save.certifications.unlocked))
+    runCertified = poolForRun(certificationsForMode(claimed, save.certifications.unlocked))
+    runPool = runCertified.pool
 
     // Its own named stream off the run seed, so the same seed always offers the same
     // hulls and adding this draw cannot shift any other roll in the run.
@@ -620,7 +632,13 @@ function main(): void {
     // The hull is recorded WITH the run. A replay was seed + inputs, which was
     // lossless only because every run flew a Lien; a Collateral run played back as a
     // Lien fires 20 shots/second instead of 30 and diverges within a few ticks.
-    recorder = new ReplayRecorder(seed, currentHullId)
+    //
+    // The POOL is recorded with it, and for the same reason one layer up: `World` is
+    // handed `runPool.workOrders`, so a replay shared by a certified pilot and opened
+    // by someone with a different unlock set was a different run wearing the same
+    // link. `runCertified.certifications` is the set this pool was built from, so what
+    // is recorded and what was flown cannot drift apart.
+    recorder = new ReplayRecorder(seed, currentHullId, runCertified.certifications)
     // Whatever `claimSortieMode` decided, unmodified. This used to be a hardcoded
     // `{ kind: 'free', seed, purist: false }`, which is what discarded every daily,
     // shared seed and replay — and hardcoding `purist: false` is separately what made

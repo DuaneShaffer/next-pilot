@@ -17,7 +17,7 @@
  * link and a file upload, and there is no compression library to reach for
  * because this project has no runtime dependencies.
  *
- * ## Wire format (version 3)
+ * ## Wire format (version 5)
  *
  * ```
  *   offset  bytes  field
@@ -28,6 +28,10 @@
  *   6       n      seed, printable ASCII
  *   ...     1      hull id length (0..32)      (added at format 3)
  *   ...     m      hull id, printable ASCII; empty means "no hull was chosen"
+ *   ...     1      certification mask length (0..8)   (added at format 5)
+ *   ...     c      certification mask, little-endian; bit i is CERTIFICATION_IDS[i].
+ *                  Zero-length means the base pool, which is what purist runs and
+ *                  every sim test record.
  *   ...     v      tick count, unsigned LEB128
  *   ...     2v..   runs: [packed input byte, LEB128 repeat count] ...
  *   end-4   4      FNV-1a checksum of everything before it, little-endian
@@ -57,14 +61,20 @@
  */
 
 import { SIM_VERSION } from './simVersion'
+import {
+  MAX_CERTIFICATION_MASK_BYTES,
+  packCertifications,
+  unpackCertifications,
+} from './certifications'
 import type { InputSnapshot } from '../core/input'
 import { packInput, unpackInput } from '../core/input'
 
 /**
  * Encoding version — how the bytes are laid out.
  *
- * Bumped to 2 when `simVersion` entered the header, to 3 when `hullId` did, and to 4
- * when `confirm` took bit 7 of the packed input byte.
+ * Bumped to 2 when `simVersion` entered the header, to 3 when `hullId` did, to 4
+ * when `confirm` took bit 7 of the packed input byte, and to 5 when the certified
+ * pool did.
  * Distinct from SIM_VERSION, which describes what those bytes *mean*: a format
  * mismatch fails to decode and is safe, while a sim mismatch decodes perfectly and
  * plays back the wrong run. See src/meta/simVersion.ts.
@@ -84,22 +94,40 @@ import { packInput, unpackInput } from '../core/input'
  * format-2 replay fail loudly at the version check, which is the correct and
  * legible outcome, where leaving the format alone would have let those replays
  * decode and be flown in the wrong hull.
+ *
+ * FORMAT 5 IS THE SAME ARGUMENT AGAIN, one field further on. A run's certified pool
+ * reaches the simulation — `World` is handed `poolFor(...).workOrders`, which decides
+ * what the wave-17 card offers and how far the cursor may travel — and it was not
+ * recorded. So the honest description of a run was `seed + hull + pool + a byte per
+ * tick` while the payload carried three of the four: a replay shared by a certified
+ * pilot decoded perfectly on a viewer with a different unlock set and played back a
+ * different run under the original's name. Same reasoning as `hullId`, same remedy: a
+ * field that makes the pool part of the recording, and a version bump so every
+ * format-4 replay is refused loudly instead of flown against whatever pool the
+ * recipient happens to have.
+ *
+ * FORMAT-4 PAYLOADS ARE NOW REFUSED, INCLUDING THE RECORDED CORPUS. `tests/replays/`
+ * was recorded at format 4 and has to be re-recorded
+ * (`npm run playtest -- --record-fixture=...`) to be read by this build; until it is,
+ * `tests/replay.test.ts` upgrades each payload in memory and says so loudly. Nothing
+ * about the runs themselves moved — every fixture was recorded with `workOrders`
+ * omitted, so all four are base-pool runs and their digests are unchanged.
  */
-export const REPLAY_FORMAT_VERSION = 4
+export const REPLAY_FORMAT_VERSION = 5
 
 const MAGIC = [0x4e, 0x50, 0x52] as const // 'NPR'
 /**
  * Smallest byte count that could hold a header, written as a sum of the fields so
  * it cannot drift out of step with the wire format:
  * magic, format version, sim version, seed length, one seed byte, hull id length,
- * one tick-count varint byte, checksum.
+ * certification mask length, one tick-count varint byte, checksum.
  *
- * The hull length byte was added at format 3. Omitting it here would not have been
- * a hole — every later read is bounds-checked — but a constant that claims to be
- * the header size and is one byte short is a constant that will be trusted by the
- * next person who adds a field.
+ * The hull length byte was added at format 3 and the mask length byte at format 5.
+ * Omitting either here would not have been a hole — every later read is
+ * bounds-checked — but a constant that claims to be the header size and is a byte
+ * short is a constant that will be trusted by the next person who adds a field.
  */
-const HEADER_MIN_BYTES = MAGIC.length + 1 + 1 + 1 + 1 + 1 + 1 + 4
+const HEADER_MIN_BYTES = MAGIC.length + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 4
 const MAX_SEED_BYTES = 64
 /**
  * ~16 hours at 60Hz. Not a design limit on run length — a sanity bound so a
@@ -125,6 +153,16 @@ export type ReplayErrorReason =
    * the seed, which is the one part of the payload that was fine.
    */
   | 'bad-hull'
+  /**
+   * The certification mask is malformed, or names a certification this build does
+   * not have.
+   *
+   * Unlike `bad-hull`, the second case is not corruption — it is a replay from a
+   * build with a longer roster. It is still a refusal: the mask is positional, so a
+   * bit this roster cannot name is a grant that cannot be reconstructed, and playing
+   * the run without it is the silent divergence the field exists to prevent.
+   */
+  | 'bad-pool'
   | 'bad-input-byte'
   | 'bad-run-count'
   | 'tick-count-mismatch'
@@ -170,6 +208,25 @@ export interface Replay {
    * exists to prevent. Old replays are now refused rather than silently mis-flown.
    */
   readonly hullId: string
+  /**
+   * The certifications whose grants widened the pool this run drew from.
+   *
+   * ADDED AT FORMAT 5, and it completes the promise. A run is `seed + hull + pool +
+   * one byte per tick`; the pool reaches the simulation through `World`'s
+   * `workOrders`, and until this field existed the payload simply did not mention it.
+   * A certified pilot's shared replay decoded perfectly on a viewer with a different
+   * unlock set and then played a different run — the same class of failure `hullId`
+   * was added to close, one layer up.
+   *
+   * THE IDS, NOT A FINGERPRINT. A fingerprint proves a pool was the same; it cannot
+   * rebuild it, and a replay has to be flown. `poolForRun(replay.certifications)`
+   * reconstructs exactly what the recording drew from.
+   *
+   * Empty means the base pool. That is a positive statement — "this run used no
+   * grants" — and not the absence of one, which is what a format-4 replay was and
+   * why those are refused rather than read as empty.
+   */
+  readonly certifications: readonly string[]
   /** One packed input byte per tick. Length is the tick count. */
   readonly inputs: Uint8Array
 }
@@ -361,6 +418,24 @@ export function encodeReplay(replay: Replay): string {
     throw new ReplayError('bad-hull', `hull id length ${hullBytes.length} out of range`)
   }
 
+  // Packed from the ids rather than trusted as bytes, so an id this build cannot name
+  // is refused at the point of RECORDING. A replay that goes out naming a pool it did
+  // not fly is the failure this field exists to prevent, and emitting one would be a
+  // worse version of it than reading one.
+  const maskBytes = packCertifications(replay.certifications)
+  const named = new Set(unpackCertifications(maskBytes) ?? [])
+  const unknown = replay.certifications.filter((id) => !named.has(id))
+  if (unknown.length > 0) {
+    throw new ReplayError(
+      'bad-pool',
+      `certification${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')} ` +
+        `${unknown.length === 1 ? 'is' : 'are'} not in this build's roster`,
+    )
+  }
+  if (maskBytes.length > MAX_CERTIFICATION_MASK_BYTES) {
+    throw new ReplayError('bad-pool', `certification mask is ${maskBytes.length} bytes`)
+  }
+
   const bytes: number[] = [
     ...MAGIC,
     REPLAY_FORMAT_VERSION,
@@ -369,6 +444,8 @@ export function encodeReplay(replay: Replay): string {
     ...seedBytes,
     hullBytes.length,
     ...hullBytes,
+    maskBytes.length,
+    ...maskBytes,
   ]
   writeVarint(bytes, replay.inputs.length)
 
@@ -475,6 +552,21 @@ export function decodeReplay(text: string): Replay {
   }
   offset += hullLength
 
+  const maskLength = bytes[offset] ?? 0
+  offset++
+  if (maskLength > MAX_CERTIFICATION_MASK_BYTES || offset + maskLength > bodyEnd) {
+    throw new ReplayError('bad-pool', `certification mask length ${maskLength} out of range`)
+  }
+  const certifications = unpackCertifications(bytes.subarray(offset, offset + maskLength))
+  if (certifications === null) {
+    throw new ReplayError(
+      'bad-pool',
+      'this replay names a certification this build does not have, so the pool it was ' +
+        'flown with cannot be rebuilt',
+    )
+  }
+  offset += maskLength
+
   const tickRead = readVarint(bytes, offset, 'tick count')
   offset = tickRead.next
   const tickCount = tickRead.value
@@ -512,7 +604,7 @@ export function decodeReplay(text: string): Replay {
     )
   }
 
-  return { version, simVersion, seed, hullId, inputs }
+  return { version, simVersion, seed, hullId, certifications, inputs }
 }
 
 // ---------------------------------------------------------------------------
@@ -535,10 +627,17 @@ export class ReplayRecorder {
    * Optional so a sim test recording a run does not have to know hulls exist, and
    * empty rather than `'lien'` because a default that asserts a fact the recorder
    * never knew is how a replay ends up confidently wrong.
+   *
+   * `certifications` defaults to none, which is a CLAIM and not an absence — it says
+   * the run drew from the base pool. That is true of every caller that omits it:
+   * `new World(seed)` and every content literal in the suite leave `workOrders`
+   * unset, so they get `BASE_WORK_ORDERS`. The one caller that can widen the pool is
+   * `src/main.ts`, and it passes the ids it built the pool from.
    */
   constructor(
     readonly seed: string,
     readonly hullId: string = '',
+    readonly certifications: readonly string[] = [],
   ) {}
 
   record(input: InputSnapshot): void {
@@ -557,6 +656,7 @@ export class ReplayRecorder {
       simVersion: SIM_VERSION,
       seed: this.seed,
       hullId: this.hullId,
+      certifications: this.certifications,
       inputs: Uint8Array.from(this.bytes),
     }
   }
@@ -611,6 +711,22 @@ export interface TickableWorld {
    * world that only knows its name.
    */
   readonly hullId?: string
+  /**
+   * The certifications whose grants widened this world's pool, if it knows.
+   *
+   * Optional and READ, never set, for the same reason `hullId` is: `playback` cannot
+   * build a world, so the only thing it can do about the pool is check that the
+   * caller honoured the one the replay names.
+   *
+   * `World` does not report this today — the pool reaches it as a bare `workOrders`
+   * list and nothing on `WorldView` names where that list came from — so the guard is
+   * skipped for a raw `World`, exactly as the hull guard is skipped for a world with
+   * no `hullName`. THE RESIDUAL LIMITATION, stated rather than dressed up: a caller
+   * that ignores the third factory argument and builds a base-pool world is not
+   * caught. The real fix is the pool on `WorldView`, which is a change to
+   * `src/sim/entities.ts` and not to this file.
+   */
+  readonly certifications?: readonly string[]
 }
 
 export interface PlaybackOptions<T extends TickableWorld> {
@@ -640,10 +756,10 @@ function hullKey(value: string): string {
 
 export function playback<T extends TickableWorld>(
   replay: Replay,
-  createWorld: (seed: string, hullId: string) => T,
+  createWorld: (seed: string, hullId: string, certifications: readonly string[]) => T,
   options: PlaybackOptions<T> = {},
 ): PlaybackResult<T> {
-  const world = createWorld(replay.seed, replay.hullId)
+  const world = createWorld(replay.seed, replay.hullId, replay.certifications)
 
   /**
    * VERIFY that the caller actually used the hull, rather than trusting them to.
@@ -688,6 +804,33 @@ export function playback<T extends TickableWorld>(
       )
     }
   }
+  /**
+   * AND THE SAME CHECK FOR THE POOL, which is the hull problem one layer up.
+   *
+   * The pool is a simulation input: `World` is handed the certified `workOrders`, and
+   * the wave-17 card's option list and cursor bounds come straight off it. A caller
+   * that builds the viewer's pool instead of the recording's plays a different run —
+   * transiently today, because confirming a work order applies nothing, and
+   * permanently the moment one does.
+   *
+   * Compared as SETS. `packCertifications` normalises to roster order, but a world
+   * reporting the ids it was configured with has no reason to know that order, and
+   * refusing a correct playback over the order of two equal lists would be the same
+   * mistake the hull guard made when it compared an id to a display name.
+   */
+  const claimed = replay.certifications
+  const built = world.certifications
+  if (built !== undefined) {
+    const key = (ids: readonly string[]): string => [...new Set(ids)].sort().join(',')
+    if (key(built) !== key(claimed)) {
+      throw new ReplayError(
+        'bad-pool',
+        `replay was flown with [${key(claimed) || 'base pool'}] but playback built ` +
+          `[${key(built) || 'base pool'}] — the factory ignored replay.certifications`,
+      )
+    }
+  }
+
   const { onTick, stopWhen } = options
   let ticks = 0
   for (let i = 0; i < replay.inputs.length; i++) {

@@ -90,10 +90,13 @@ export const LIEN_ID = 'lien'
  *
  * Written as data for the same reason `docs/DESIGN.md` keeps its rejected synergies
  * rather than deleting them — the reasoning is the useful part — and because
- * `src/content/certifications.ts` already grants `writ`. A certification that unlocks
- * a hull which does not exist is exactly the kind of dangling reference that survives
- * a typecheck, so `tests/hulls.test.ts` requires every certification hull grant to be
- * either a real hull or a named entry in this list.
+ * `src/content/certifications.ts` once granted `writ` from this list. A certification
+ * that unlocks a hull which does not exist is exactly the kind of dangling reference
+ * that survives a typecheck, so `tests/hulls.test.ts` requires every certification
+ * hull grant to be either a real hull or a named entry in this list. No grant points
+ * here today — Flawless Conduct was repointed at Surety — and if one ever does again,
+ * that grant's card must keep saying it is pending, because the hull-selection screen
+ * will offer everything else in the pool and silently skip this.
  */
 export const HULLS_AWAITING_MECHANICS: readonly { id: string; name: string; needs: string }[] = [
   {
@@ -125,19 +128,22 @@ export const HULLS_AWAITING_MECHANICS: readonly { id: string; name: string; need
 ]
 
 /**
- * Hulls that exist here but that no pool currently offers.
+ * Hulls that exist here but that no pool currently offers. EMPTY, and it should stay
+ * that way.
  *
- * `BASE_POOL.hulls` is `['lien']` and the certification roster grants `arrears` and
- * `writ`. Nothing grants these three, so they are authored content the player cannot
- * reach — the same class of defect as an item with `weight: 0` nobody meant to set.
- * Fixing it means editing `src/content/certifications.ts`, which this milestone's
- * hull work does not own, so the gap is recorded rather than silently left.
+ * It held `surety`, `probate` and `collateral` — authored, tuned, tested and in no
+ * pool at all, the same class of defect as an item with `weight: 0` nobody meant to
+ * set. All three are granted by `src/content/certifications.ts` now and all five
+ * hulls are reachable: `lien` from `BASE_POOL.hulls`, the other four from a
+ * certification each.
  *
- * The test that reads this only requires that an unreachable hull be *named* here; a
- * hull listed here that later becomes reachable still passes, so adding the grants
- * does not mean editing this list at the same moment.
+ * Kept rather than deleted because it is the escape hatch a *sixth* hull needs on the
+ * day it is authored ahead of its grant, and because the test that reads it asserts
+ * over `HULLS` rather than over this list — so a hull that is neither granted nor
+ * named here fails. The list going empty is the defect being closed, not the
+ * mechanism becoming unnecessary.
  */
-export const HULLS_PENDING_POOL_PLACEMENT: readonly string[] = ['surety', 'probate', 'collateral']
+export const HULLS_PENDING_POOL_PLACEMENT: readonly string[] = []
 
 export const HULLS: Record<string, HullDef> = {
   /**

@@ -52,6 +52,7 @@ import {
 } from '../src/sim/bots'
 import type { RunContent } from '../src/sim/world'
 import { World } from '../src/sim/world'
+import { fullPool, poolFor } from '../src/meta/certifications'
 import { digestWorld } from '../src/meta/snapshot'
 import { decodeReplay, playback, ReplayRecorder } from '../src/meta/replay'
 
@@ -83,9 +84,21 @@ const RUN_CONTENT: RunContent = {
 /**
  * The five-sector run as the app wires it, plus one hull.
  *
- * Mirrors `src/main.ts` exactly. A sweep that flew a different run from the one
- * that ships would produce numbers about a game nobody plays, and this is the one
- * place in the harness where that could quietly happen.
+ * IT DOES NOT MIRROR `src/main.ts`, AND THE CLAIM THAT IT DID WAS THE WHOLE DEFECT
+ * (D5). `main.ts:614` builds the world as `{ ...content, workOrders:
+ * runPool.workOrders, ...hull }`, where `runPool = poolFor(unlockedSet(save
+ * .certifications.unlocked))` (`main.ts:452`, `:567`) — a value read out of
+ * `localStorage` and handed to the constructor. `RUN_CONTENT` above omits
+ * `workOrders` entirely, so `World` falls back to `BASE_WORK_ORDERS` and every M5
+ * exit number ever recorded was measured on a **base-pool** run.
+ *
+ * That omission is now DELIBERATE AND DEFAULT rather than accidental, because
+ * `docs/DESIGN.md` ("Cross-run persistence changes the deck, never the numbers",
+ * decided 2026-07-26) makes `poolFor(new Set())` the definition of the comparable
+ * game: purist is the base pool, and the base pool is the only band the exit criteria
+ * are written against. So the default is right; only the comment was lying.
+ *
+ * `--pool=certified` sweeps the other band. See `poolWorkOrders`.
  */
 function contentForHull(hullId: string | null): RunContent {
   if (hullId === null) return RUN_CONTENT
@@ -114,6 +127,73 @@ function withStartingItems(content: RunContent, give: readonly string[]): RunCon
   return {
     ...content,
     hull: { ...base, startingItems: [...(base.startingItems ?? []), ...give] },
+  }
+}
+
+/**
+ * Which certification band the sweep flies. `--pool=base|certified`.
+ *
+ * `base` is `poolFor(new Set())` — nothing certified, which is exactly what omitting
+ * `workOrders` already produced, and which `docs/DESIGN.md` now defines as the
+ * comparable game. `certified` is `fullPool()`, every certification filed, which is
+ * the band a long-lived save actually flies and which nothing had ever swept.
+ *
+ * WHAT THE BAND CAN AND CANNOT MOVE, so nobody reads more into a difference than is
+ * there: only the `workOrders` slice reaches the simulation at all
+ * (`src/sim/world.ts:874`), the sim applies no work-order outcome, and the card has no
+ * offers — so the certified pool changes the number of options on one card per run and
+ * nothing else inside the run. The `hulls` slice changes which hulls are OFFERED, which
+ * is app-level and is swept explicitly by `--hulls`; the `items` and `enemies` slices
+ * are not pool-gated in the shipped wiring at all. A measured difference between the
+ * bands is therefore a fact about card navigation, not about difficulty, and the
+ * measured figure is in `docs/ROADMAP.md`.
+ */
+type PoolBand = 'base' | 'certified'
+
+const POOL_BANDS: readonly PoolBand[] = ['base', 'certified']
+
+function isPoolBand(value: string): value is PoolBand {
+  return (POOL_BANDS as readonly string[]).includes(value)
+}
+
+/** The work-order slice a band draws from. Reported, so a sweep states its own pool. */
+function poolWorkOrders(band: PoolBand): readonly string[] {
+  return band === 'base' ? poolFor(new Set()).workOrders : fullPool().workOrders
+}
+
+/**
+ * `base` leaves the field OMITTED rather than passing the equal list, deliberately: the
+ * replay corpus was recorded through a `RunContent` with no `workOrders` key at all, and
+ * the default band has to stay that exact wiring so a fixture and a sweep cannot drift.
+ */
+function withPool(content: RunContent, band: PoolBand): RunContent {
+  return band === 'base' ? content : { ...content, workOrders: poolWorkOrders(band) }
+}
+
+/**
+ * Switch shield recovery off for the flown hull. `--no-recovery`.
+ *
+ * THE ABLATION SWITCH FOR THE SHIELD, and it is the sibling of `--give`. The recharging
+ * shield (`docs/DESIGN.md`, "The shield recharges") is a second recovery source handed
+ * to every hull for free, and its own design section says it "has to be measured
+ * against" the integrity-recovery figure rather than tuned by feel. That comparison
+ * needs both sides ablatable by a flag; before this, the item side had one and the
+ * shield side needed an edit to `src/sim/stats.ts`.
+ *
+ * `shieldReservePerSector` rather than the rate, because the reserve is what bounds the
+ * total: `mul 0` takes the per-sector budget to its `min: 0` and recovery stops, while
+ * the pool still absorbs exactly as before. Zeroing the rate instead would leave a
+ * reserve that never spends, which is the same outcome by a less direct route.
+ */
+function withoutRecovery(content: RunContent): RunContent {
+  const base = content.hull ?? HULLS['lien']
+  if (base === undefined) fail('no baseline hull to switch recovery off on')
+  return {
+    ...content,
+    hull: {
+      ...base,
+      stats: [...base.stats, { stat: 'shieldReservePerSector', kind: 'mul', value: 0 }],
+    },
   }
 }
 
@@ -1489,8 +1569,26 @@ export interface SectorRow {
    * above 35%"). Deliberately NOT the same as `1 - clearRate`: a sector that kills
    * everyone who reaches it is a cliff only if people reach it, and a conditional
    * rate on eleven survivors is not a spike.
+   *
+   * IT IS ALSO PARTLY A FACT ABOUT THE CLEAR RATE, which is why `deathRateOnArrival`
+   * sits beside it. A share has every sector in its denominator, so when the run gets
+   * harder overall, fewer pilots reach sector 3 at all and sector 1's share rises
+   * without sector 1 changing in any way. Read the two columns together: the share
+   * says where the bodies are, the rate says where the cliff is.
    */
   deathShare: number
+  /**
+   * Deaths among the runs that RESOLVED this sector: died / (died + cleared).
+   *
+   * The survivorship-free companion to `deathShare`, and the number a "no difficulty
+   * cliff" criterion should be written against. Unfinished sectors — a run cut off by
+   * the tick cap — are censored out of the denominator rather than counted as
+   * survivals, because a run that was still flying is not evidence either way.
+   *
+   * Its denominator is per-sector, so it does not move when the clear rate moves. A
+   * cliff is a STEP in this column; a hard game is a high column.
+   */
+  deathRateOnArrival: number
 
   medianSeconds: number
   /** Entry state, at the median across every run that arrived. */
@@ -1614,6 +1712,10 @@ function summariseSectors(runs: readonly RunResult[]): SectorReport {
           ? 0
           : observed.filter((s) => s.outcome === 'cleared').length / observed.length,
       deathShare: totalDeaths === 0 ? 0 : died.length / totalDeaths,
+      deathRateOnArrival:
+        died.length + observed.filter((s) => s.outcome === 'cleared').length === 0
+          ? 0
+          : died.length / (died.length + observed.filter((s) => s.outcome === 'cleared').length),
       medianSeconds: percentile(sortedNumbers(observed.map((s) => s.ticks / TICK_HZ)), 0.5),
       medianEntryScrap: percentile(sortedNumbers(observed.map((s) => s.entryScrap)), 0.5),
       medianEntryItems: percentile(sortedNumbers(observed.map((s) => s.entryItems)), 0.5),
@@ -1996,6 +2098,76 @@ const DEATH_SPIKE_MAX = 0.35
 const CLEAR_RATE_BAND = { min: 0.2, max: 0.4 } as const
 /** M5's second exit criterion: hull spread around the mean, in percentage points. */
 const HULL_SPREAD_MAX_PP = 15
+
+/**
+ * Arrivals a sector needs before its conditional death rate is allowed into the cliff
+ * reading. A rate over eleven survivors is not a measurement.
+ */
+const MIN_ARRIVALS_FOR_CLIFF = 20
+
+/**
+ * The proposed replacement for the death-SHARE criterion. Reported; not yet judged.
+ *
+ * WHY A SHARE IS THE WRONG SHAPE. `deathShare` is `deaths here / deaths anywhere`, so
+ * every sector is in every other sector's denominator. Make the run harder overall and
+ * sector 1 keeps a larger fraction of a fixed 100% without sector 1 having changed —
+ * the criterion moves when the CLEAR RATE moves, which the clear-rate criterion is
+ * already measuring one line above it. Two criteria reading the same fact is one
+ * criterion and a false sense of coverage.
+ *
+ * WHAT A CLIFF ACTUALLY IS: a sector that kills a much larger fraction of the pilots
+ * who fly it than its neighbours do. That is a STEP in `deathRateOnArrival`, whose
+ * denominator is per-sector and therefore immune to the clear rate. So the reading is a
+ * ratio — worst sector against the median of the others — and the threshold is a
+ * multiple rather than a share. Sectors below `MIN_ARRIVALS_FOR_CLIFF` arrivals are
+ * excluded and NAMED, because the late run is exactly where the sample thins out and a
+ * cliff reading built on four arrivals is the survivorship problem wearing a new hat.
+ *
+ * Deliberately not wired to a pass/fail verdict yet: swapping a criterion mid-flight is
+ * a balance decision, and this is a measurement pass. `docs/ROADMAP.md` records the
+ * proposed threshold and the numbers behind it.
+ */
+interface CliffReading {
+  /** Sectors with enough arrivals to be read at all. */
+  judged: readonly { index: number; sectorName: string; arrivals: number; rate: number }[]
+  /** Sectors excluded for too few arrivals — the survivorship caveat, named. */
+  excluded: readonly { index: number; sectorName: string; arrivals: number }[]
+  worstIndex: number | null
+  worstSector: string | null
+  worstRate: number | null
+  /** Median conditional death rate of the OTHER judged sectors. The step's baseline. */
+  baselineRate: number | null
+  /** worstRate / baselineRate. The cliff, as a multiple. */
+  ratio: number | null
+}
+
+function readCliff(report: SectorReport): CliffReading {
+  const resolved = report.rows.map((row) => ({
+    index: row.index,
+    sectorName: row.sectorName,
+    arrivals: row.died + row.cleared,
+    rate: row.deathRateOnArrival,
+  }))
+  const judged = resolved.filter((row) => row.arrivals >= MIN_ARRIVALS_FOR_CLIFF)
+  const excluded = resolved
+    .filter((row) => row.arrivals < MIN_ARRIVALS_FOR_CLIFF)
+    .map(({ index, sectorName, arrivals }) => ({ index, sectorName, arrivals }))
+  if (judged.length < 2) {
+    return { judged, excluded, worstIndex: null, worstSector: null, worstRate: null, baselineRate: null, ratio: null }
+  }
+  const worst = judged.reduce((acc, row) => (row.rate > acc.rate ? row : acc))
+  const others = sortedNumbers(judged.filter((row) => row.index !== worst.index).map((r) => r.rate))
+  const baseline = percentile(others, 0.5)
+  return {
+    judged,
+    excluded,
+    worstIndex: worst.index,
+    worstSector: worst.sectorName,
+    worstRate: worst.rate,
+    baselineRate: baseline,
+    ratio: baseline === 0 ? null : worst.rate / baseline,
+  }
+}
 
 /**
  * The per-sector table. THE central output of an M5 sweep.
@@ -2461,7 +2633,29 @@ function printM5ExitCriteria(
       console.log(
         `           sector ${row.index + 1} ${pad(row.sectorName, 18)}${padStart(pct(row.deathShare), 8)} of deaths` +
           `${padStart(pct(row.clearRate), 9)} cleared on arrival` +
+          `${padStart(pct(row.deathRateOnArrival), 8)} died of those who resolved it` +
           `${row.deathShare > DEATH_SPIKE_MAX ? '   SPIKE' : ''}`,
+      )
+    }
+    // The survivorship-free reading, printed beside the criterion it is proposed to
+    // replace so the two can be compared on the same sweep. See `CliffReading`.
+    const cliff = readCliff(cliffSource)
+    if (cliff.ratio === null || cliff.worstSector === null) {
+      console.log(
+        `           (cliff ratio unread: fewer than two sectors reached ${MIN_ARRIVALS_FOR_CLIFF} arrivals)`,
+      )
+    } else {
+      console.log(
+        `           PROPOSED, unjudged — cliff ratio ${cliff.ratio.toFixed(2)}x: sector ` +
+          `${(cliff.worstIndex ?? 0) + 1} ${cliff.worstSector} kills ${pct(cliff.worstRate ?? 0)} of the pilots ` +
+          `who resolve it against a ${pct(cliff.baselineRate ?? 0)} median elsewhere. Unlike the share above, this ` +
+          'does not move when the clear rate moves.',
+      )
+    }
+    if (cliff.excluded.length > 0) {
+      console.log(
+        `           (excluded from the ratio for under ${MIN_ARRIVALS_FOR_CLIFF} arrivals: ` +
+          `${cliff.excluded.map((e) => `sector ${e.index + 1} (${e.arrivals})`).join(', ')})`,
       )
     }
     // Only worth saying when the pool is actually wider than the competent policy.
@@ -2928,6 +3122,10 @@ interface Args {
   routeStyle: RouteStyle | null
   /** Item ids handed to the flown hull at launch. The item ablation switch. */
   give: string[]
+  /** Certification band. `base` is the purist pool and the default. See `PoolBand`. */
+  pool: PoolBand
+  /** Switch shield recovery off. The shield ablation switch. See `withoutRecovery`. */
+  noRecovery: boolean
   help: boolean
 }
 
@@ -2946,6 +3144,8 @@ function parseArgs(argv: readonly string[]): Args {
     hulls: false,
     routeStyle: null,
     give: [],
+    pool: 'base',
+    noRecovery: false,
     help: false,
   }
   for (const raw of argv) {
@@ -2987,6 +3187,13 @@ function parseArgs(argv: readonly string[]): Args {
       case '--route-style':
         if (!isRouteStyle(value)) fail(`--route-style must be one of ${ROUTE_STYLES.join(', ')}`)
         args.routeStyle = value
+        break
+      case '--pool':
+        if (!isPoolBand(value)) fail(`--pool must be one of ${POOL_BANDS.join(', ')}`)
+        args.pool = value
+        break
+      case '--no-recovery':
+        args.noRecovery = true
         break
       case '--runs': {
         const n = Number.parseInt(value, 10)
@@ -3051,6 +3258,12 @@ function printHelp(): void {
                         (${ROUTE_STYLES.join(', ')})
   --give=ID[,ID]        hand the flown hull these items at launch; the item ablation
                         (e.g. --give=repair-nanites against a plain sweep)
+  --pool=BAND           certification band: base (nothing certified, the purist pool,
+                        the default and the band every recorded number came from) or
+                        certified (every certification filed). Only the workOrders
+                        slice reaches the sim — see PoolBand.
+  --no-recovery         switch shield recovery off (shieldReservePerSector to 0); the
+                        shield ablation, the sibling of --give
   --record-fixture=NAME record one run to tests/replays/NAME.json and verify it
                         (always runs with the World default pool — see COVERAGE)
 
@@ -3104,10 +3317,20 @@ function main(argv: readonly string[]): void {
   }
 
   const observations = emptyObservations()
-  const baseContent = withStartingItems(
-    args.singleSector ? SECTOR_ONE_CONTENT : contentForHull(args.hull),
-    args.give,
+  const ablate = (content: RunContent): RunContent =>
+    withPool(args.noRecovery ? withoutRecovery(content) : content, args.pool)
+  const baseContent = ablate(
+    withStartingItems(args.singleSector ? SECTOR_ONE_CONTENT : contentForHull(args.hull), args.give),
   )
+  // `--no-items --single-sector` hands `runOnce` no content at all, so the World
+  // class default flies — which would silently discard every ablation on this line.
+  // An ablation that does nothing and says nothing is worse than a rejected flag.
+  if (args.noItems && args.singleSector && (args.give.length > 0 || args.noRecovery || args.pool !== 'base')) {
+    fail(
+      '--no-items --single-sector runs the World class default, which would discard ' +
+        '--give / --no-recovery / --pool. Drop one of them.',
+    )
+  }
   const content = args.noItems
     ? args.singleSector
       ? undefined
@@ -3152,7 +3375,7 @@ function main(argv: readonly string[]): void {
         hull === undefined
           ? (args.singleSector ? SECTOR_ONE_CONTENT : RUN_CONTENT)
           : { ...(args.singleSector ? SECTOR_ONE_CONTENT : RUN_CONTENT), hull }
-      const given = withStartingItems(withHull, args.give)
+      const given = ablate(withStartingItems(withHull, args.give))
       const hullContent = args.noItems ? { ...given, items: {}, interactions: [] } : given
       const runs: RunResult[] = []
       for (let i = 0; i < args.runs; i++) {
@@ -3208,6 +3431,12 @@ function main(argv: readonly string[]): void {
   }
 
   const aggregateSectors = summariseSectors(allRuns)
+  // The same source the printed cliff verdict reads, so the JSON cannot disagree with
+  // the table above it. See `worstDeathShare`.
+  const competentSectors = summaries.find((s) => s.policy === COMPETENT_POLICY)
+  const cliffSectors = competentSectors?.sectors ?? summaries[0]?.sectors ?? aggregateSectors
+  const cliffSectorsLabel =
+    competentSectors?.policy ?? summaries[0]?.policy ?? 'all policies pooled'
   const choiceHealth = summariseChoiceHealth(allRuns)
 
   const timing = {
@@ -3237,6 +3466,10 @@ function main(argv: readonly string[]): void {
         hullsSwept: hullRows.map((row) => row.hullId),
         routeStyleOverride: args.routeStyle,
         startingItemsGiven: args.give,
+        /** Certification band. `base` is the purist pool — see `PoolBand`. */
+        pool: args.pool,
+        workOrderPool: poolWorkOrders(args.pool),
+        shieldRecovery: args.noRecovery ? 'off' : 'on',
       },
       timing,
       policies: summaries,
@@ -3252,10 +3485,29 @@ function main(argv: readonly string[]): void {
         hullSpreadMaxPp: HULL_SPREAD_MAX_PP,
         hullMeanClearRate: hullRows.length === 0 ? null : mean(hullRows.map((h) => h.clearRate)),
         deathSpikeMax: DEATH_SPIKE_MAX,
-        worstDeathShare:
+        /**
+         * Read off the COMPETENT POLICY, which is what the printed verdict has always
+         * done and what this field did not.
+         *
+         * It used to be `Math.max` over the POOLED rows, so the JSON and the stdout
+         * report disagreed about the same criterion on the same sweep: stdout said 35%
+         * off `aggressor` while the JSON said 0.81 off a pool containing three probes
+         * that are DESIGNED to die in sector one (`random` and the two controls). Every
+         * caller that parsed `--json` — which is every caller that automates this — was
+         * reading a fact about the instruments. Kept beside it as
+         * `worstDeathSharePooled` rather than dropped, because the pooled figure is
+         * still the right thing to look at when asking whether a probe is behaving.
+         */
+        worstDeathShare: cliffSectors.rows.length === 0
+          ? null
+          : Math.max(...cliffSectors.rows.map((row) => row.deathShare)),
+        worstDeathShareSource: cliffSectorsLabel,
+        worstDeathSharePooled:
           aggregateSectors.rows.length === 0
             ? null
             : Math.max(...aggregateSectors.rows.map((row) => row.deathShare)),
+        /** The proposed survivorship-free replacement. Reported, not yet judged. */
+        cliff: readCliff(cliffSectors),
         assumedDps: SECTOR_PLAYER_DPS,
         measuredCeilingDps: aggregateSectors.rows.map((row) => Math.round(row.medianEntryCeilingDps)),
         measuredBossDps: aggregateSectors.rows.map((row) => Math.round(row.bossDpsMedian)),
@@ -3296,6 +3548,12 @@ function main(argv: readonly string[]): void {
           'stacking',
           'work-order outcomes (the sim applies none)',
           'the item path under replay (fixtures record with an empty pool)',
+          'the certified band beyond its work-order slice: --pool=certified changes the only ' +
+            'slice that reaches the sim, and the items/enemies slices are not pool-gated at all ' +
+            '(ROADMAP D6), so "certified" here is narrower than the word suggests',
+          'effect trigger counts: no report says how often repairOnKill or retaliate actually ' +
+            'fired, so an item suppressed to zero triggers looks the same as a weak one. ' +
+            'Only the replay corpus checks this, and only for the probe hull',
         ],
       },
     }
@@ -3316,7 +3574,15 @@ function main(argv: readonly string[]): void {
     `          run ${args.singleSector ? 'sector one alone' : `${STANDARD_RUN.name} (${STANDARD_RUN.stages.length} sectors)`}  ` +
       `hull ${args.hull ?? 'lien'}${hullRows.length > 0 ? ` (+ ${hullRows.length}-hull sweep)` : ''}  ` +
       `routes ${args.routeStyle ?? 'per policy'}` +
-      `${args.give.length === 0 ? '' : `  GIVEN ${args.give.join(', ')} at launch`}`,
+      `${args.give.length === 0 ? '' : `  GIVEN ${args.give.join(', ')} at launch`}` +
+      `${args.noRecovery ? '  SHIELD RECOVERY OFF' : ''}`,
+  )
+  // Stated on every sweep, not only the unusual one: the band the numbers came from is
+  // the thing D5 found nobody could tell from the report.
+  console.log(
+    `          pool ${args.pool} (${poolWorkOrders(args.pool).length} work orders: ` +
+      `${poolWorkOrders(args.pool).join(', ')})` +
+      `${args.pool === 'base' ? ' — nothing certified, the purist band the exit criteria are written against' : ' — every certification filed'}`,
   )
   console.log('')
   printTable(summaries)

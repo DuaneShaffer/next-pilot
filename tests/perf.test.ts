@@ -5,8 +5,11 @@ import { getEnemy } from '../src/content/enemies'
 import { BOTS } from '../src/sim/bots'
 import { createEnemy } from '../src/sim/enemies'
 import { MAX_ENEMY_BULLETS, MAX_PLAYER_BULLETS } from '../src/sim/projectiles'
+import { STATS } from '../src/sim/stats'
 import { World } from '../src/sim/world'
 import type { InputSnapshot } from '../src/core/input'
+import type { WorldView } from '../src/sim/entities'
+import { drawPanel, type PanelState } from '../src/render/panel'
 
 /**
  * Performance budgets, asserted.
@@ -596,5 +599,126 @@ describe('playfield assumptions the benchmark relies on', () => {
     expect(Playfield.h).toBe(PLAYFIELD_H)
     expect(PLAYFIELD_W).toBeGreaterThan(100)
     expect(PLAYFIELD_H).toBeGreaterThan(100)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// what the instrument panel costs per frame
+// ---------------------------------------------------------------------------
+
+/**
+ * A canvas that counts operations instead of performing them.
+ *
+ * WALL CLOCK IS DELIBERATELY NOT MEASURED HERE, for the reason this file's header
+ * gives for the frame budget as a whole: a headless timing of a stub context is a
+ * timing of the stub. What a stub CAN state honestly is how much work the renderer
+ * asks the GPU to do, and that is the number a per-frame regression moves. An effect
+ * that draws one rect per shield point instead of one per segment is invisible to a
+ * timer on a no-op context and obvious here.
+ */
+function countingCanvas(): { ctx: CanvasRenderingContext2D; ops: () => number } {
+  let ops = 0
+  const state: Record<string, unknown> = {
+    fillStyle: '#000',
+    strokeStyle: '#000',
+    globalAlpha: 1,
+    lineWidth: 1,
+    font: '',
+    textAlign: 'left',
+    textBaseline: 'alphabetic',
+    globalCompositeOperation: 'source-over',
+  }
+  const target: Record<string, unknown> = {
+    measureText: (text: string) => ({ width: String(text).length * 7 }),
+    createLinearGradient: () => ({ addColorStop: (): void => {} }),
+    createRadialGradient: () => ({ addColorStop: (): void => {} }),
+  }
+  for (const name of [
+    'fillRect',
+    'strokeRect',
+    'beginPath',
+    'moveTo',
+    'lineTo',
+    'closePath',
+    'fill',
+    'stroke',
+    'save',
+    'restore',
+    'arc',
+    'rect',
+    'clip',
+    'translate',
+    'rotate',
+    'scale',
+    'drawImage',
+    'fillText',
+    'strokeText',
+  ]) {
+    target[name] = (): void => {
+      ops++
+    }
+  }
+  for (const key of Object.keys(state)) {
+    Object.defineProperty(target, key, {
+      get: () => state[key],
+      set: (value: unknown) => {
+        state[key] = value
+      },
+    })
+  }
+  return { ctx: target as unknown as CanvasRenderingContext2D, ops: () => ops }
+}
+
+const PANEL_STATE: PanelState = {
+  pilotNumber: 12,
+  hullName: 'Lien',
+  weaponName: 'Twin Pulse',
+  fireRate: 6.4,
+  waveCount: 9,
+}
+
+function panelOps(view: WorldView): number {
+  const { ctx, ops } = countingCanvas()
+  drawPanel(ctx, view, PANEL_STATE)
+  return ops()
+}
+
+describe('the instrument panel draws a bounded amount per frame', () => {
+  /** A real run, so the budget is against the panel the game actually draws. */
+  function liveWorld(): World {
+    const world = new World('PERF-SEED')
+    for (let i = 0; i < 600; i++) world.tick(IDLE)
+    return world
+  }
+
+  it('holds a ceiling on the whole column', () => {
+    const world = liveWorld()
+    const ops = panelOps(world)
+    expect(ops).toBeGreaterThan(0)
+    // Measured at 149 ops for a quiet live panel — tracked labels draw per glyph, so
+    // most of that is text. The ceiling has room for the boss, hazard and build
+    // blocks the flexible region adds, and is still far under what an effect scaled
+    // by a RESOURCE rather than by the fixed geometry of the column would produce:
+    // the shield reserve alone would be 400 fills a frame drawn per point.
+    expect(ops).toBeLessThan(300)
+  })
+
+  it('does not scale the shield readout with the size of the reserve', () => {
+    // The reserve is capped at 400 points and drawn as ghost segments inside the
+    // shield meter — one rect per SEGMENT. Drawn per point it would be 400 fills a
+    // frame, in the middle of a bullet-hell frame, and no test in this repo would
+    // have said so.
+    const small = liveWorld()
+    small.hull.shield = 5
+    small.hull.shieldReserve = 1
+    small.hull.shieldRegenBlockedTicks = 0
+    const huge = liveWorld()
+    huge.hull.shield = 5
+    huge.hull.shieldReserve = STATS.shieldReservePerSector.max
+    huge.hull.shieldRegenBlockedTicks = 0
+
+    const delta = panelOps(huge) - panelOps(small)
+    // At most the meter's own segment count, whatever the reserve holds.
+    expect(delta).toBeLessThanOrEqual(16)
   })
 })

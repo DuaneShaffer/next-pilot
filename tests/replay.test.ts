@@ -19,6 +19,7 @@ import type { BotName } from '../src/sim/bots'
 import { BOTS, BOT_NAMES } from '../src/sim/bots'
 import { World } from '../src/sim/world'
 import { HULLS } from '../src/content/hulls'
+import { CERTIFICATION_IDS, MAX_CERTIFICATION_MASK_BYTES } from '../src/meta/certifications'
 import {
   EFFECT_ITEM_IDS,
   PROBE_HULL,
@@ -413,6 +414,25 @@ function localBase64Url(bytes: readonly number[]): string {
   return out
 }
 
+/**
+ * The certification mask, computed independently of `packCertifications`.
+ *
+ * Same reasoning as `localBase64Url`: reaching into the module under test would make
+ * these forgeries agree with it whenever it is self-consistent, including when it is
+ * self-consistently wrong. The bit assignment is `CERTIFICATION_IDS` order, which is
+ * pinned id by id in tests/certifications.test.ts.
+ */
+function localCertificationMask(ids: readonly string[]): readonly number[] {
+  const bytes: number[] = []
+  for (const id of ids) {
+    const index = CERTIFICATION_IDS.indexOf(id)
+    if (index < 0) continue
+    while (bytes.length <= index >> 3) bytes.push(0)
+    bytes[index >> 3] = (bytes[index >> 3] ?? 0) | (1 << (index & 7))
+  }
+  return bytes
+}
+
 function localChecksum(bytes: readonly number[]): number {
   let h = 0x811c9dc5 | 0
   for (const byte of bytes) h = Math.imul(h ^ byte, 16777619)
@@ -430,6 +450,12 @@ function forgeReplay(options: {
   hullId?: string
   /** Overrides the hull length byte without changing the bytes that follow it. */
   hullLength?: number
+  /** Certification ids. Defaults to none — "this run drew from the base pool". */
+  certifications?: readonly string[]
+  /** Raw mask bytes, for forging a mask this build's roster cannot name. */
+  certificationMask?: readonly number[]
+  /** Overrides the mask length byte without changing the bytes that follow it. */
+  certificationLength?: number
   tickCount?: number
   runs?: ReadonlyArray<[number, number]>
   breakChecksum?: boolean
@@ -451,6 +477,12 @@ function forgeReplay(options: {
   // so a zero here is a complete and legal field rather than an absent one.
   bytes.push(options.hullLength ?? hullId.length)
   for (let i = 0; i < hullId.length; i++) bytes.push(hullId.charCodeAt(i))
+  // The certified pool, added at format 5. A length byte then that many mask bytes,
+  // so a zero is "the base pool" — a complete field rather than an absent one, which
+  // is the distinction that made format 4 unreadable rather than assumed-empty.
+  const mask = options.certificationMask ?? [...localCertificationMask(options.certifications ?? [])]
+  bytes.push(options.certificationLength ?? mask.length)
+  bytes.push(...mask)
   const varint = (value: number): void => {
     let v = value
     while (v >= 0x80) {
@@ -602,6 +634,28 @@ describe('replay corruption is rejected, never guessed at', () => {
     expect(() => decodeReplay('AAAA')).toThrow(/too-short/)
   })
 
+  it('knows how long a header is, to the byte', () => {
+    /**
+     * THE BOUNDARY, because `HEADER_MIN_BYTES` is otherwise unfalsifiable.
+     *
+     * Every field read past it is separately bounds-checked, so a header size that is
+     * a byte short costs nothing observable — which is exactly why it drifts. It went
+     * one byte short when the hull length byte landed at format 3, and it would have
+     * again with the certification mask byte at format 5.
+     *
+     * The smallest legal replay is magic(3) + format(1) + sim(1) + seed length(1) +
+     * one seed byte + hull length(1) + mask length(1) + a one-byte tick varint +
+     * checksum(4) = 14 bytes. One byte less has to report `too-short` rather than
+     * getting far enough in to blame the checksum.
+     */
+    const smallest = Buffer.from(forgeReplay({ seed: 'A', runs: [] }), 'base64url')
+    expect(smallest.length).toBe(14)
+    expect(() => decodeReplay(smallest.toString('base64url'))).not.toThrow()
+    expect(() =>
+      decodeReplay(smallest.subarray(0, smallest.length - 1).toString('base64url')),
+    ).toThrow(/too-short/)
+  })
+
   it('rejects a broken checksum', () => {
     expect(() => decodeReplay(forgeReplay({ breakChecksum: true }))).toThrow(/checksum-mismatch/)
   })
@@ -669,6 +723,7 @@ describe('replay format versioning', () => {
       version: 99,
       simVersion: SIM_VERSION,
       hullId: '',
+      certifications: [],
       seed: 'ABCD',
       inputs: new Uint8Array([0b0101]),
     }
@@ -871,6 +926,238 @@ describe('the hull is part of the recorded run', () => {
 
     const named = decodeReplay(recordOf2('ABCD', 'collateral', [NEUTRAL_INPUT]).encode())
     expect(() => playback(named, (seed) => new InputLogWorld(seed))).not.toThrow()
+  })
+})
+
+/**
+ * THE CERTIFIED POOL IS PART OF THE RECORDED RUN (format 5).
+ *
+ * The promise a replay makes is `seed + hull + pool + one byte per tick`, and only
+ * three of those were written down. The pool reaches the simulation — `World` is handed
+ * `poolFor(...).workOrders`, which decides what the wave-17 card offers and how far the
+ * cursor may travel — so a certified pilot's link decoded perfectly on a viewer with a
+ * different unlock set and played back a different run under the original's name.
+ *
+ * Same failure class as `hullId` one layer up, same remedy, same version bump.
+ */
+describe('the certified pool is part of the recorded run', () => {
+  const TWO = ['vault-clearance', 'austerity-endorsement']
+
+  /** As `recordOf2`, with the certifications the run drew from — the format-5 field. */
+  function recordOf3(
+    seed: string,
+    hullId: string,
+    certifications: readonly string[],
+    inputs: readonly InputSnapshot[],
+  ): ReplayRecorder {
+    const recorder = new ReplayRecorder(seed, hullId, certifications)
+    for (const input of inputs) recorder.record(input)
+    return recorder
+  }
+
+  /** A world that knows which certifications built its pool. */
+  class PooledWorld extends InputLogWorld {
+    constructor(
+      seed: string,
+      readonly certifications: readonly string[],
+    ) {
+      super(seed)
+    }
+  }
+
+  it('round-trips the certifications a run drew from', () => {
+    const decoded = decodeReplay(recordOf3('K7F29XQM3RTV', 'lien', TWO, randomInputs('P00L12345678', 200)).encode())
+    expect(decoded.certifications).toEqual(TWO)
+    expect(decoded.hullId).toBe('lien')
+    expect(decoded.inputs.length).toBe(200)
+  })
+
+  it('round-trips the base pool as base, never as unknown', () => {
+    // "This run used no grants" is a POSITIVE STATEMENT and it has to survive, the same
+    // way an empty hull id means "no hull was chosen". It is also what every purist run
+    // and every sim-test recording writes.
+    expect(decodeReplay(new ReplayRecorder('ABCD').encode()).certifications).toEqual([])
+    expect(new ReplayRecorder('ABCD').certifications).toEqual([])
+    expect(decodeReplay(recordOf3('ABCD', '', [], [NEUTRAL_INPUT]).encode()).certifications).toEqual([])
+  })
+
+  it('round-trips the whole roster', () => {
+    const decoded = decodeReplay(recordOf3('ABCD', '', CERTIFICATION_IDS, [NEUTRAL_INPUT]).encode())
+    expect(decoded.certifications).toEqual([...CERTIFICATION_IDS])
+  })
+
+  it('costs almost nothing in a link', () => {
+    // The field is measured against a 2,000-character URL budget. Ten certifications
+    // are two mask bytes; none is one length byte.
+    const bare = new ReplayRecorder('ABCD', 'lien').encode().length
+    const full = new ReplayRecorder('ABCD', 'lien', CERTIFICATION_IDS).encode().length
+    expect(full - bare).toBeLessThanOrEqual(4)
+  })
+
+  it('refuses to record a certification this build cannot name', () => {
+    // A replay that goes out naming a pool it did not fly is a worse version of the
+    // bug the field closes, so the refusal is on the way OUT as well as the way in.
+    const bad = new ReplayRecorder('ABCD', '', ['not-a-certification'])
+    bad.record(NEUTRAL_INPUT)
+    expect(() => bad.encode()).toThrow(/bad-pool/)
+    expect(() => bad.encode()).toThrow(/not-a-certification/)
+  })
+
+  it('refuses a mask naming a certification this build does not have', () => {
+    // A replay from a build with an eleventh certification. The mask is positional, so
+    // this build cannot name the grant and cannot rebuild the pool — decoding it as
+    // "everything I recognise" would play a different run and call it the same one.
+    const beyond = CERTIFICATION_IDS.length
+    const mask: number[] = []
+    while (mask.length <= beyond >> 3) mask.push(0)
+    mask[beyond >> 3] = 1 << (beyond & 7)
+    expect(() => decodeReplay(forgeReplay({ certificationMask: mask }))).toThrow(/bad-pool/)
+  })
+
+  it('refuses a mask length that overruns the payload, at the length itself', () => {
+    // The MESSAGE is asserted, not just the reason. Without the bound these lengths
+    // still fail — they read the tick count as mask bytes and trip the unknown-bit
+    // refusal — so a test that only checks `bad-pool` passes with the bound deleted,
+    // and the bound is what stops a hostile length field driving the read at all.
+    expect(() => decodeReplay(forgeReplay({ certificationLength: 200 }))).toThrow(
+      /mask length 200 out of range/,
+    )
+    expect(() => decodeReplay(forgeReplay({ certificationLength: 6 }))).toThrow(
+      /mask length 6 out of range/,
+    )
+  })
+
+  it('refuses a mask past the cap even when it fits inside the payload', () => {
+    // Nine zero bytes: no unknown bit is set and nothing overruns, so the CAP is the
+    // only thing that can refuse this. Without a case like it, deleting the cap and
+    // keeping the overrun check passes every other test here.
+    const zeros = new Array<number>(MAX_CERTIFICATION_MASK_BYTES + 1).fill(0)
+    expect(() => decodeReplay(forgeReplay({ certificationMask: zeros }))).toThrow(
+      new RegExp(`mask length ${zeros.length} out of range`),
+    )
+  })
+
+  it('says the pool is wrong, not that the seed or the hull is', () => {
+    try {
+      decodeReplay(forgeReplay({ certificationLength: 200 }))
+      throw new Error('expected a rejection')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ReplayError)
+      expect((error as ReplayError).reason).toBe('bad-pool')
+      expect((error as ReplayError).message).toContain('certification')
+    }
+  })
+
+  it('changes the payload, so a mangled pool fails the checksum', () => {
+    // Inside the checksummed body, like the hull id. A pool altered in transit has to
+    // be caught by the same mechanism that catches an altered input log — otherwise
+    // the one field that says which run this is could be edited in a chat client.
+    const withPool = recordOf3('K7F29XQM3RTV', 'lien', TWO, randomInputs('CKSUMP00L123', 100)).encode()
+    expect(withPool).not.toBe(
+      recordOf3('K7F29XQM3RTV', 'lien', [], randomInputs('CKSUMP00L123', 100)).encode(),
+    )
+    // The mask sits just past the seed and hull, so these characters cover it.
+    let checked = 0
+    for (let index = 18; index < 26; index++) {
+      const original = withPool.charAt(index)
+      const mangled = withPool.slice(0, index) + (original === 'A' ? 'B' : 'A') + withPool.slice(index + 1)
+      if (mangled === withPool) continue
+      checked++
+      expect(() => decodeReplay(mangled), `index ${index}`).toThrow(ReplayError)
+    }
+    expect(checked).toBeGreaterThan(0)
+  })
+
+  it('refuses a format-4 replay rather than assuming it flew the base pool', () => {
+    // Every replay shared before this field existed was recorded by a build that used
+    // the player's certified pool and never said so. Reading those as base-pool runs is
+    // exactly the confident-and-wrong reading the version byte exists to prevent —
+    // which is why this is a FORMAT bump and every old link is now refused.
+    expect(() => decodeReplay(forgeReplay({ version: 4 }))).toThrow(/version-mismatch/)
+  })
+
+  /**
+   * THE FACT THAT JUSTIFIES THE FIELD EXISTING, measured rather than assumed.
+   *
+   * Two `World`s, one seed, one input log, two pools. Deliberately not through
+   * `playback`, so it cannot be satisfied by the guard `playback` performs.
+   *
+   * WHAT IT ALSO MEASURES, and this is the uncomfortable half: the divergence is
+   * TRANSIENT today. The work-order card is the only place the pool reaches the sim,
+   * and confirming a work order applies nothing, so the two runs re-converge the tick
+   * the card closes and their FINAL hashes are identical. That is why this compares the
+   * state while the card is open. It is a real divergence — different options on
+   * screen, a different hashed state, a different cursor range — and it becomes a
+   * permanent one the day a work order does something, which is the day it would
+   * otherwise be discovered by a player whose shared link did not reproduce.
+   */
+  it('a run flown with the wrong pool is a different run', () => {
+    const inputs = randomInputs('D1VERGEP00L1', 12_000, 3)
+    const trace = (workOrders: readonly string[]): string => {
+      const world = new World('K7F29XQM3RTV', { items: {}, interactions: [], workOrders })
+      const marks: string[] = []
+      for (const input of inputs) {
+        if (world.runState !== 'active') break
+        world.tick(input)
+        if (world.pendingChoice?.kind === 'work-order') marks.push(hashWorld(world))
+      }
+      return marks.join('|')
+    }
+    const base = trace(['supply', 'hazard', 'repair'])
+    const certified = trace(['supply', 'hazard', 'repair', 'vault', 'unlisted'])
+    expect(base.length, 'the input log never reached the work-order card').toBeGreaterThan(0)
+    expect(certified).not.toBe(base)
+  })
+
+  it('refuses to play a replay against a pool the caller substituted', () => {
+    const replay = decodeReplay(recordOf3('K7F29XQM3RTV', '', TWO, randomInputs('GUARDP00L123', 120)).encode())
+
+    let thrown: unknown = null
+    try {
+      playback(replay, (seed) => new PooledWorld(seed, []))
+    } catch (error) {
+      thrown = error
+    }
+    expect(thrown).toBeInstanceOf(ReplayError)
+    expect((thrown as ReplayError).reason).toBe('bad-pool')
+    // Both sides in the message, or the reader cannot tell which is wrong — the link,
+    // or the code that opened it.
+    const message = (thrown as ReplayError).message
+    expect(message).toContain('vault-clearance')
+    expect(message).toContain('base pool')
+  })
+
+  it('refuses the other direction too — a viewer\'s pool is not the recording\'s', () => {
+    // The case that actually ships: a base-pool run opened by a certified pilot.
+    const replay = decodeReplay(recordOf3('ABCD', '', [], [NEUTRAL_INPUT]).encode())
+    expect(() => playback(replay, (seed) => new PooledWorld(seed, TWO))).toThrow(/bad-pool/)
+  })
+
+  it('hands the factory the pool the replay names', () => {
+    const replay = decodeReplay(recordOf3('ABCD', 'lien', TWO, [NEUTRAL_INPUT]).encode())
+    let handed: readonly string[] | null = null
+    playback(replay, (seed, _hullId, certifications) => {
+      handed = certifications
+      return new PooledWorld(seed, certifications)
+    })
+    expect(handed).toEqual(TWO)
+  })
+
+  it('compares pools as sets, not as sequences', () => {
+    // A world reporting the ids it was configured with has no reason to know roster
+    // order, and refusing a correct playback over the order of two equal lists is the
+    // mistake the hull guard made when it compared an id to a display name.
+    const replay = decodeReplay(recordOf3('ABCD', '', TWO, [NEUTRAL_INPUT]).encode())
+    expect(() => playback(replay, (seed) => new PooledWorld(seed, [...TWO].reverse()))).not.toThrow()
+  })
+
+  it('says nothing when the world does not know its pool', () => {
+    // `World` reports no pool — nothing on `WorldView` names where its `workOrders`
+    // came from — so a raw World must still replay. The guard is skipped, exactly as
+    // the hull guard is for a world with no `hullName`, and the residual hole is
+    // written down on `TickableWorld.certifications` rather than papered over.
+    const replay = decodeReplay(recordOf3('ABCD', '', TWO, [NEUTRAL_INPUT]).encode())
+    expect(() => playback(replay, (seed) => new World(seed))).not.toThrow()
   })
 })
 
@@ -1178,6 +1465,16 @@ describe('recorded run regression', () => {
     expect(digest.hash).toBe(fixture.expected.hash)
   })
 
+  it.each(fixtures)('$file was recorded on the base pool', (fixture) => {
+    // `--record-fixture` builds `new World(seed)` with `workOrders` unset, so every
+    // fixture is a base-pool run. Asserted rather than assumed, because it is what
+    // `upgradeFixturePayload` relies on to be allowed to write an empty mask, and
+    // because a fixture recorded against a certified pool would reproduce here and
+    // then fail for anyone rebuilding it with `new World(seed)`.
+    expect(decodeReplay(fixture.replay).certifications).toEqual([])
+  })
+
+  
   it.each(fixtures)('$file is stamped with this simulation version', (fixture) => {
     // A fixture carrying an older sim version is asserting a hash that the current
     // rules did not produce. Re-recording has to re-stamp, or the corpus quietly

@@ -42,39 +42,56 @@
  * fitted at all. One sortie cannot serve two of those, which is what makes them
  * reasons to fly differently.
  *
- * ## Most of these grant content that has not shipped yet, and say so
+ * ## Some of these grant content that has not shipped yet, and say so
  *
  * `docs/DESIGN.md` lists what certifications add — hulls, item families, enemy
- * types, boss variants, work-order types. Eight of the ten below carry a non-null
+ * types, boss variants, work-order types. Four of the ten below carry a non-null
  * `awaiting` naming exactly what they are waiting on, the hangar prints it, and a
  * test enforces that a grant is either live *or* declares itself pending. This is
  * the same call `src/ui/choiceScreen.ts` made with `WORK_ORDER_NOTICE`: a control
  * that silently does nothing is worse than a missing one, so it is labelled instead
  * of implied.
  *
- * The two live ones are real today: `WORK_ORDERS` already defines `vault` and
- * `unlisted` with authored copy, and `World` draws its work-order kinds from
- * `RunContent.workOrders`, which the app fills from `poolFor(...)`.
+ * The six live ones are real today: `WORK_ORDERS` defines `vault` and `unlisted`
+ * and `World` draws its work-order kinds from `RunContent.workOrders`; `HULLS`
+ * defines all four granted hulls and `src/ui/hullSelect.ts` offers them out of
+ * `poolFor(...).hulls`. Both slices are filled by the app from the pool.
  *
- * ## "PENDING" NOW MEANS TWO DIFFERENT THINGS, AND THE COPY HAS TO SAY WHICH
+ * ## "PENDING" MEANS TWO DIFFERENT THINGS, AND THE COPY HAS TO SAY WHICH
  *
- * M5 shipped most of the content these grants name — five hulls, five bosses with
- * variants, five hazards — so a grant can now be pending for a second reason: the
- * content exists and *the run does not draw that slice from the pool*.
+ * A grant can be pending because the content is unwritten, or because the content
+ * ships and *the run does not draw that slice from the pool*. Which slices the run
+ * draws from is the fact that decides it, and `tests/certifications.test.ts` derives
+ * that fact from the source rather than from a hand-maintained list:
  *
- *   - `workOrders` is drawn from the pool. A grant there takes effect.
- *   - `hulls` reaches `poolFor(...).hulls`, but the app issues `pool.hulls[0]`,
- *     which is always the Lien because the base pool is always first. There is no
- *     hull selection screen yet, so a granted hull enters the pool and is never
- *     issued. Every hull grant below says so.
+ *   - `workOrders` is drawn from the pool (`main.ts` → `RunContent.workOrders`).
+ *     A grant there takes effect.
+ *   - `hulls` is drawn from the pool (`main.ts` → `offerHulls`, the hull-selection
+ *     screen). A grant there takes effect. THIS CHANGED WITH `src/ui/hullSelect.ts`:
+ *     the app used to issue `pool.hulls[0]`, always the Lien, and every hull grant
+ *     below carried `awaiting: 'a hull selection screen'`. That screen exists, so
+ *     that copy came off — a hangar still printing it would be telling a pilot an
+ *     earned hull cannot be flown when it can.
  *   - `bossVariants` and `hazards` are not consulted at all: `pickVariant` reads
  *     `BossDef.variants` directly and hazards are armed from the stage definition.
  *   - `items` and `enemies` are handed to the sim as whole tables, not as pools.
  *
- * Naming the real blocker matters more than it looks. "Content pending: the hull
- * roster" was true in M4 and is now false — the roster shipped — and a hangar that
- * keeps saying it is a hangar that has started lying about a reward that has
- * arrived but cannot be flown.
+ * ## AN `items` OR `enemies` GRANT CANNOT BE LIVE, AND NOT ONLY BECAUSE OF THAT
+ *
+ * `BASE_POOL.items` is `Object.keys(ITEMS)` and `BASE_POOL.enemies` is
+ * `Object.keys(ENEMIES)` — derived from the tables, deliberately, so a new item can
+ * never silently drop out of the base pool (see `BASE_POOL`'s own note). The
+ * consequence is a closed loop: an id that does not exist in the table resolves to
+ * nothing, and the moment it *does* exist it joins the base pool, at which point the
+ * grant adds nothing that was not already there. So authoring the four items and
+ * three enemies these grants name is necessary but not sufficient — the base-pool
+ * derivation has to change too, or those certifications become no-ops.
+ *
+ * That is recorded per-id in `GRANTS_AWAITING_CONTENT` below rather than in prose,
+ * for the reason `HULLS_AWAITING_MECHANICS` and `HAZARDS_AWAITING_MECHANICS` are
+ * data: a gap nobody can grep for becomes folklore. A grant may name an id no table
+ * answers to *only* if it is registered there, and `tests/certifications.test.ts`
+ * fails naming the id otherwise.
  */
 
 import { ENEMIES } from './enemies'
@@ -111,6 +128,86 @@ export interface PoolGrant {
   readonly slice: PoolSlice
   readonly id: string
 }
+
+/**
+ * Granted ids that no content table answers to yet, and what each is waiting on.
+ *
+ * THE SAME DEVICE AS `HULLS_AWAITING_MECHANICS` AND `HAZARDS_AWAITING_MECHANICS`,
+ * and it exists for the same reason: a dangling reference survives a typecheck.
+ * `poolFor` pushes whatever a grant names into the run pool without looking it up,
+ * `fingerprintPool` then hashes it into the pilot's record, and the only thing
+ * standing between that and a thrown `getEnemy` is that nothing consumes the slice
+ * yet. `writ` was exactly this shape — granted, absent from `HULLS`, masked by a
+ * second defect — and it was found by reading, not by a test.
+ *
+ * So the rule is: **a grant may name an id no table answers to only if it is
+ * registered here with a reason.** `tests/certifications.test.ts` enforces it in
+ * both directions — an unregistered dangling id fails naming the id, and an entry
+ * here whose content has since shipped fails too, so authoring the content forces
+ * the entry out rather than leaving a stale note behind.
+ *
+ * Every entry below is one id, and none of them is only waiting on authoring: see
+ * the closed loop in this file's header. They are scheduled in `docs/ROADMAP.md`
+ * rather than abandoned, which is why they are recorded instead of deleted — the
+ * three certifications that carry them grant nothing else, and a certification that
+ * grants nothing is a congratulation.
+ */
+export const GRANTS_AWAITING_CONTENT: readonly {
+  readonly slice: PoolSlice
+  readonly id: string
+  readonly needs: string
+}[] = [
+  {
+    slice: 'enemies',
+    id: 'tally-turret',
+    needs:
+      'An enemy definition in enemies.ts, plus a base-pool change. Sector 2 escort ' +
+      'behaviour — a turret that tracks a lane rather than holding a point — has no ' +
+      'MovementKind that both stays on a lane and advances with the convoy. And because ' +
+      'BASE_POOL.enemies is Object.keys(ENEMIES), writing the definition alone converts ' +
+      'this grant from dangling to redundant rather than making it live.',
+  },
+  {
+    slice: 'enemies',
+    id: 'tally-escort',
+    needs:
+      'The other half of the Tally convoy pair, with the same two blockers as ' +
+      'tally-turret: no lane-escorting MovementKind, and BASE_POOL.enemies is derived ' +
+      'from the table so authoring it would make the grant a no-op.',
+  },
+  {
+    slice: 'items',
+    id: 'drone-uplink',
+    needs:
+      'Drone entities: a persistent friendly entity with its own weapon, inheriting the ' +
+      'player weapon stats. Nothing in the sim spawns a friendly and the `drone` item tag ' +
+      'exists unread — the same blocker HULLS_AWAITING_MECHANICS records for Escrow. Plus ' +
+      'the BASE_POOL.items derivation, which makes any authored item base content.',
+  },
+  {
+    slice: 'items',
+    id: 'mirror-mount',
+    needs:
+      'The second drone item. Same blockers as drone-uplink: no friendly entity in the ' +
+      'sim, and BASE_POOL.items is derived from ITEMS so authoring it would put it in ' +
+      'the base pool and make this grant add nothing.',
+  },
+  {
+    slice: 'items',
+    id: 'ranging-computer',
+    needs:
+      'A sighting item family: something that trades rate of fire for placement needs an ' +
+      'EffectKind that reads aim or distance, and no effect in the table sees either. ' +
+      'Plus the BASE_POOL.items derivation.',
+  },
+  {
+    slice: 'items',
+    id: 'precision-sights',
+    needs:
+      'The second sighting item, blocked on the same missing aim-aware EffectKind and the ' +
+      'same BASE_POOL.items derivation as ranging-computer.',
+  },
+]
 
 /**
  * What a run has to do to file a certification.
@@ -168,9 +265,10 @@ export interface CertificationDef {
    * Content this certification is waiting on, or null when everything it adds is
    * live. Printed verbatim in the hangar.
    *
-   * Exists so the screen can be honest rather than encouraging. Eight of ten
-   * grants below point at M5 content; a hangar that showed them as finished would
-   * be advertising a reward that does not arrive.
+   * Exists so the screen can be honest rather than encouraging, and it has to move
+   * in BOTH directions. Four of ten below are still pending; the other six are live
+   * and say nothing, because a hangar that keeps a "content pending" marker on a
+   * reward that now arrives is lying just as loudly as one that hides a gap.
    */
   readonly awaiting: string | null
 }
@@ -301,7 +399,10 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
       // Absolute, not '30 less': the other two hull cards state effective health
       // outright, and a delta only helps a player who already knows the 140 baseline.
       'Adds the Arrears hull: +42 speed, 320 cr of scrap, 110 effective health.',
-    awaiting: 'a hull selection screen',
+    // LIVE. `src/ui/hullSelect.ts` offers out of `poolFor(...).hulls`, so filing this
+    // puts Arrears on the selection card of the next sortie. This used to read
+    // 'a hull selection screen' and kept reading it after the screen shipped.
+    awaiting: null,
   },
 
   /**
@@ -350,18 +451,30 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
    * sector by shooting it is being handed the ship for doing that, which is the
    * lateral trade `docs/DESIGN.md` wants a hull grant to be rather than a reward for
    * having already won.
+   *
+   * ## IT ALSO GRANTED `hazards: 'debris-cascade'`, WHICH IS NOT A HAZARD
+   *
+   * No table answers to that id. The debris hazard that ships is `convoy-wake`
+   * (`kind: 'debris'`), it is armed by The Tally's stage definition, and every pilot
+   * already meets it — so there was nothing to repoint at either: re-aiming the grant
+   * at `convoy-wake` would have handed the player something they already have, in a
+   * slice nothing draws from, which is a worse lie than the dangling id.
+   *
+   * Deleted rather than registered in `GRANTS_AWAITING_CONTENT`, and the deletion is
+   * what makes this card honest: with the hazard gone the only grant left is a hull
+   * the selection screen offers today, so the certification is LIVE and stops printing
+   * "content pending" over a reward that arrives. Registering it would have kept a
+   * fully-earned hull behind a pending marker for the sake of an id nobody has
+   * designed. The hazard slice is still ungated (see the header) and a hazard
+   * certification can be authored the day something draws from it.
    */
   {
     id: 'clearance-commendation',
     name: 'Clearance Commendation',
     condition: { kind: 'killsInRun', kills: 110 },
-    grants: [
-      { slice: 'hazards', id: 'debris-cascade' },
-      { slice: 'hulls', id: 'collateral' },
-    ],
-    effect:
-      'Adds the debris cascade hazard, and the Collateral hull: 120 dps, no shield.',
-    awaiting: 'the debris cascade hazard, and a hull selection screen',
+    grants: [{ slice: 'hulls', id: 'collateral' }],
+    effect: 'Adds the Collateral hull: 120 dps, no shield.',
+    awaiting: null,
   },
 
   /**
@@ -379,18 +492,29 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
    * about meta-progression, and a hull inherited from a corpse is that sentence made
    * into a ship. It was unreachable content before this — authored, tested, and in
    * no pool.
+   *
+   * ## IT ALSO GRANTED `enemies: 'turret-siege'`, WHICH IS NOT AN ENEMY AND CANNOT BE
+   *
+   * Deleted rather than registered in `GRANTS_AWAITING_CONTENT`, on a stronger
+   * argument than the other dangling ids get. An enemy grant is a closed loop:
+   * `BASE_POOL.enemies` is `Object.keys(ENEMIES)`, so the id either does not exist —
+   * as here — or exists and is already base content. Writing a Siege Turret would move
+   * this grant from dangling to redundant without ever passing through useful, and
+   * `tests/certifications.test.ts` already fails a grant the base pool contains. The
+   * elite is still worth building; it is just not something a certification can gate
+   * while the base pool is derived from the table.
+   *
+   * Deleting it is also what lets this card tell the truth about the hull. Probate is
+   * offered by the selection screen today, and keeping an undesignable elite alongside
+   * it would have held a delivered reward behind "content pending" indefinitely.
    */
   {
     id: 'posthumous-data-annex',
     name: 'Posthumous Data Annex',
     condition: { kind: 'lostTo', enemyId: 'turret-heavy' },
-    grants: [
-      { slice: 'enemies', id: 'turret-siege' },
-      { slice: 'hulls', id: 'probate' },
-    ],
-    effect:
-      'Adds the Siege Turret elite, and the Probate hull: 124 effective health.',
-    awaiting: 'the Siege Turret elite, and a hull selection screen',
+    grants: [{ slice: 'hulls', id: 'probate' }],
+    effect: 'Adds the Probate hull: 124 effective health.',
+    awaiting: null,
   },
 
   /**
@@ -459,7 +583,9 @@ export const CERTIFICATIONS: readonly CertificationDef[] = [
     grants: [{ slice: 'hulls', id: 'surety' }],
     effect:
       'Adds the Surety hull: 210 effective health and 155 speed.',
-    awaiting: 'a hull selection screen',
+    // LIVE, for the same reason Arrears' card is: the hull ships and the selection
+    // screen draws from the pool. The last thing this card was waiting on arrived.
+    awaiting: null,
   },
 ]
 

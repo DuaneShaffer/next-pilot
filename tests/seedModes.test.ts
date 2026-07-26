@@ -17,9 +17,12 @@
  *    monospace measurement as `tests/textFits.test.ts` for the same reason.
  */
 
+import { readFileSync } from 'node:fs'
+
 import { describe, expect, it } from 'vitest'
 
 import { NEUTRAL_INPUT, packInput, type InputSnapshot } from '../src/core/input'
+import { Rng } from '../src/core/rng'
 import { SEED_LENGTH, dailySeed, formatSeed, isValidSeed, normalizeSeed } from '../src/core/seed'
 import { INTERACTIONS } from '../src/content/interactions'
 import { ITEMS } from '../src/content/items'
@@ -32,6 +35,13 @@ import {
   type Replay,
 } from '../src/meta/replay'
 import { SIM_VERSION } from '../src/meta/simVersion'
+import { hashWorld } from '../src/meta/snapshot'
+import {
+  CERTIFICATION_IDS,
+  poolForRun,
+  type RunPool,
+} from '../src/meta/certifications'
+import { HULL_OFFER_STREAM, offerHulls } from '../src/ui/hullSelect'
 import {
   DAILY_ARCHIVE_DAYS,
   MAX_REPLAY_PARAM_CHARS,
@@ -40,6 +50,7 @@ import {
   URL_SAFE_CHARS,
   buildDailyLink,
   buildSeedLink,
+  certificationsForMode,
   claimSortieMode,
   coerceDailyRecord,
   dailyContract,
@@ -856,6 +867,7 @@ describe('replay link length policy, from real encoded runs', () => {
       version: REPLAY_FORMAT_VERSION,
       simVersion: SIM_VERSION,
       hullId: '',
+      certifications: [],
       // A space is not printable-ASCII by the encoder's rule, so this cannot encode.
       seed: 'not a seed ',
       inputs: new Uint8Array([0b0000101]),
@@ -1488,5 +1500,213 @@ describe('claiming a URL mode for a sortie', () => {
     expect(first.nextPending).toBeNull()
     const second = claimSortieMode(first.nextPending, undefined, fresh)
     expect(second.mode).toEqual({ kind: 'free', seed: FRESH, purist: false })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// the pool a run is flown with
+// ---------------------------------------------------------------------------
+
+/**
+ * THE POOL IS A SIMULATION INPUT, AND THE MODE DECIDES IT.
+ *
+ * `RunModeBase.purist` shipped with a correct comment and no reader: `main.ts`
+ * computed the run's pool from the save's certifications and used it for both the
+ * hull offer and the `World`, whatever the mode said. So two pilots flying the same
+ * daily contract were handed different hulls and produced different state digests —
+ * which is the one thing a daily contract exists to make impossible.
+ *
+ * `certificationsForMode` is that decision, extracted for the same reason
+ * `claimSortieMode` was: `main.ts` is DOM-bound wiring with no unit test, and a
+ * decision that lives there is a decision nothing can check.
+ */
+describe('the pool a run is flown with', () => {
+  /** Exactly the composition `src/main.ts` performs at the top of a sortie. */
+  function poolAsFlown(mode: RunMode, unlocked: readonly string[]): RunPool {
+    return poolForRun(certificationsForMode(mode, unlocked)).pool
+  }
+
+  function hullOffer(seed: string, pool: RunPool): readonly string[] {
+    return offerHulls(Rng.fromSeed(seed, HULL_OFFER_STREAM), pool.hulls)
+  }
+
+  /**
+   * A TRACE of a run: the state hash at every tick a card is on screen, then the
+   * final hash. Not the final hash alone, and the reason is worth measuring.
+   *
+   * The work-order pool is the only slice that reaches the sim today (`World`'s
+   * `workOrders`), and it reaches it in exactly one place — the card opened at wave
+   * 17, whose option list is hashed and whose length bounds the cursor. Confirming a
+   * work order currently applies NOTHING, so the two runs re-converge the tick the
+   * card closes and their final hashes are identical. Measured: base and certified
+   * pools on `K7F29XQM3RTV` differ for the two ticks the card is open and agree at
+   * tick 11,039.
+   *
+   * So a final-hash-only comparison would pass whatever the pool was, and this whole
+   * describe block would be decoration. It also means the divergence a mismatched
+   * pool causes is currently *transient* — it becomes permanent the moment a work
+   * order does something, which is precisely why the pool has to be recorded now
+   * rather than when that lands.
+   */
+  function traceOfRun(seed: string, pool: RunPool, ticks = 12_000): string {
+    const world = new World(seed, { ...CONTENT, workOrders: pool.workOrders })
+    const bot = BOTS.aggressor.create(seed)
+    const marks: string[] = []
+    for (let tick = 0; tick < ticks && world.runState === 'active'; tick++) {
+      world.tick(bot(world))
+      if (world.pendingChoice !== null) marks.push(hashWorld(world))
+    }
+    marks.push(hashWorld(world))
+    return marks.join('|')
+  }
+
+  const NONE: readonly string[] = []
+  const EVERYTHING: readonly string[] = CERTIFICATION_IDS
+
+  /**
+   * THE INSTRUMENT, PROVED BEFORE IT IS USED.
+   *
+   * If a certified pool did not change the run, every assertion below would pass
+   * whatever `certificationsForMode` returned. This is the same argument as
+   * "a run flown in the wrong hull is a different run" in tests/replay.test.ts.
+   */
+  it('a certified pool is a different run from a base one', () => {
+    const shared = resolve({ [RUN_PARAM.seed]: SEED_A }).mode
+    const base = poolAsFlown(shared, NONE)
+    const certified = poolAsFlown(shared, EVERYTHING)
+    expect(certified.hulls.length).toBeGreaterThan(base.hulls.length)
+    expect(certified.workOrders.length).toBeGreaterThan(base.workOrders.length)
+    expect(hullOffer(SEED_A, certified)).not.toEqual(hullOffer(SEED_A, base))
+    expect(traceOfRun(SEED_A, certified)).not.toBe(traceOfRun(SEED_A, base))
+  })
+
+  it('hands two pilots with different certifications the same daily contract', () => {
+    // The whole point of the contract. A novice and a fully certified veteran open
+    // the same link on the same day; if they are not flying the same run, the
+    // leaderboard the contract exists for is comparing two different games.
+    const daily = resolve({ [RUN_PARAM.daily]: '1' }).mode
+    expect(daily.kind).toBe('daily')
+
+    const novice = poolAsFlown(daily, NONE)
+    const veteran = poolAsFlown(daily, EVERYTHING)
+
+    expect(hullOffer(daily.seed, veteran)).toEqual(hullOffer(daily.seed, novice))
+    expect(traceOfRun(daily.seed, veteran)).toBe(traceOfRun(daily.seed, novice))
+  })
+
+  it('flies an archive contract purist too', () => {
+    // An archive run is comparable with everyone who flew that date. Same argument,
+    // and `isToday` is a labelling fact rather than a pool one.
+    const archive = resolve({ [RUN_PARAM.daily]: '2026-07-20' }).mode
+    expect(archive.kind).toBe('daily')
+    expect(certificationsForMode(archive, EVERYTHING)).toEqual([])
+  })
+
+  /**
+   * D3: THE LABEL AND THE POOL ARE THE SAME FACT.
+   *
+   * `?purist=1` resolved as purist, the share card read SHARED · PURIST, and the run
+   * was flown with the viewer's full pool. The filed fingerprint was honest, so the
+   * record was right and the badge lied — UI.md rule 4, and the worse half of the
+   * pair, because a label nobody can check is the one people believe.
+   */
+  it('never prints PURIST over a run that drew from a certified pool', () => {
+    const modes: readonly RunMode[] = [
+      resolve({}).mode,
+      resolve({ [RUN_PARAM.seed]: SEED_A }).mode,
+      resolve({ [RUN_PARAM.seed]: SEED_A, [RUN_PARAM.purist]: '1' }).mode,
+      resolve({ [RUN_PARAM.daily]: '1' }).mode,
+      resolve({ [RUN_PARAM.daily]: '2026-07-20' }).mode,
+    ]
+    let labelled = 0
+    for (const mode of modes) {
+      if (!describeRunMode(mode).label.includes('PURIST')) continue
+      labelled++
+      expect(
+        certificationsForMode(mode, EVERYTHING),
+        `${describeRunMode(mode).label} was flown with a certified pool`,
+      ).toEqual([])
+    }
+    // The sweep has to have found the label, or it proves nothing about it.
+    expect(labelled).toBeGreaterThan(0)
+  })
+
+  it('flies a shared purist link on the base pool, whoever opens it', () => {
+    const purist = resolve({ [RUN_PARAM.seed]: SEED_A, [RUN_PARAM.purist]: '1' }).mode
+    expect(describeRunMode(purist).label).toBe('SHARED · PURIST')
+    expect(hullOffer(SEED_A, poolAsFlown(purist, EVERYTHING))).toEqual(
+      hullOffer(SEED_A, poolAsFlown(purist, NONE)),
+    )
+    expect(traceOfRun(SEED_A, poolAsFlown(purist, EVERYTHING))).toBe(
+      traceOfRun(SEED_A, poolAsFlown(purist, NONE)),
+    )
+  })
+
+  it('still flies an ordinary shared seed on the pool the pilot earned', () => {
+    // The correction must not become "nobody ever flies their certifications". A plain
+    // `?seed=` link is not a comparability claim, so it draws from the full pool.
+    const shared = resolve({ [RUN_PARAM.seed]: SEED_A }).mode
+    expect(certificationsForMode(shared, EVERYTHING)).toEqual(EVERYTHING)
+    expect(certificationsForMode(resolve({}).mode, EVERYTHING)).toEqual(EVERYTHING)
+  })
+
+  /**
+   * D1: A REPLAY FLIES THE POOL IT WAS RECORDED WITH, AND NOTHING ELSE.
+   *
+   * Not the viewer's — that is the divergence the recorded field exists to close. Not
+   * the base pool either, even when `?purist=1` rides along on the link: narrowing a
+   * recorded run is exactly as wrong as widening it, and it is the more tempting
+   * mistake because it looks like honesty.
+   */
+  it('replays the pool the recording names, not the viewer\'s and not purist', () => {
+    const recorded = ['vault-clearance', 'austerity-endorsement']
+    const recorder = new ReplayRecorder(SEED_A, 'lien', recorded)
+    for (let i = 0; i < 60; i++) recorder.record(NEUTRAL_INPUT)
+    const encoded = encodeReplay(recorder.toReplay())
+
+    const plain = resolve({ [RUN_PARAM.replay]: encoded }).mode
+    expect(certificationsForMode(plain, EVERYTHING)).toEqual(recorded)
+    expect(certificationsForMode(plain, NONE)).toEqual(recorded)
+
+    const puristLink = resolve({ [RUN_PARAM.replay]: encoded, [RUN_PARAM.purist]: '1' }).mode
+    expect(puristLink.purist).toBe(true)
+    expect(certificationsForMode(puristLink, NONE)).toEqual(recorded)
+  })
+})
+
+/**
+ * The wiring, asserted against the source text.
+ *
+ * `main.ts` is DOM-bound app wiring with no unit test, which is the whole reason the
+ * decision above is a pure function — and also the reason a pure function on its own
+ * is not enough. D2 existed because `purist: true` was set and never read; a fix that
+ * adds a second correct-but-unread function would be the same bug with better tests.
+ * Grepping the source is the trade `tools/check-contracts.mjs` makes: it checks the
+ * text, not the behaviour, and it is the only check available here.
+ */
+describe('main.ts flies the pool the mode decides', () => {
+  const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8')
+
+  it('routes every pool it builds through certificationsForMode', () => {
+    const builds = main.split('poolForRun(').length - 1
+    expect(builds, 'the pool is not built through poolForRun any more').toBeGreaterThan(0)
+    expect(main.split('poolForRun(certificationsForMode(').length - 1).toBe(builds)
+  })
+
+  it('never reads the save\'s unlocked set straight into a pool', () => {
+    // The exact expression that shipped the bug. `unlockedSet` is still legitimately
+    // used to draw the hangar — that is a display of what the pilot holds, not a
+    // statement about the run — so this pins the pool path rather than the import.
+    expect(main).not.toMatch(/poolFor\(unlockedSet\(/)
+  })
+
+  it('records the pool it built, from the same value', () => {
+    expect(main).toContain('new ReplayRecorder(seed, currentHullId, runCertified.certifications)')
+  })
+
+  it('hands the World and the hull offer the same pool', () => {
+    expect(main).toContain('workOrders: runPool.workOrders')
+    expect(main).toContain('runPool.hulls')
+    expect(main).toContain('runPool = runCertified.pool')
   })
 })

@@ -322,11 +322,17 @@ interface RunModeBase {
    * either a verdict that has to be known before the run starts, or a run
    * configuration derived from a run that has not happened yet.
    *
-   * FOLLOW-UP for whoever owns `replay.ts`: the format carries `simVersion` but no
-   * pool fingerprint, so this flag arrives on a replay link as a claim rather than
-   * as evidence. A wrong claim diverges the playback silently — the same failure
-   * class `simVersion` exists to prevent. A pool fingerprint in the header would
-   * make it detectable.
+   * READ BY `certificationsForMode` at the bottom of this file, and that sentence is
+   * the whole of the fix for a bug that shipped: nothing consumed this flag, so a
+   * daily contract and a `?purist=1` link were both flown with whatever the viewer had
+   * unlocked while the HUD said otherwise.
+   *
+   * RESOLVED, and better than the original follow-up asked for: the replay format
+   * carries the certified pool as of version 5 — the granting ids, not a fingerprint,
+   * because a fingerprint can verify a pool but cannot rebuild one and a replay has to
+   * be flown. So this flag no longer reaches a replay as an unverifiable claim; a
+   * replay's pool comes off the recording, and `certificationsForMode` ignores
+   * `purist` for a replay entirely.
    */
   readonly purist: boolean
 }
@@ -784,6 +790,35 @@ export function claimSortieMode(
   }
   if (pending !== null) return { mode: pending, nextPending: null }
   return { mode: { kind: 'free', seed: freshSeed(), purist: false }, nextPending: null }
+}
+
+/**
+ * Which certifications a run flown in this mode may draw from.
+ *
+ * THE READER `purist` DID NOT HAVE. The flag was set correctly — the daily has been
+ * `purist: true` since it was wired — and nothing consumed it: `main.ts` computed the
+ * pool from the save's unlocked set and used it for both the hull offer and the
+ * `World`, whatever the mode said. Two pilots on the same daily contract were handed
+ * different hulls and produced different state digests, which destroys the only thing
+ * a daily is for. `?purist=1` was the same bug wearing a label: the share card read
+ * SHARED · PURIST over a run flown with the viewer's full pool.
+ *
+ * A PURE FUNCTION HERE rather than three lines in `main.ts`, for the reason
+ * `claimSortieMode` gives above: app wiring is where this decision went wrong and
+ * stayed wrong, because nothing in the suite can drive it.
+ *
+ * The replay clause is not the purist rule with extra steps, and it is the reason this
+ * takes a mode rather than a boolean. A replay must be flown with the pool it was
+ * RECORDED with, whatever the URL says and whatever the viewer has unlocked —
+ * narrowing it to the base pool because `?purist=1` rode along would diverge the
+ * playback exactly as badly as widening it to the viewer's pool would.
+ */
+export function certificationsForMode(
+  mode: RunMode,
+  unlocked: readonly string[],
+): readonly string[] {
+  if (mode.kind === 'replay') return mode.replay.certifications
+  return mode.purist ? [] : unlocked
 }
 
 /** Short, always shareable, reproduces the starting conditions. */

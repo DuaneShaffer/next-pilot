@@ -28,11 +28,29 @@ must read to survive. Reserving space costs screen area once; overlaying costs a
 continuously.
 
 **Permitted exceptions**, because they are transient and attached to the action rather than
-being state readouts: floating damage numbers, pickup labels, boss-phase callouts, and the
-lock-on/threat indicators for off-screen enemies.
+being state readouts: floating damage numbers, pickup labels, boss-phase callouts, enemy damage
+bars, the lock-on/threat indicators for off-screen enemies, and the hazard reaction-window alarm
+(`drawHazardWarning` — it exists only during the one second a hazard gives the player, lives in
+the outer margin plus a strip under the hull, and is gone the moment the hazard fires).
 
-**Check:** no call in `src/render/panel.ts` or `src/ui/**` draws at `x < PLAYFIELD_W` during a
-sortie.
+**Two things over the playfield are genuinely state, and are allowed anyway.** Recorded here
+rather than left to be rediscovered as violations:
+
+- the **low-integrity rim**, which is persistent by definition. It is the one readout whose whole
+  job is to be seen without looking away, and putting it in the panel is putting it where rule 9
+  says nobody is looking. It stays in the margin and never touches the space bullets are read in.
+- the **blackout scrim**, which is a hazard's effect rather than a readout: it dims the field on
+  purpose, and enemy fire and the player's hull are drawn *on top of it* at full contrast so the
+  thing that kills you is never the thing that was hidden.
+
+**Check:** no call in `src/render/panel.ts` or `src/ui/**` draws at `x < PLAYFIELD_W` while the
+simulation is running — a full-screen overlay (pause, item choice, incident report) is permitted
+because the sim is paused underneath it and there is nothing to occlude. Anything `src/render/**`
+adds over the playfield must be on one of the two lists above.
+
+**Gap, honestly:** the only test enforcing this sweeps `drawPanel` (`tests/render.test.ts`).
+Nothing sweeps `src/render/scene.ts`, which is where every over-playfield draw actually lives, so
+the lists above are maintained by review rather than by a failing test.
 
 ## 2. Every number carries a unit and a direction
 
@@ -52,6 +70,7 @@ The palette in `src/render/palette.ts` assigns meaning:
 | -------------- | -------------------------------------------------------- |
 | `self`         | You, your projectiles, focus and selection               |
 | `danger`       | Can hurt you **this instant**. Nothing else. Ever.       |
+| `dangerText`   | The same role as a glyph rather than a mark — see rule 7 |
 | `hostile`      | Enemy hulls and structures                               |
 | `hostileElite` | Elite / reinforced enemy accent                          |
 | `caution`      | Resource running low, timer expiring, risky choice       |
@@ -104,8 +123,19 @@ So the rule stands, but the enforcement is the point: `REDUNDANT_CHANNEL` in tha
 named tier, not an exemption, and landing a pair in it is a claim that something other than hue
 distinguishes them — with the place named, so it can be checked against a screenshot.
 
-**Check:** `danger` appears in the codebase only for enemy fire, incoming damage, lethal
-hazards, critical resource states, and death.
+**Check:** `danger` appears in the codebase only for enemy fire, incoming damage, hazards that
+take integrity, critical resource states, death, and the one irreversible action on the pause
+card (`abandon`, which also carries a bar rather than colour alone).
+
+**"Hazards that take integrity" is narrower than "hazards", and one function decides it.** A
+hazard in its reaction window earns `danger` only if firing costs the player integrity —
+`corrosion` and `debris` do, `interdiction` and `blackout` do not, read from what
+`src/sim/world.ts` applies rather than from `HazardDef.damage`, which is dead data for those two
+kinds. The panel row and the playfield alarm both call `hazardSeverity` in
+`src/render/hazards.ts` for this. They did not always: the panel gave every warning the danger
+role while the alarm derived it from the kind, so for one second at a time the two surfaces
+contradicted each other about the same hazard. **Two derivations of one judgement is the defect,
+not the wrong answer** — if a rule has two surfaces, one function decides and both call it.
 
 ## 4. Item text states the mechanism first
 
@@ -123,8 +153,47 @@ sentence. Line 3 is flavour, visually subordinate, and always omittable.
 **Why:** a player choosing between three items under time pressure needs the mechanism, not the
 joke. Putting flavour first makes every choice a coin flip. Keep the humour — put it third.
 
-**Check:** every item in `src/content/items.ts` has a mechanical line that names the numbers,
-and no item's effect appears only in its flavour text.
+### Who states the numbers depends on whether the screen computes them
+
+The rule above is about what the *player* must be able to read, not about which string carries
+it. Where a screen resolves the figures against the actual run and prints them in a table, **the
+table states the numbers and the sentence states the intent**; the sentence does not restate
+them. Where a screen has no such table, the sentence states the numbers, exactly as above.
+
+**Why:** restating a computed figure in hand-written prose is one fact in two places with only
+one of them derived. A balance change updates the table, the table is right, and the sentence
+goes on selling the old thing. That is not hypothetical — it is finding R12, where three
+certification cards promised numbers their hulls no longer had, and it happened again the day
+resolved rows landed on the offer cards and Barrel Liner drew `Shot speed 620 → 740 u/s (+120)`
+directly above "+120 projectile speed, from 620 to 740 units per second".
+
+Two screens are on the table side of this, and both are deliberate:
+
+- **Hull cards** (`src/ui/hullSelect.ts`). Every card prints a delta table folded through the
+  real `src/sim/stats.ts`, signed by that table's own `lowerIsBetter` flag. So `HullDef.mechanism`
+  carries no figures at all: it says what the hull is *for*, how it wants to be flown, and which
+  mechanic its stat line interacts with — the things a table cannot say. Both halves are enforced:
+  `tests/hulls.test.ts` fails on a figure in hull prose, and `tests/hullSelect.test.ts` fails if a
+  figure the prose gave up is not printed by the table.
+- **Item offer cards** (`src/ui/choiceScreen.ts`). The resolved before → after rows are the
+  priority-1 information — "+45% damage" is +1.8 or +14 depending on what is already fitted — so
+  the authored sentence is **dropped entirely** when the rows are strictly better: every stat the
+  item moves has a row, and the item has no `effects`. An `effect` is behaviour a number cannot
+  describe (extra projectiles, chaining, a timed window), so an item carrying one keeps its
+  sentence. `flavour` is never dropped; it was never claiming to be a specification.
+
+Note what is *not* changed by either: `ItemDef.mechanism` still states the numbers, because the
+hangar prints it with no table underneath and it has to stand alone there. Dropping the sentence
+is a per-card decision made by the screen that computed the figures, never an edit to the
+content. `HullDef.mechanism` is the one that genuinely gives the figures up, and it can only do
+that because the hangar does not show hulls — `HULL_SELECT_STANDFIRST` carries the baseline for
+the Lien, whose card has no table.
+
+**Check:** every item in `src/content/items.ts` has a mechanical line that names the numbers, and
+no item's effect appears only in its flavour text. Every hull in `src/content/hulls.ts` has a
+mechanical line that names *none*, and every figure it gives up is printed by the hull card. On
+any screen, the numbers are legible somewhere on the option — in the prose or in the table, and
+not in both.
 
 ## 5. Synergies are stated, not implied
 
@@ -146,8 +215,14 @@ one to start the next sortie. No submenus, no navigating back to a main menu, no
 **Why:** a roguelike's core loop is "again". Every input between death and the next attempt is
 friction applied at the exact moment the player is deciding whether to keep playing.
 
-**Check:** a Playwright test dies (or forces a death), then reaches an active sortie in ≤2 key
-presses.
+**Check:** from the incident screen, `confirm` calls `beginSortie()` directly (`src/main.ts`),
+which is one press — two when `beginSortie` stops at hull select, which is the cap.
+
+**Gap, honestly:** this was written as "a Playwright test dies, then reaches an active sortie in
+≤2 key presses", and no such test exists. Playwright is a dev dependency used only by
+`tools/screenshot.mjs`, `tools/perf.mjs` and `tools/audio.ts`; `npm test` is Vitest, and nothing
+in `tests/` drives a browser. The rule holds by reading `main.ts`, which is not the same thing as
+being enforced. Writing that test is the honest fix; until then this Check is a code reading.
 
 ## 7. Nothing below 11px effective, and never colour-on-colour
 
@@ -179,10 +254,22 @@ report, and any good run shareable without extra UI.
 
 ## 9. State changes are announced where the player is looking
 
-The player's eyes are on their ship, not the panel. So a shield break, an item pickup, or a
-weapon change gets a brief, readable cue near the ship *in addition to* updating the panel.
+The player's eyes are on their ship, not the panel. So a state change gets a brief, readable cue
+near the ship *in addition to* updating the panel.
 
 **Why:** a panel value that changes silently during combat is a value nobody sees change.
+
+**What actually has a cue today:** a shield break ("SHIELD DOWN" at the hull, plus the ring going
+out), scrap credited on a kill, damage taken, a boss phase change, and a hazard entering its
+reaction window — the last of these because the panel row was the *only* announcement for two
+milestones, which is this rule's failure mode in its purest form.
+
+Two examples this rule used to name do not exist, and naming them was making the rule read as
+already satisfied: **there is no weapon-change cue because no weapon can change** (`weaponName`
+is the constant `'Twin Pulse'` in `src/main.ts` and no `SimEvent` reports a change), and **there
+is no item-pickup cue because there is no pickup entity** — items are taken on the paused choice
+screen, where the player is looking directly at what they picked. Both get a cue in the change
+that makes them real; neither is a gap the interface can close first.
 
 ## 10. No blinking faster than ~1 Hz, no full-screen flashes
 
@@ -190,8 +277,11 @@ Pulses use a slow sine that never reaches zero opacity (see the title prompt). I
 brighten and shake but never strobe the full screen.
 
 **Why:** flashing in the 3–30 Hz range can trigger photosensitive seizures. This is a hard
-constraint, not a stylistic preference. Screen shake is capped and will be reducible in
-settings.
+constraint, not a stylistic preference. Screen shake is capped, and it *is* reducible: "Screen
+shake" under Motion and light is a 0–100% setting that reads `Off` at zero, persisted as
+`settings.shake` and threaded to the renderer as `SceneOptions.shakeScale`. `reduceFlashes` is
+the separate control for modulation depth, and every pulsing effect is on the list
+`tests/render.test.ts` sweeps for both.
 
 ---
 
@@ -201,8 +291,15 @@ settings.
 and daily-seed entry are one keypress away, not required to start.
 
 **Sortie.** Playfield left, instrument panel right. Panel shows, top to bottom: pilot number and
-hull name, integrity meter, shield meter, weapon and fire rate, scrap, sector progress, seed.
-Segmented meters — countable at a glance, unlike a smooth bar.
+hull name; integrity meter; shield meter and its reserve row; weapon, fire rate and scrap; sector
+progress and wave; then one flexible region carrying hazards, the boss readout and the held
+build, in that priority order; then the sortie log (kills, accuracy, hits); then the footer's run
+mode and seed. Segmented meters — countable at a glance, unlike a smooth bar.
+
+The flexible region is the only part that degrades, and it degrades threat-first: hazards drop
+their prose and then their rows, the boss keeps its block, and the build — the one readout there
+about a decision already made — yields last and collapses to a count. A player can check what
+they are carrying between waves; they cannot check a hazard countdown after it has fired.
 
 **Item choice.** Three options, full mechanical text, synergy markers, and the current build
 visible so the choice can be made in context. Time is paused; this is a decision, not a

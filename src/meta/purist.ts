@@ -52,6 +52,13 @@
  *    claim, and `verifyPurist` says so — the verdict distinguishes "matches the
  *    base pool" from "reproduced against the base pool". Do not present the first
  *    as the second.
+ *
+ *    Tier 2 also needs the *pool* the inputs were flown against, which the replay
+ *    format did not carry until version 5 and now does (`Replay.certifications`, the
+ *    granting ids rather than a fingerprint — a fingerprint verifies a pool, it cannot
+ *    rebuild one). Before that, a verifier replaying a shared run against its own base
+ *    pool could not tell "this run was not purist" from "I rebuilt it wrong", which
+ *    made `refuted` a verdict nobody should have trusted.
  * 3. **A cheat can patch its own base tables.** If someone edits `src/content/**`
  *    so their expanded pool *is* their base pool, their run is self-consistently
  *    "purist" on their machine. It is not on anyone else's: their fingerprint will

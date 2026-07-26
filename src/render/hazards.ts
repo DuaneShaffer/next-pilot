@@ -17,14 +17,23 @@
  * with no number to parse mid-dodge).
  *
  * **Rule 3, applied carefully.** `danger` means *can hurt you this instant*, and a
- * hazard one second from firing qualifies: the reaction window is the moment the
- * player has to move. The `active` phase does **not** get it. By the time a hazard is
- * active it has either already done its damage (corrosion, debris — both act on a
- * single tick) or it is a condition that does no damage at all (interdiction slows the
- * hull, blackout dims the screen). Painting all three phases red would train the
- * player's threat reflex on a timer, which is the precise failure rule 3 exists to
- * prevent — and the debris a hazard drops is drawn in `danger` anyway, because those
- * are projectiles.
+ * hazard one second from firing qualifies — **if it can take integrity at all**. The
+ * `active` phase does **not** get it. By the time a hazard is active it has either
+ * already done its damage (corrosion, debris — both act on a single tick) or it is a
+ * condition that does no damage at all (interdiction slows the hull, blackout dims the
+ * screen). Painting all three phases red would train the player's threat reflex on a
+ * timer, which is the precise failure rule 3 exists to prevent — and the debris a
+ * hazard drops is drawn in `danger` anyway, because those are projectiles.
+ *
+ * **The phase is not the severity, and treating it as one shipped a contradiction.**
+ * The panel row gave EVERY warning `dangerText` while the playfield alarm derived
+ * severity from the kind, so for one second at a time `grid-sweep` and
+ * `manifest-blackout` — which take no integrity in any code path — had the panel
+ * shouting danger and the playfield saying caution about the same hazard in the same
+ * frame. The panel was the wrong one: rule 3 says `danger` means can hurt you this
+ * instant, *nothing else, ever*, and a blackout warning cannot. Two independent
+ * derivations is how that happened, so there is now exactly one — `hazardSeverity`
+ * below — and both surfaces call it. A future kind is severe or not in one place.
  *
  * **Rule 2.** Every countdown is in seconds with the unit drawn. Ticks are a
  * simulation detail; a player counting in sixtieths is a player the interface failed.
@@ -46,26 +55,117 @@ import { flashScale, pulse } from './intensity'
 import { Palette, withAlpha } from './palette'
 import { drawText, drawValue, formatSeconds, measureText } from './text'
 
+// ---------------------------------------------------------------------------
+// severity: decided once, for both surfaces
+// ---------------------------------------------------------------------------
+
+/**
+ * Kinds that take integrity when they fire.
+ *
+ * Read from the SIMULATION's behaviour, not from `HazardDef.damage`: `world.ts` calls
+ * `applyHullDamage` for `corrosion` and spawns damaging projectiles for `debris`, and
+ * for `interdiction` and `blackout` its switch arm is a comment saying the effect *is*
+ * the active window — nothing is applied. `HazardDef.damage` is dead data for both,
+ * which is why the two cards read "does no damage" (see `content/hazards.ts`). So this
+ * is a fact about kinds and cannot be falsified by a content edit, which is what makes
+ * it safe to colour a warning with.
+ *
+ * `HazardView` does not carry `damage`, and it should not have to: a *severity* derived
+ * from the kind is one fewer field on the contract. A kind added later with no entry
+ * here is treated as harmless, which understates rather than overstates — the wrong
+ * direction to be wrong in, but the alternative is crying danger for something that
+ * cannot hurt anyone, which is the failure rule 3 exists to prevent.
+ */
+const HARMFUL_KINDS: ReadonlySet<HazardKind> = new Set<HazardKind>(['corrosion', 'debris'])
+
+/**
+ * How loudly a hazard of this kind may be drawn. **The only severity decision there is.**
+ *
+ * Returns the tokens rather than a bare boolean because the two surfaces want the same
+ * judgement in two different currencies and the mapping is the part that must not
+ * diverge: `danger` is the mark (fills, bands, pips) and `dangerText` is the glyph, and
+ * they are not interchangeable — see rule 7 and `palette.ts`. `caution` is both, being
+ * legible as text on the panel already.
+ *
+ * Callers ask about a KIND, not a phase. Whether the moment warrants any emphasis at
+ * all is the phase's business; how loud that emphasis is allowed to get is this
+ * function's, and keeping the two apart is what stops a countdown from reading as a
+ * threat on its own.
+ */
+export interface HazardSeverity {
+  /** True when firing costs integrity. Drives the second, non-hue channel. */
+  harmful: boolean
+  /** Fills, bands and pips. */
+  mark: string
+  /** Text, which needs the AA-safe token. */
+  text: string
+}
+
+const SEVERE: HazardSeverity = { harmful: true, mark: Palette.danger, text: Palette.dangerText }
+const MILD: HazardSeverity = { harmful: false, mark: Palette.caution, text: Palette.caution }
+
+/**
+ * Severity of a *combined* cue — a washed edge two hazards share, say. Internal: it
+ * exists so the union case reads the same severity-to-hue mapping as everything else
+ * rather than writing a second one. Severe if ANY contributor is, because understating
+ * a threat that is genuinely there is not an option — the opposite of the direction an
+ * unrecognised kind errs in.
+ */
+function hazardSeverityOf(harmful: boolean): HazardSeverity {
+  return harmful ? SEVERE : MILD
+}
+
+export function hazardSeverity(kind: HazardKind): HazardSeverity {
+  return hazardSeverityOf(HARMFUL_KINDS.has(kind))
+}
+
 /** What one hazard row says, independent of where it is drawn. */
 export interface HazardStatus {
   /** The state word. Left of the countdown, and the row's second channel. */
   word: string
   /** Countdown value, already in seconds. */
   seconds: string
+  /** Text colour for the row. */
   color: string
+  /** Fill colour for the row's band and edge bar. */
+  mark: string
   /** True only for the reaction window — see the file header on rule 3. */
   urgent: boolean
+  /** True when the reaction window is for a hazard that will cost integrity. */
+  harmful: boolean
 }
 
 export function hazardStatus(hazard: HazardView): HazardStatus {
   const seconds = formatSeconds(hazard.ticksToChange)
+  const severity = hazardSeverity(hazard.hazardKind)
   switch (hazard.phase) {
     case 'warning':
-      return { word: 'INBOUND', seconds, color: Palette.dangerText, urgent: true }
+      return {
+        word: 'INBOUND',
+        seconds,
+        color: severity.text,
+        mark: severity.mark,
+        urgent: true,
+        harmful: severity.harmful,
+      }
     case 'active':
-      return { word: 'ACTIVE', seconds, color: Palette.caution, urgent: false }
+      return {
+        word: 'ACTIVE',
+        seconds,
+        color: Palette.caution,
+        mark: Palette.caution,
+        urgent: false,
+        harmful: false,
+      }
     default:
-      return { word: 'NEXT', seconds, color: Palette.textDim, urgent: false }
+      return {
+        word: 'NEXT',
+        seconds,
+        color: Palette.textDim,
+        mark: Palette.textDim,
+        urgent: false,
+        harmful: false,
+      }
   }
 }
 
@@ -125,11 +225,18 @@ export function hazardBlockHeight(count: number, withDescriptions: boolean): num
 }
 
 /**
- * The phase marker.
+ * The phase marker, and the row's severity channel.
  *
  * Three distinct shapes, because rule 3 forbids colour carrying information alone: a
- * hollow dot idles, a solid triangle warns, a solid square is in force. A player who
- * cannot separate amber from red still reads three different rows.
+ * hollow dot idles, a triangle warns, a solid square is in force. A player who cannot
+ * separate amber from red still reads three different rows.
+ *
+ * The triangle is FILLED only when the warning is for a hazard that takes integrity.
+ * `danger` and `caution` are the one palette pair that cannot be separated by hue for a
+ * protanope or deuteranope (ΔE00 12.8 at best; see tests/palette.test.ts), so severity
+ * needs a channel that is not hue on this surface too — the panel's equivalent of the
+ * notch the playfield alarm cuts into its pips, and for exactly the same reason. Shape
+ * still carries the phase; fill carries the cost.
  */
 function drawMarker(
   ctx: CanvasRenderingContext2D,
@@ -137,17 +244,24 @@ function drawMarker(
   x: number,
   y: number,
   color: string,
+  filled = true,
 ): void {
   const size = 6
   const top = y + 3
   if (phase === 'warning') {
-    ctx.fillStyle = color
     ctx.beginPath()
     ctx.moveTo(x + size / 2, top)
     ctx.lineTo(x + size, top + size)
     ctx.lineTo(x, top + size)
     ctx.closePath()
-    ctx.fill()
+    if (filled) {
+      ctx.fillStyle = color
+      ctx.fill()
+    } else {
+      ctx.strokeStyle = color
+      ctx.lineWidth = 1
+      ctx.stroke()
+    }
     return
   }
   if (phase === 'active') {
@@ -219,11 +333,12 @@ export function drawHazardBlock(
 
     // The band. Only the reaction window gets one, and only the reaction window
     // breathes: a row that pulses while nothing is happening is a row nobody reads
-    // when something is.
+    // when something is. Its colour is the severity's, not the phase's — a warning for
+    // something that cannot take integrity is still a warning, just not a red one.
     if (status.urgent) {
       const breath = pulse(tick, WARNING_PULSE_DEPTH, reduce)
       // Derived from the token, never written as a literal: see `withAlpha`.
-      ctx.fillStyle = withAlpha(Palette.danger, WARNING_BAND_ALPHA * breath)
+      ctx.fillStyle = withAlpha(status.mark, WARNING_BAND_ALPHA * breath)
       ctx.fillRect(x - 4, top - 2, w + 8, bodyH + 2)
     }
 
@@ -232,7 +347,7 @@ export function drawHazardBlock(
     ctx.fillRect(x - 4, top - 2, EDGE_W, bodyH + 2)
     ctx.globalAlpha = 1
 
-    drawMarker(ctx, hazard.phase, x, top, status.color)
+    drawMarker(ctx, hazard.phase, x, top, status.color, status.harmful || !status.urgent)
 
     // Countdown right-aligned, name left, measured so the two cannot collide — the
     // same failure the panel's stat line was built to avoid.
@@ -251,7 +366,7 @@ export function drawHazardBlock(
       size: 12,
       weight: 600,
       baseline: 'top',
-      color: status.urgent ? Palette.dangerText : Palette.text,
+      color: status.urgent ? status.color : Palette.text,
     })
 
     if (withDescriptions) {
@@ -291,24 +406,6 @@ export function drawHazardBlock(
 // ---------------------------------------------------------------------------
 // the playfield alarm
 // ---------------------------------------------------------------------------
-
-/**
- * Kinds that take integrity when they fire.
- *
- * Read from the SIMULATION's behaviour, not from `HazardDef.damage`: `world.ts` calls
- * `applyHullDamage` for `corrosion` and spawns damaging projectiles for `debris`, and
- * for `interdiction` and `blackout` it applies nothing at all — `HazardDef.damage` is
- * dead data for both, which is why the two cards now read "does no damage" (see
- * `content/hazards.ts`). So this is a fact about kinds and cannot be falsified by a
- * content edit, which is what makes it safe to colour a warning with.
- *
- * `HazardView` does not carry `damage`, and it should not have to: a *severity* the
- * alarm derives from the kind is one fewer field on the contract. A kind added later
- * with no entry here is treated as harmless, which understates rather than overstates —
- * the wrong direction to be wrong in, but the alternative is crying danger for
- * something that cannot hurt anyone, which is the failure rule 3 exists to prevent.
- */
-const HARMFUL_KINDS: ReadonlySet<HazardKind> = new Set<HazardKind>(['corrosion', 'debris'])
 
 /**
  * Which edges of the playfield a kind's warning is anchored to.
@@ -494,7 +591,7 @@ export function drawHazardWarning(
     if (hazard.phase !== 'warning') continue
     if (shown >= MAX_ALARMS) break
     shown++
-    const harmful = HARMFUL_KINDS.has(hazard.hazardKind)
+    const harmful = hazardSeverity(hazard.hazardKind).harmful
     top = true
     harmfulTop = harmfulTop || harmful
     if (!SPATIAL_KINDS.has(hazard.hazardKind)) {
@@ -504,8 +601,10 @@ export function drawHazardWarning(
   }
   if (shown === 0) return
 
-  const topColor = harmfulTop ? Palette.danger : Palette.caution
-  const sideColor = harmfulSides ? Palette.danger : Palette.caution
+  // The tokens come from the shared mapping rather than a `? :` on the flag: a literal
+  // here would be a second place the severity-to-hue decision lives.
+  const topColor = hazardSeverityOf(harmfulTop).mark
+  const sideColor = hazardSeverityOf(harmfulSides).mark
   if (top) drawOnsetEdge(ctx, 'top', topColor, breath)
   if (sides) {
     drawOnsetEdge(ctx, 'bottom', sideColor, breath)
@@ -520,8 +619,7 @@ export function drawHazardWarning(
   for (const hazard of hazards) {
     if (hazard.phase !== 'warning') continue
     if (row >= MAX_ALARMS) break
-    const harmful = HARMFUL_KINDS.has(hazard.hazardKind)
-    const color = harmful ? Palette.danger : Palette.caution
+    const { harmful, mark: color } = hazardSeverity(hazard.hazardKind)
     const y = STRIP_Y - row * (STRIP_H + STRIP_ROW_GAP)
     row++
 

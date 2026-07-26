@@ -419,6 +419,20 @@ function panelState(overrides: Partial<PanelState> = {}): PanelState {
 }
 
 /**
+ * A hull that is actively recovering shield, which is the panel's only pulsing state.
+ *
+ * `shieldReserve` is what bounds recovery and what the reserve row draws; the base
+ * fixture leaves it at zero, which is the SPENT state and draws nothing that moves.
+ */
+function recoveringView(tick: number): WorldView {
+  const base = worldFixture()
+  return worldFixture({
+    hull: { ...base.hull, shield: 10, maxShield: 40, shieldReserve: 12 },
+    stats: { ...base.stats, tick },
+  })
+}
+
+/**
  * Every x a call put ink at, INCLUDING the far edge of a string.
  *
  * Measuring the anchor alone is how a text overflow hides from a test: the panel's
@@ -1155,7 +1169,14 @@ describe('the panel names the run mode', () => {
     ofDaily: null,
     // `version` is not read by anything under test; the fields that are read are the
     // tick count and the recorded sim version.
-    replay: { version: 3, simVersion: 4, seed: SEED, hullId: 'lien', inputs: new Uint8Array(720) },
+    replay: {
+      version: 3,
+      simVersion: 4,
+      seed: SEED,
+      hullId: 'lien',
+      certifications: [],
+      inputs: new Uint8Array(720),
+    },
   }
   const FREE: RunMode = { kind: 'free', seed: SEED, purist: false }
 
@@ -1427,6 +1448,24 @@ describe('UI rule 10: nothing pulses faster than ~1Hz', () => {
       },
     ],
     [
+      /*
+       * The shield's recovery headroom, drawn as ghost segments inside the shield
+       * meter. It breathes while recovery is running and holds still while it is
+       * suppressed — the motion IS one of the two channels that tells those states
+       * apart for a player who cannot use the hue, so it cannot be dropped, which
+       * makes measuring its rate the only way to keep it inside rule 10.
+       *
+       * The whole panel is drawn rather than the meter alone, deliberately: the
+       * engine-plume regression below got in because this list enumerated exported
+       * functions instead of covering the screen. Nothing else in a hazard-free panel
+       * varies with the tick, so the series this samples is the headroom's alone.
+       */
+      'shield recovery headroom',
+      (ctx, tick) => {
+        drawPanel(ctx, recoveringView(tick), panelState())
+      },
+    ],
+    [
       // REGRESSION. This shipped at 8.59 Hz — 0.9 rad/tick — modulating an additive
       // plume between 8.8 and 22 units of emitting area, on the one object a player
       // looks at continuously for a whole run. The rule-10 suite existed and did not
@@ -1539,6 +1578,12 @@ const ATTENUATED: ReadonlyArray<
   [
     'boss core',
     (ctx, reduce) => drawBossHull(ctx, bossEnemy(), 200, 160, { tick: 12, reduceFlashes: reduce }),
+  ],
+  [
+    // The panel's recovery headroom. On this list because it pulses, and a pulse the
+    // setting does not reach is a pulse the player asked to be rid of and still has.
+    'shield recovery headroom',
+    (ctx, reduce) => drawPanel(ctx, recoveringView(12), panelState({ reduceFlashes: reduce })),
   ],
 ]
 

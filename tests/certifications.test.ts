@@ -14,10 +14,14 @@
  * entry that never lights up.
  */
 
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   BASE_POOL,
   CERTIFICATIONS,
+  GRANTS_AWAITING_CONTENT,
   POOL_SLICES,
   getCertification,
   type CertificationDef,
@@ -34,6 +38,7 @@ import { resolveStat } from '../src/sim/stats'
 import {
   CERTIFICATION_IDS,
   DEFAULT_CERTIFICATIONS,
+  MAX_CERTIFICATION_MASK_BYTES,
   EMPTY_RUN_SUMMARY,
   coerceProgress,
   coerceUnlockedIds,
@@ -48,8 +53,11 @@ import {
   grantCounts,
   isCertificationId,
   mergeProgress,
+  packCertifications,
   poolFor,
+  poolForRun,
   poolSize,
+  unpackCertifications,
   sliceNoun,
   unlockedSet,
   type RunSummary,
@@ -334,24 +342,48 @@ describe('the roster', () => {
   /**
    * Slices the run actually draws from `poolFor(...)` today.
    *
-   * THIS LIST, NOT "DOES THE ID EXIST", is what decides whether a grant is live, and
-   * the distinction only started to matter with M5. Before it, a pending grant was
-   * always pending because the content had not been written. Now the hulls, the boss
-   * variants and the hazards all ship and are still not gated:
+   * THIS LIST, NOT "DOES THE ID EXIST", is what decides whether a grant is live.
+   * Two slices are wired:
    *
-   *   - `hulls` reaches the pool, but `src/main.ts` issues `pool.hulls[0]`, which is
-   *     always the Lien because the base pool is always first. No hull selection
-   *     screen exists, so a granted hull is never issued.
+   *   - `workOrders`: the app passes `runPool.workOrders` into `new World(...)` and
+   *     `World.maybeOpenChoice` builds the card from it.
+   *   - `hulls`: the app passes `runPool.hulls` to `offerHulls` and shows
+   *     `src/ui/hullSelect.ts`, then launches on the hull the player picked.
+   *
+   * Four are not:
+   *
    *   - `bossVariants`: `pickVariant` reads `BossDef.variants` directly.
    *   - `hazards`: armed from the stage definition, never from a pool.
-   *   - `items` and `enemies` are handed to the sim as whole tables.
+   *   - `items` and `enemies` are handed to the sim as whole tables. Those two
+   *     additionally cannot ever carry a live grant while `BASE_POOL` derives them
+   *     from `Object.keys` — see the header of `src/content/certifications.ts`.
    *
-   * A grant on an ungated slice does nothing, so its card must say so — otherwise
-   * the hangar advertises a reward the game will not hand over. Wiring one of these
-   * up means moving it into this list and watching the `awaiting` assertions below
-   * demand that the copy be corrected in the same change.
+   * THIS LIST WENT STALE ONCE AND THE COST WAS PAID BY THE PLAYER. It said
+   * `['workOrders']` for the whole of the milestone in which `src/ui/hullSelect.ts`
+   * shipped, so four cards kept `awaiting: 'a hull selection screen'` — the hangar
+   * telling a pilot an earned hull could not be flown while the screen that flies it
+   * was one keypress away. Worse, the `awaiting` assertion below *required* that
+   * string, so the guard was holding the wrong copy in place.
+   *
+   * A hand-maintained list cannot notice that. So `derives the honoured list from
+   * what src/ actually reads` below re-derives it from the source and fails if the
+   * two disagree, in either direction.
    */
-  const POOL_SLICES_HONOURED: readonly PoolSlice[] = ['workOrders']
+  const POOL_SLICES_HONOURED: readonly PoolSlice[] = ['workOrders', 'hulls']
+
+  /**
+   * The other side of the partition, with the reason each slice is inert.
+   *
+   * Stated rather than computed as `POOL_SLICES minus honoured`, so that adding a
+   * seventh slice is a decision someone has to write a sentence about instead of a
+   * default that lands silently on the inert side.
+   */
+  const POOL_SLICES_INERT: Readonly<Partial<Record<PoolSlice, string>>> = {
+    items: 'handed to the sim as the whole ITEMS table; BASE_POOL.items is Object.keys(ITEMS)',
+    enemies: 'handed to the sim as whole tables; BASE_POOL.enemies is Object.keys(ENEMIES)',
+    bossVariants: 'pickVariant reads BossDef.variants directly, never poolFor(...).bossVariants',
+    hazards: 'armed from the stage definition, never drawn from a pool',
+  }
 
   /** Does the id resolve to something in a shipped content table? */
   function grantExists(grant: { slice: PoolSlice; id: string }): boolean {
@@ -386,6 +418,144 @@ describe('the roster', () => {
         expect((def.awaiting ?? '').trim().length).toBeGreaterThan(0)
       }
     }
+  })
+
+  /**
+   * ---------------------------------------------------------------------------
+   * THE GUARD D6 SHOULD HAVE HAD. Four tests, and they are worth more than any of
+   * the individual grants they were written to catch.
+   *
+   * Eight granted ids resolved to nothing in any content table — `tally-turret`,
+   * `tally-escort`, `drone-uplink`, `mirror-mount`, `ranging-computer`,
+   * `precision-sights`, `turret-siege`, `debris-cascade` — and every one of them
+   * typechecked, because `PoolGrant.id` is a `string` and `poolFor` never looks an id
+   * up. `fingerprintPool` then hashed the phantoms into the pilot's record. Nothing
+   * failed, and nothing would have failed until a slice was wired and `getEnemy`
+   * threw on a launch path.
+   *
+   * `tests/hulls.test.ts` and `tests/bosses.test.ts` each had this check for their own
+   * slice, which is exactly why `hulls` and `bossVariants` were clean and the other
+   * four were not. Doing it per-table means the table nobody thought about is the one
+   * that rots. These are over every slice at once.
+   * ---------------------------------------------------------------------------
+   */
+
+  it('resolves every granted id to a real entry in the table its slice names', () => {
+    const registered = new Set(
+      GRANTS_AWAITING_CONTENT.map((entry) => `${entry.slice}/${entry.id}`),
+    )
+    for (const def of CERTIFICATIONS) {
+      for (const grant of def.grants) {
+        const key = `${grant.slice}/${grant.id}`
+        expect(
+          grantExists(grant) || registered.has(key),
+          `${def.id} grants "${key}", which no content table answers to and which is ` +
+            `not registered in GRANTS_AWAITING_CONTENT. Author the content, delete the ` +
+            `grant, or register the id with the reason it cannot exist yet.`,
+        ).toBe(true)
+      }
+    }
+  })
+
+  it('keeps the awaiting-content registry from becoming folklore', () => {
+    // Both directions, because a registry is only load-bearing if it cannot drift.
+    // An entry whose content has since shipped would let a real id sit in the escape
+    // hatch forever; an entry no grant names is a note about nothing.
+    const granted = new Set(
+      CERTIFICATIONS.flatMap((def) => def.grants.map((g) => `${g.slice}/${g.id}`)),
+    )
+    for (const entry of GRANTS_AWAITING_CONTENT) {
+      const key = `${entry.slice}/${entry.id}`
+      expect(
+        grantExists({ slice: entry.slice, id: entry.id }),
+        `${key} is registered as awaiting content but the content SHIPPED — delete the ` +
+          `registry entry so the grant is checked against the table like every other one`,
+      ).toBe(false)
+      expect(granted.has(key), `${key} is registered but no certification grants it`).toBe(true)
+      // A vague reason is how a gap becomes folklore, per HULLS_AWAITING_MECHANICS.
+      expect(entry.needs.length, `${key} gives no real reason`).toBeGreaterThan(80)
+    }
+    // And a grant that is dangling must be registered exactly once.
+    const keys = GRANTS_AWAITING_CONTENT.map((e) => `${e.slice}/${e.id}`)
+    expect(new Set(keys).size, 'duplicate registry entry').toBe(keys.length)
+  })
+
+  it('accounts for every pool slice as either honoured or inert, with a reason', () => {
+    // POOL_SLICES is a closed list and this is the partition of it. A seventh slice
+    // added tomorrow fails here until somebody says which side it is on and why,
+    // rather than defaulting to "inert" and taking a grant down with it.
+    const honoured = [...POOL_SLICES_HONOURED].sort()
+    const inert = Object.keys(POOL_SLICES_INERT).sort()
+    expect(
+      [...honoured, ...inert].sort(),
+      'POOL_SLICES_HONOURED and POOL_SLICES_INERT must partition POOL_SLICES exactly',
+    ).toEqual([...POOL_SLICES].sort())
+    for (const slice of honoured) {
+      expect(inert, `${slice} is listed as both honoured and inert`).not.toContain(slice)
+    }
+    for (const [slice, reason] of Object.entries(POOL_SLICES_INERT)) {
+      expect((reason ?? '').length, `${slice} is inert for no stated reason`).toBeGreaterThan(20)
+    }
+  })
+
+  it('derives the honoured list from what src/ actually reads, not from this file', () => {
+    /**
+     * THE ONE THAT WOULD HAVE CAUGHT D4.
+     *
+     * `POOL_SLICES_HONOURED` is a claim about code in another directory, and every
+     * other assertion in this block trusts it. A hand-maintained claim about someone
+     * else's file is a claim that goes stale on the day that file improves — which is
+     * precisely what happened: `src/ui/hullSelect.ts` shipped, `src/main.ts` started
+     * reading `runPool.hulls`, and this list did not move for a whole milestone.
+     *
+     * So the wired set is re-derived from the source text: any read of `<something
+     * pool>.<slice>` outside a comment is a consumer. Anchored on an identifier
+     * containing "pool" rather than on any `.hulls`, because `world.enemies` and
+     * `world.hazards` are entity arrays and would otherwise read as pool draws.
+     *
+     * If this fails after an app-layer change, the fix is to move the slice between
+     * POOL_SLICES_HONOURED and POOL_SLICES_INERT — and then to correct the `awaiting`
+     * copy the assertions above will immediately start demanding.
+     */
+    const root = fileURLToPath(new URL('../src', import.meta.url))
+    const files = readdirSync(root, { recursive: true, encoding: 'utf8' })
+      .filter((name) => name.endsWith('.ts'))
+      .map((name) => join(root, name))
+    expect(files.length, 'found no source to scan — has src/ moved?').toBeGreaterThan(10)
+
+    const slicePattern = POOL_SLICES.join('|')
+    // `\w*[Pp]ool\w*` covers runPool, pool, basePool, fullPool and anything else a
+    // future rename produces, without matching `world.hazards`.
+    const readPattern = new RegExp(`\\b\\w*[Pp]ool\\w*\\s*\\.\\s*(${slicePattern})\\b`, 'g')
+    const wired = new Set<string>()
+    const where = new Map<string, string>()
+    for (const file of files) {
+      const source = readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/[^\n]*/g, '')
+      for (const match of source.matchAll(readPattern)) {
+        const slice = match[1]
+        if (slice === undefined) continue
+        wired.add(slice)
+        if (!where.has(slice)) where.set(slice, file.slice(root.length + 1))
+      }
+    }
+
+    const claimed = [...POOL_SLICES_HONOURED].sort()
+    const actual = [...wired].sort()
+    const claimedText: readonly string[] = claimed
+    const newlyWired = actual.filter((s) => !claimedText.includes(s))
+    const noLongerWired = claimed.filter((s) => !actual.includes(s))
+    expect(
+      actual,
+      newlyWired.length > 0
+        ? `src/ now draws ${newlyWired.join(', ')} from the pool (see ` +
+            `${newlyWired.map((s) => where.get(s)).join(', ')}) but POOL_SLICES_HONOURED ` +
+            `does not list ${newlyWired.length === 1 ? 'it' : 'them'}. Grants on ` +
+            `${newlyWired.join(', ')} are LIVE and their cards must stop saying pending.`
+        : `POOL_SLICES_HONOURED claims ${noLongerWired.join(', ')} is drawn from the pool ` +
+            `and no file under src/ reads it. Those grants are inert and their cards must say so.`,
+    ).toEqual(claimed)
   })
 
   it('never says it is waiting for content that has already shipped', () => {
@@ -755,6 +925,135 @@ describe('the pool', () => {
   it('reports every slice, including the ones with no content yet', () => {
     const pool = poolFor(NONE_UNLOCKED)
     for (const slice of POOL_SLICES) expect(Array.isArray(pool[slice as PoolSlice])).toBe(true)
+  })
+})
+
+/**
+ * THE POOL AND THE IDS THAT PRODUCED IT COME OUT OF ONE CALL.
+ *
+ * A run that draws from a pool has to record which grants widened it, or the replay
+ * cannot be rebuilt (`Replay.certifications`). Two calls are two chances to build from
+ * one set and file another, and a record that names the wrong pool is worse than one
+ * that names none: it is checkable, and it is wrong.
+ */
+describe('the pool a sortie flies', () => {
+  it('returns the pool and the exact ids it was built from', () => {
+    const chosen = poolForRun(['vault-clearance'])
+    expect(chosen.certifications).toEqual(['vault-clearance'])
+    expect(chosen.pool).toEqual(poolFor(new Set(['vault-clearance'])))
+  })
+
+  it('normalises the ids the same way the save and the wire format do', () => {
+    // Roster order, de-duplicated, unknowns dropped — so "what was recorded" and "what
+    // the run used" are the same list rather than two spellings of one.
+    const messy = ['unlisted-clearance', 'not-a-certification', 'vault-clearance', 'vault-clearance']
+    const chosen = poolForRun(messy)
+    expect(chosen.certifications).toEqual(coerceUnlockedIds(messy))
+    expect(chosen.certifications).toEqual(['vault-clearance', 'unlisted-clearance'])
+    expect(chosen.pool).toEqual(poolFor(new Set(chosen.certifications)))
+  })
+
+  it('is the base pool for no ids, which is what purist means', () => {
+    const chosen = poolForRun([])
+    expect(chosen.certifications).toEqual([])
+    expect(chosen.pool).toEqual(poolFor(NONE_UNLOCKED))
+  })
+
+  it('never files a pool it did not build', () => {
+    // The property that makes the pairing worth having, over every subset size the
+    // roster can produce.
+    for (let cut = 0; cut <= CERTIFICATION_IDS.length; cut++) {
+      const ids = CERTIFICATION_IDS.slice(0, cut)
+      const chosen = poolForRun(ids)
+      expect(chosen.pool, `${cut} certifications`).toEqual(poolFor(new Set(chosen.certifications)))
+    }
+  })
+})
+
+/**
+ * THE POOL ON THE WIRE.
+ *
+ * A replay carries the certified pool as a bitmask over `CERTIFICATION_IDS`, which
+ * makes the ORDER OF THE ROSTER part of the wire format: reordering `CERTIFICATIONS`
+ * would silently reinterpret every recorded replay, with no decode error and no
+ * symptom except a run that plays differently. Nothing else in the codebase would
+ * notice, so it is pinned here id by id.
+ */
+describe('the certification bitmask', () => {
+  it('assigns each certification a fixed bit, and this list is the wire format', () => {
+    // NOT derived from CERTIFICATION_IDS — a test that recomputes the thing it is
+    // checking cannot fail. If a roster change makes this list wrong, the change has
+    // invalidated every recorded replay and the fix is a REPLAY_FORMAT_VERSION bump,
+    // not an edit to this array.
+    expect([...CERTIFICATION_IDS]).toEqual([
+      'vault-clearance',
+      'unlisted-clearance',
+      'full-manifest-rating',
+      'combination-endorsement',
+      'austerity-endorsement',
+      'marksman-rating',
+      'clearance-commendation',
+      'posthumous-data-annex',
+      'extraction-certificate',
+      'flawless-conduct-citation',
+    ])
+    expect([...packCertifications(['vault-clearance'])]).toEqual([0b0000_0001])
+    expect([...packCertifications(['unlisted-clearance'])]).toEqual([0b0000_0010])
+    expect([...packCertifications(['extraction-certificate'])]).toEqual([0x00, 0b0000_0001])
+    expect([...packCertifications(['flawless-conduct-citation'])]).toEqual([0x00, 0b0000_0010])
+  })
+
+  it('round-trips every subset of the roster', () => {
+    // 2^10 = 1,024 subsets. Exhaustive is cheap, and a bit-order bug that only shows
+    // up on one combination is exactly what a sample would miss.
+    const total = 1 << CERTIFICATION_IDS.length
+    for (let bits = 0; bits < total; bits++) {
+      const ids = CERTIFICATION_IDS.filter((_, index) => (bits & (1 << index)) !== 0)
+      expect(unpackCertifications(packCertifications(ids)), `subset ${bits}`).toEqual(ids)
+    }
+  })
+
+  it('costs nothing for a base-pool run', () => {
+    // Trailing zero bytes are trimmed, so purist runs and every sim test recording pay
+    // one length byte in a payload measured against a 2,000-character URL.
+    expect(packCertifications([]).length).toBe(0)
+    expect(unpackCertifications(new Uint8Array(0))).toEqual([])
+    expect(unpackCertifications(new Uint8Array([0, 0, 0]))).toEqual([])
+  })
+
+  it('encodes a set, not a sequence', () => {
+    const shuffled = ['marksman-rating', 'vault-clearance', 'marksman-rating']
+    expect([...packCertifications(shuffled)]).toEqual([
+      ...packCertifications(['vault-clearance', 'marksman-rating']),
+    ])
+    expect(unpackCertifications(packCertifications(shuffled))).toEqual([
+      'vault-clearance',
+      'marksman-rating',
+    ])
+  })
+
+  it('drops an id it does not know on the way out', () => {
+    // Same rule as `coerceUnlockedIds`: there is no bit to set, so there is nothing to
+    // write. The refusal belongs on the way IN, where a set bit means a grant that
+    // cannot be rebuilt.
+    expect([...packCertifications(['not-a-certification'])]).toEqual([])
+  })
+
+  it('refuses a mask naming a certification this build does not have', () => {
+    // A replay from a build with an eleventh certification. Not corruption — but the
+    // mask is positional, so this build cannot name the grant, cannot rebuild the
+    // pool, and must not play the run without it and call it the same run.
+    const beyond = CERTIFICATION_IDS.length
+    const mask = new Uint8Array(Math.floor(beyond / 8) + 1)
+    mask[beyond >> 3] = 1 << (beyond & 7)
+    expect(unpackCertifications(mask)).toBeNull()
+  })
+
+  it('bounds the mask so a length field cannot allocate a run', () => {
+    expect(MAX_CERTIFICATION_MASK_BYTES * 8).toBeGreaterThanOrEqual(CERTIFICATION_IDS.length)
+    expect(packCertifications(CERTIFICATION_IDS).length).toBeLessThanOrEqual(
+      MAX_CERTIFICATION_MASK_BYTES,
+    )
   })
 })
 

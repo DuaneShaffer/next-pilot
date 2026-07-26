@@ -23,8 +23,16 @@ import {
   drawBossHealthBar,
 } from './boss'
 import { drawHazardBlock } from './hazards'
-import { Font, Palette } from './palette'
-import { canvasMeasure, drawLabel, drawText, drawValue, measureText } from './text'
+import { pulse } from './intensity'
+import { Font, Palette, withAlpha } from './palette'
+import {
+  canvasMeasure,
+  drawLabel,
+  drawText,
+  drawValue,
+  formatSeconds,
+  measureText,
+} from './text'
 
 const PAD = 14
 const CONTENT_X = PLAYFIELD_W + PAD
@@ -89,6 +97,36 @@ function numeral(value: number): string {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
 }
 
+/**
+ * The recovery headroom fill, as a fraction of the meter's own colour.
+ *
+ * Deliberately between the filled segment (full colour) and the empty one
+ * (`panelRaised`), so the bar reads as three distinct values rather than two: what
+ * you have, what you can get back, and what is gone.
+ */
+const GHOST_ALPHA = 0.45
+/** Depth of the headroom's breath while recovery is actually running. */
+const GHOST_PULSE_DEPTH = 0.4
+/** Height of the static floor line drawn instead, while recovery is suppressed. */
+const GHOST_HELD_H = 3
+
+/**
+ * A dim fill beyond the meter's value, showing how far it can still be restored.
+ *
+ * `motion` is the SECOND CHANNEL, and it is the point of the option existing rather
+ * than a caller drawing this itself. `flowing` fills the whole segment and breathes;
+ * `held` collapses to a floor line and is still. Those two silhouettes are
+ * distinguishable in greyscale, in every simulated colour deficiency, and at the
+ * smallest supported window — which no pair of hues on this palette is.
+ */
+interface MeterGhost {
+  /** Value the meter can be restored to. Clamped to `max`. */
+  upTo: number
+  motion: 'flowing' | 'held'
+  tick: number
+  reduceFlashes: boolean
+}
+
 interface MeterOptions {
   label: string
   value: number
@@ -98,6 +136,7 @@ interface MeterOptions {
   /** Below this fraction the meter switches to the caution/danger colour. */
   warnBelow?: number
   segments?: number
+  ghost?: MeterGhost
 }
 
 /**
@@ -157,6 +196,39 @@ function drawMeter(ctx: CanvasRenderingContext2D, top: number, options: MeterOpt
   }
 
   /**
+   * Headroom, drawn on the meter's OWN axis rather than in a track of its own.
+   *
+   * The shield reserve is denominated in shield points, so the honest place to show
+   * it is inside the bar those points fill: the ghost segments say "break contact and
+   * the shield comes back to here". A separate strip would have cost the flexible
+   * region below another row and made the player convert between two scales under
+   * fire, which is exactly the arithmetic a HUD exists to have already done.
+   *
+   * `color`, not `barColor` — the headroom belongs to the resource, so a meter that
+   * has gone critical must not paint its recovery in `danger`. Nothing about being
+   * able to recover can hurt you, which is rule 3's whole line on that token.
+   */
+  const ghost = options.ghost
+  if (ghost && filledSegments < segments && ghost.upTo > value) {
+    const ghostFraction = max > 0 ? Math.max(0, Math.min(1, ghost.upTo / max)) : 0
+    // At least one segment whenever any headroom exists. Rounding alone would hide a
+    // reserve smaller than half a segment — the exact moment the player most needs to
+    // know it is nearly gone.
+    const ghostSegments = Math.min(
+      segments,
+      Math.max(filledSegments + 1, Math.round(ghostFraction * segments)),
+    )
+    const flowing = ghost.motion === 'flowing'
+    const breath = flowing ? pulse(ghost.tick, GHOST_PULSE_DEPTH, ghost.reduceFlashes) : 1
+    ctx.fillStyle = withAlpha(color, GHOST_ALPHA * breath)
+    const ghostH = flowing ? barH : GHOST_HELD_H
+    const ghostY = flowing ? barTop : barTop + barH - GHOST_HELD_H
+    for (let i = filledSegments; i < ghostSegments; i++) {
+      ctx.fillRect(CONTENT_X + i * (segW + gap), ghostY, segW, ghostH)
+    }
+  }
+
+  /**
    * A SECOND CHANNEL for critical, because colour alone cannot carry it.
    *
    * Going critical used to be a hue swap in place — same bar, same segments, same
@@ -201,7 +273,15 @@ function drawMeter(ctx: CanvasRenderingContext2D, top: number, options: MeterOpt
 const STAT_VALUE_SIZE = 13
 /** Mirrors drawValue's internal unit sizing, so the measurement matches the draw. */
 const STAT_UNIT_SIZE = Math.max(Font.minSizePx, STAT_VALUE_SIZE - 4)
-const STAT_MIN_GAP = 10
+/**
+ * Least horizontal air between a label and the value on its right.
+ *
+ * Exported because it is the standard the reserve row is held to as well, and
+ * `tests/shieldReserve.test.ts` asserts against it rather than restating a 10: a row
+ * that merely fails to *overlap* is still unreadable, so the assertion has to be the
+ * gap, and a copy of the number in the test would be a copy that can drift.
+ */
+export const STAT_MIN_GAP = 10
 
 function drawStatLine(
   ctx: CanvasRenderingContext2D,
@@ -236,6 +316,199 @@ function drawStatLine(
     color: valueColor,
   })
   return top + 34
+}
+
+// ---------------------------------------------------------------------------
+// shield recovery
+// ---------------------------------------------------------------------------
+
+/**
+ * What the shield's per-sector recovery reserve is doing.
+ *
+ * THE RESERVE IS THE MECHANIC. The shield recovers at 4 sp/s after 2.5 s without a
+ * hit, but only while `Hull.shieldReserve` lasts, and that budget refills on sector
+ * entry rather than on the clock (see "The shield recharges" in docs/DESIGN.md, and
+ * the measurement table on `shieldReservePerSector`). So the decision the feature
+ * exists to create — is breaking contact worth it right now — is a question about the
+ * reserve, and until this shipped the reserve was pure simulation state. The player
+ * was being asked to plan against a number they could not see.
+ *
+ * Split out as a pure function because it is the thing worth testing: the three
+ * states the panel must never conflate are decided here, once, and
+ * `tests/shieldReserve.test.ts` drives them directly instead of inferring them from
+ * pixels.
+ */
+export type ShieldRecoveryState =
+  /** The hull carries no shield at all. There is nothing to say. */
+  | 'none'
+  /** Recovery is switched off for this build — a curse zeroed the rate or the budget. */
+  | 'off'
+  /** The sector's reserve is used up. Final until the next sector. */
+  | 'spent'
+  /** Shield is full, so the reserve is banked and waiting. */
+  | 'ready'
+  /** Hit recently; recovery is paused until the delay elapses. */
+  | 'suppressed'
+  /** Recovering, right now, this tick. */
+  | 'recovering'
+
+export interface ShieldRecovery {
+  readonly state: ShieldRecoveryState
+  /** Shield points this sector can still give back. */
+  readonly reserve: number
+  /** The shield value recovery can reach given the reserve. Never above `maxShield`. */
+  readonly ceiling: number
+  /** Ticks until recovery resumes. Zero unless suppressed. */
+  readonly waitTicks: number
+}
+
+/** Defensive read: the panel is drawn from whatever it is handed. See `stageOf`. */
+function finite(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+export function shieldRecovery(view: WorldView): ShieldRecovery {
+  const hull = view.hull as Partial<WorldView['hull']> | undefined
+  const maxShield = Math.max(0, finite(hull?.maxShield))
+  const shield = Math.max(0, Math.min(maxShield, finite(hull?.shield)))
+  const reserve = Math.max(0, finite(hull?.shieldReserve))
+  const waitTicks = Math.max(0, finite(hull?.shieldRegenBlockedTicks))
+  const ceiling = Math.min(maxShield, shield + reserve)
+  const stats = view.resolvedStats ?? {}
+
+  const base = { reserve, ceiling, waitTicks: 0 }
+  if (maxShield <= 0) return { ...base, state: 'none' }
+  // Zero rate and zero budget are different curses with the same outcome: nothing
+  // will ever come back. Saying so beats printing a reserve that can never be spent.
+  if (stats.shieldRegenPerSecond === 0 || stats.shieldReservePerSector === 0) {
+    return { ...base, state: 'off' }
+  }
+  if (reserve <= 0) return { ...base, state: 'spent' }
+  // Full shield outranks suppression deliberately. A pilot at full shield who takes a
+  // graze is not being denied anything, and flashing SUPPRESSED at them after every
+  // hit would train them to ignore the row that matters when it is not full.
+  if (shield >= maxShield) return { ...base, state: 'ready' }
+  if (waitTicks > 0) return { ...base, state: 'suppressed', waitTicks }
+  return { ...base, state: 'recovering' }
+}
+
+/**
+ * The word, which is the channel that carries the state for everyone.
+ *
+ * Colour cannot do this job alone and, on this palette, largely cannot do it at all:
+ * `caution` and `danger` are inseparable for protanopes and deuteranopes (see UI.md
+ * rule 3 and tests/palette.test.ts), so any state distinction built on hue is a
+ * distinction a twelfth of the audience does not receive. A word survives greyscale,
+ * every simulated deficiency, and a photograph of a screen — and unlike the notch
+ * precedent it also says *which* state, not merely "something is different".
+ */
+const RECOVERY_WORDS: Readonly<Record<ShieldRecoveryState, string>> = {
+  none: '',
+  off: 'NO RECOVERY',
+  spent: 'SPENT',
+  ready: 'READY',
+  suppressed: 'SUPPRESSED',
+  recovering: 'RECOVERING',
+}
+
+/**
+ * Colour is the fourth channel here, behind the word, the bar's silhouette and its
+ * motion. It only ever reinforces.
+ *
+ * `spent` is `caution` because that token means exactly "resource exhausted", and the
+ * state lasts the rest of the sector so it cannot become noise. `suppressed` is
+ * NEUTRAL rather than caution: it happens after every single hit, and a warning
+ * colour that fires constantly is how a warning colour stops being read.
+ */
+function recoveryColor(state: ShieldRecoveryState): string {
+  switch (state) {
+    case 'recovering':
+      return Palette.self
+    case 'spent':
+      return Palette.caution
+    case 'off':
+      return Palette.textFaint
+    default:
+      return Palette.textDim
+  }
+}
+
+/**
+ * The number on the right of the row, which differs by state on purpose.
+ *
+ * While suppressed the useful number is *when recovery resumes*, not how much is
+ * banked — the pilot already knows they were hit and is deciding whether the gap they
+ * are about to make is long enough. How much is left is carried through suppression
+ * by the ghost segments in the bar above, which do not disappear, so nothing is lost
+ * by spending this slot on the countdown.
+ */
+function recoveryReadout(recovery: ShieldRecovery): { value: string; unit: string } | null {
+  if (recovery.state === 'none' || recovery.state === 'off') return null
+  if (recovery.state === 'suppressed') {
+    return { value: formatSeconds(recovery.waitTicks), unit: 's' }
+  }
+  return { value: numeral(recovery.reserve), unit: 'sp left' }
+}
+
+const RECOVERY_TEXT_SIZE = 12
+const RECOVERY_UNIT_SIZE = Math.max(Font.minSizePx, RECOVERY_TEXT_SIZE - 4)
+/** Gap between the shield bar and the row, tight enough to read as one group. */
+const RECOVERY_ROW_GAP = 3
+const RECOVERY_ROW_H = 15
+
+/**
+ * The reserve row: state word left, its number right.
+ *
+ * PAID FOR OUT OF THE FLEXIBLE REGION, which loses 18 units. That is the honest cost
+ * and it is the right trade: this panel's own priority order (see the void comment in
+ * `drawPanel`) puts threat first and the build readout — "the only readout here that
+ * is about a decision already made" — last, and the reserve is a threat readout. The
+ * worst case is one fewer item name during a boss fight. Nothing shrinks below the
+ * 11px floor; the alternative that would have, a two-line reserve block, was refused.
+ *
+ * The unit degrades from `sp left` to `sp` rather than colliding, the same
+ * measure-first discipline `drawStatLine` uses. A relic can push the reserve to three
+ * digits and "RECOVERING" is a wide word.
+ */
+function drawShieldReserveRow(
+  ctx: CanvasRenderingContext2D,
+  top: number,
+  recovery: ShieldRecovery,
+): number {
+  if (recovery.state === 'none') return top
+
+  const color = recoveryColor(recovery.state)
+  const word = RECOVERY_WORDS[recovery.state]
+  const wordWidth = measureText(ctx, word, {
+    size: RECOVERY_TEXT_SIZE,
+    weight: 600,
+    tracking: 1.4,
+  })
+  drawText(ctx, word, CONTENT_X, top, {
+    size: RECOVERY_TEXT_SIZE,
+    weight: 600,
+    tracking: 1.4,
+    baseline: 'top',
+    color,
+  })
+
+  const readout = recoveryReadout(recovery)
+  if (readout) {
+    const widthOf = (unit: string): number =>
+      measureText(ctx, readout.value, { size: RECOVERY_TEXT_SIZE, weight: 600 }) +
+      (unit ? 4 + measureText(ctx, unit, { size: RECOVERY_UNIT_SIZE }) : 0)
+
+    let unit = readout.unit
+    if (wordWidth + STAT_MIN_GAP + widthOf(unit) > CONTENT_W) unit = unit.split(' ')[0] ?? unit
+    const total = widthOf(unit)
+    drawValue(ctx, readout.value, unit, CONTENT_X + CONTENT_W - total, top, {
+      size: RECOVERY_TEXT_SIZE,
+      baseline: 'top',
+      color,
+    })
+  }
+
+  return top + RECOVERY_ROW_H
 }
 
 /** A faint section heading. Marks a group as secondary to the meters above it. */
@@ -639,6 +912,12 @@ export function drawPanel(
   })
   y += BETWEEN_GROUPS
 
+  // The shield group is a meter plus a reserve row, and the two are one readout: the
+  // ghost segments in the bar are the reserve drawn in shield points, and the row
+  // names the state and the number. See `shieldRecovery`.
+  const recovery = shieldRecovery(view)
+  const flowing = recovery.state === 'recovering'
+  const showsGhost = flowing || recovery.state === 'suppressed'
   y = drawMeter(ctx, y, {
     label: 'Shield',
     value: view.hull.shield,
@@ -646,7 +925,18 @@ export function drawPanel(
     unit: 'sp',
     color: Palette.self,
     segments: 8,
+    ...(showsGhost
+      ? {
+          ghost: {
+            upTo: recovery.ceiling,
+            motion: flowing ? ('flowing' as const) : ('held' as const),
+            tick: finite(view.stats?.tick),
+            reduceFlashes: state.reduceFlashes ?? false,
+          },
+        }
+      : {}),
   })
+  y = drawShieldReserveRow(ctx, y + RECOVERY_ROW_GAP, recovery)
   y += BEFORE_DIVIDER
   drawDivider(ctx, y)
   y += AFTER_DIVIDER

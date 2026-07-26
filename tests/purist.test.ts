@@ -28,6 +28,9 @@ import {
   type RunPool,
 } from '../src/meta/purist'
 import { SIM_VERSION } from '../src/meta/simVersion'
+import { BASE_POOL as SHIPPED_BASE_POOL } from '../src/content/certifications'
+import { CERTIFICATION_IDS, poolForRun } from '../src/meta/certifications'
+import { certificationsForMode, resolveRunMode, type RunMode } from '../src/meta/seedModes'
 
 /** The base pool an unmodified build would offer. Small on purpose. */
 const BASE_POOL: RunPool = makePool({
@@ -286,5 +289,65 @@ describe('the empty pool', () => {
   it('is not mutated by makePool', () => {
     makePool({ items: ['injected'] })
     expect(EMPTY_POOL.items).toEqual([])
+  })
+})
+
+/**
+ * THE VERDICT AND THE RUN, JOINED UP.
+ *
+ * Everything above tests `verifyPurist` against fabricated pools. This block runs the
+ * real path end to end: the mode decides the certifications, `poolForRun` builds the
+ * pool, `main.ts` fingerprints exactly that pool into the personnel record, and
+ * `src/ui/personnel.ts` asks `verifyPurist` for the badge.
+ *
+ * That chain was BROKEN in a way none of the unit tests could see. The pool was built
+ * from the save regardless of the mode, so a certified pilot flying the daily contract
+ * filed a fingerprint that read `expanded` — a contract that is purist by definition,
+ * recorded as not purist, on a screen that would then decline to compare it with
+ * anyone. The record was honest; the run was wrong.
+ */
+describe('a run that should be purist files a purist record', () => {
+  const REAL_BASE = makePool(SHIPPED_BASE_POOL)
+
+  function fingerprintOfRun(mode: RunMode, unlocked: readonly string[]): string {
+    // Exactly what src/main.ts files: fingerprintPool of the pool the run was built
+    // with, and nothing about the mode.
+    return fingerprintPool(makePool(poolForRun(certificationsForMode(mode, unlocked)).pool))
+  }
+
+  function verdictFor(mode: RunMode, unlocked: readonly string[]) {
+    return verifyPurist(
+      {
+        poolFingerprint: fingerprintOfRun(mode, unlocked),
+        simVersion: SIM_VERSION,
+        stateDigest: null,
+      },
+      REAL_BASE,
+    )
+  }
+
+  const EVERYTHING = [...CERTIFICATION_IDS]
+
+  const modeFor = (params: Record<string, string>): RunMode =>
+    resolveRunMode({
+      params: new URLSearchParams(params),
+      now: new Date('2026-07-25T12:00:00.000Z'),
+      dailyRecord: null,
+      randomSeed: () => 'K7F29XQM3RTV',
+    }).mode
+
+  it('reads purist for a daily contract flown by a fully certified pilot', () => {
+    expect(verdictFor(modeFor({ daily: '1' }), EVERYTHING).kind).toBe('purist')
+  })
+
+  it('reads purist for a ?purist=1 link opened by a fully certified pilot', () => {
+    expect(verdictFor(modeFor({ seed: 'K7F29XQM3RTV', purist: '1' }), EVERYTHING).kind).toBe('purist')
+  })
+
+  it('still reads expanded for an ordinary run on a certified pool', () => {
+    // The verdict has to keep meaning something. A plain shared seed is not a
+    // comparability claim, so a certified pilot flying one files `expanded`.
+    expect(verdictFor(modeFor({ seed: 'K7F29XQM3RTV' }), EVERYTHING).kind).toBe('expanded')
+    expect(verdictFor(modeFor({ seed: 'K7F29XQM3RTV' }), []).kind).toBe('purist')
   })
 })

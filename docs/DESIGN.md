@@ -339,8 +339,28 @@ Consequences recorded honestly:
   fails if the run is unchanged. Holding an item proves nothing; that check demanded the effect
   actually fire, and refused a fixture claiming seven-of-seven while proving five. The probe hull
   now switches recovery off so the bus stays covered — see `tests/replays/content.ts`.
-- Not yet done: the reserve is simulation state and the HUD does not show it. A recovery budget the
-  player cannot see is a budget they cannot plan a disengage around, which is most of the point.
+- **The HUD shows the reserve, and the state it is in.** A recovery budget the player cannot see is
+  a budget they cannot plan a disengage around, which is most of the point, so the shield meter now
+  carries three readings instead of one: filled segments are shield held, dim segments are how far
+  recovery can push it back given the reserve, and empty is gone for the sector. A row beneath names
+  the state — `RECOVERING`, `SUPPRESSED` with the countdown, `SPENT`, `READY`, `NO RECOVERY` — with
+  the reserve in `sp left`.
+
+  Three channels, because one is not enough here: `caution` and `danger` are inseparable for
+  protanopes and deuteranopes on this palette (UI.md rule 3), so the states are told apart by the
+  WORD first, by the headroom's silhouette second (full segment while recovering, a floor line while
+  suppressed, absent when spent), and by hue only as reinforcement. The headroom breathes through the
+  shared `pulse()` at 0.85 Hz and attenuates under `reduceFlashes`.
+
+  It costs the flexible region 18 units, which is paid by the build readout during a boss fight —
+  the panel's stated priority is threat first and "a decision already made" last, and the reserve is
+  a threat readout. Captures confirm the cost is one or two item names, never an overlap.
+
+  **What the captures then showed, and it is a balance note rather than a rendering one:** in every
+  mid-run screenshot the row reads `SPENT`. A 15-point reserve at 4 sp/s is gone in under four
+  seconds of quiet, so for most of a sector the mechanic is not running. That was true before it was
+  drawn; nobody could see it. Worth re-measuring against the clear-rate table above before the next
+  balance pass.
 
 ## Items and synergy
 

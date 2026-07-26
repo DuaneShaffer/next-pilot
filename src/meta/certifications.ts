@@ -506,6 +506,109 @@ export function poolFor(
   return out
 }
 
+/** A pool, and the exact ids it was built from. Never one without the other. */
+export interface RunPoolChoice {
+  /** Roster order, de-duplicated, unknown ids dropped. Empty for a purist run. */
+  readonly certifications: readonly string[]
+  readonly pool: RunPool
+}
+
+/**
+ * The pool a sortie flies, together with the exact ids that produced it.
+ *
+ * ONE CALL RETURNING BOTH, and that pairing is the whole point. The pool is a
+ * simulation input — `World`'s `workOrders` and the hull offer both come out of it —
+ * so a run that draws from a pool has to *record* which ids widened it, or a replay
+ * of that run cannot be reconstructed (`Replay.certifications`). Two separate calls
+ * are two chances to build from one set and file another, and a record that names the
+ * wrong pool is worse than one that names none: it is checkable, and it is wrong.
+ *
+ * WHICH IDS APPLY IS THE MODE'S DECISION, not this function's — see
+ * `certificationsForMode` in seedModes.ts. A daily contract passes none whatever the
+ * pilot has certified, and a replay passes what its recording named.
+ *
+ * `coerceUnlockedIds` runs first, so the certifications carried forward are roster
+ * order with unknowns dropped — the same normalisation the save and the wire format
+ * apply, which is what makes "recorded ids" and "ids the run used" the same list.
+ */
+export function poolForRun(
+  granting: readonly string[],
+  base: RunPool = BASE_POOL,
+  roster: readonly CertificationDef[] = CERTIFICATIONS,
+): RunPoolChoice {
+  const certifications = coerceUnlockedIds(granting)
+  return { certifications, pool: poolFor(new Set(certifications), base, roster) }
+}
+
+// ---------------------------------------------------------------------------
+// the pool on the wire
+// ---------------------------------------------------------------------------
+
+/**
+ * Bits per byte of the certification mask, and the ceiling on how many bytes a
+ * replay may carry.
+ *
+ * Eight bytes is 64 certifications against today's ten. A bound rather than an
+ * assumption, because the length byte comes off an attacker-controlled URL.
+ */
+export const MAX_CERTIFICATION_MASK_BYTES = 8
+
+/**
+ * The certified pool as a bitmask over `CERTIFICATION_IDS`. Bit *i*, little-endian,
+ * is `CERTIFICATION_IDS[i]`.
+ *
+ * A MASK RATHER THAN A LIST OF IDS, and rather than a fingerprint. A fingerprint can
+ * verify a pool but cannot rebuild one, and a replay has to be *flown*, not merely
+ * checked — so the recorded value has to name the grants. Ids would be self-
+ * describing but cost ~20 bytes each in a payload measured against a 2,000-character
+ * URL; ten certifications fit in two bytes.
+ *
+ * WHAT THAT BUYS AND WHAT IT COSTS: the bit assignment is positional, so the ORDER OF
+ * `CERTIFICATIONS` IS NOW WIRE FORMAT. Reordering the roster silently reinterprets
+ * every recorded replay — no decode error, just a different pool. `tests/
+ * certifications.test.ts` pins the assignment id-by-id for exactly that reason.
+ *
+ * Trailing zero bytes are trimmed, so a base-pool run costs one length byte and
+ * nothing else, and so two runs with the same grants always encode identically.
+ */
+export function packCertifications(granting: readonly string[]): Uint8Array {
+  const held = new Set(coerceUnlockedIds(granting))
+  const bytes: number[] = []
+  for (let i = 0; i < CERTIFICATION_IDS.length; i++) {
+    const id = CERTIFICATION_IDS[i]
+    if (id === undefined || !held.has(id)) continue
+    const index = i >> 3
+    while (bytes.length <= index) bytes.push(0)
+    bytes[index] = (bytes[index] ?? 0) | (1 << (i & 7))
+  }
+  return Uint8Array.from(bytes)
+}
+
+/**
+ * The inverse, or null when a bit is set that this build's roster cannot name.
+ *
+ * NULL RATHER THAN "IGNORE THE BIT", which is the opposite of what `coerceUnlockedIds`
+ * does for a *save* and the difference is deliberate. Dropping an unknown id from a
+ * save costs the player a certification they can earn again. Dropping an unknown bit
+ * from a replay produces a pool the recording did not use and plays back a different
+ * run under the original's name — the silent-divergence failure the whole format
+ * version exists to prevent. An id is self-describing and can be reported as "that
+ * hull no longer exists"; a bit index cannot be reported as anything.
+ */
+export function unpackCertifications(mask: Uint8Array | readonly number[]): readonly string[] | null {
+  const out: string[] = []
+  for (let index = 0; index < mask.length; index++) {
+    const byte = mask[index] ?? 0
+    for (let bit = 0; bit < 8; bit++) {
+      if ((byte & (1 << bit)) === 0) continue
+      const id = CERTIFICATION_IDS[index * 8 + bit]
+      if (id === undefined) return null
+      out.push(id)
+    }
+  }
+  return out
+}
+
 /** Total ids across every slice. The hangar's "pool: X of Y entries". */
 export function poolSize(pool: RunPool): number {
   let total = 0

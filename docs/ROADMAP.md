@@ -65,8 +65,9 @@ it can't be.
 - [x] Screen shake, capped at 6 virtual units at ~10.5Hz, clipped to the playfield so the panel
       provably cannot move, and fully disableable from the pause menu (UI rule 10)
 - [x] Impact flashes, hit sparks, layered explosions
-- [x] Muzzle flash and tracer variation. **Shell ejection deliberately not done** — skipped to
-      protect the frame budget; see the note below rather than assuming it shipped.
+- [x] Muzzle flash and tracer variation, and **shell ejection**, which this line recorded as
+      deliberately skipped for the frame budget until 2026-07-26. It shipped; the 12× headroom
+      measured below is why the scope decision went the other way. See the carried-forward note.
 - [x] WebAudio synthesis, 14 cues, zero binary assets
 - [x] Damage numbers near the ship (UI rule 9), aggregated so 20 hits/second on one target is one
       climbing number rather than twenty
@@ -126,13 +127,22 @@ unchanged and still monotone — a useful demonstration that spawned HP is only 
 
 **Carried forward, honestly:**
 
-- **Shell ejection** is not implemented. The 12× frame headroom means it is clearly affordable, so
-  this is now a scope decision rather than a performance one: implement it, or delete this line.
-  It should not keep sitting here looking done.
-- **`Settings.reduceFlashes` exists in the save schema but is not offered in the pause menu**,
-  because the renderer does not consume it. A control that silently does nothing is worse than a
-  missing one: it tells a photosensitive player they are protected when they are not. Add the row
-  in the same change that makes the renderer honour it.
+- ~~**Shell ejection** is not implemented.~~ **Shipped** (`drawFeelShells`, `src/render/feel.ts:764`,
+  called from `src/render/scene.ts:740`). Verified 2026-07-26; this entry had gone stale in the
+  opposite direction from the one it warned about — it sat here looking *undone*. It also carried a
+  real defect while it sat here: shell positions were run through the 20–30 unit *label* inset from
+  `clampX`/`clampY`, which pinned brass up to 19 units off the ship at the playfield edges. Fixed,
+  with its own block in `tests/feel.test.ts` asserting the shell lands where the gun is.
+- ~~**`Settings.reduceFlashes` exists in the save schema but is not offered in the pause menu**,
+  because the renderer does not consume it.~~ **Both halves shipped.** Verified 2026-07-26: the
+  renderer consumes it (`flashScale` / `hitFlashStrength` and the shockwave path,
+  `src/render/effects.ts:207-259`, with the note at `:312` on why it is honoured in one place rather
+  than at each drawing site), it reaches the render layer from `src/main.ts:1070`/`:1112`/`:1132`,
+  and the pause menu offers the row (`src/ui/pauseMenu.ts:73`, whose comment records that it is
+  offered "now because the renderer genuinely honours it"). The playfield hazard warning added the
+  same day respects it too. The history is worth keeping and is recorded at `src/main.ts:1128`: the
+  setting shipped in save schema v3 with nothing consuming it, which is exactly the "a control that
+  silently does nothing" failure this entry was written about.
 - **Nobody has heard the audio.** See the blind spot in `docs/VERIFICATION.md`. The fix is an
   `OfflineAudioContext` render in headless Chromium producing both measurements and WAVs; it needs
   a context shim because the backend constructs its own.
@@ -273,6 +283,13 @@ spike above 35%).
 | Clear rate, 20–40% | 20.0% / 24.3% | **26.5% / 36.5%** | met |
 | Hull spread vs mean, ≤15pp | 13.6pp / 12.9pp | **12.5pp / 13.3pp** | met |
 | Worst sector death share, ≤35% | 39.2% / 36.1% | **35.4% / 36.2%** | **not met, marginally** |
+
+> **Superseded 2026-07-26** — see "Re-measurement pass" below. The clear rate moved (the shield
+> recharges now) and the death-share row was two numbers all along: 35.4% / 36.2% is the competent
+> policy, and the same sweeps' JSON reported 0.762 / 0.814 from the pooled probe set. Neither
+> number changed; the criterion has always had two readings and the harness printed one and
+> serialised the other. The base seeds are recorded here so a re-run is possible: A
+> `K7F29XQM3RTV`, C `WWQ4B8HT2NZP`.
 
 Median clearing run 16.8 minutes, inside the 15–20 target.
 
@@ -515,16 +532,24 @@ of what a cold read of the tree found.
 
 ### Below the cut — real, small, unscheduled
 
-`main.ts:968` duplicated unreachable `if (choosing)` block · `render/feel.ts:754` draws shells
-through `clampX`'s 30-unit *label* inset, pinning brass 19 units off the ship at the playfield
-edges · `render/scene.ts:292` draws the tracer head 11–14 units ahead of the bullet,
-contradicting the invariant three lines above it · `meta/save.ts:177` `{ ...DEFAULT_SAVE }`
-shallow-aliases the module defaults, so `loadSave(null).settings === DEFAULT_SAVE.settings` ·
-`meta/save.ts:290` discards `sanitizePersonnelHistory`'s `skipped`/`dropped` ·
-`meta/seedModes.ts:441` collects rejections in parse order rather than the documented precedence
-order · `meta/keybinds.ts:107` `ownerOf` returns one owner where its own repair paths can create
-two · `content/bosses.ts:736+` five stale per-boss HP comments that would re-introduce a
-documented 25-point clear-rate regression if a future author trusted them.
+**Re-checked against the tree 2026-07-26 — most of this list has been closed since it was
+written**, so it is marked rather than left to read as outstanding. What was here:
+
+- ~~`main.ts:968` duplicated unreachable `if (choosing)` block~~ — gone.
+- ~~`render/feel.ts:754` draws shells through `clampX`'s 30-unit *label* inset, pinning brass 19
+  units off the ship at the playfield edges~~ — fixed, with a test block in `tests/feel.test.ts`.
+- `render/scene.ts` draws the tracer head ahead of the bullet, contradicting the invariant above
+  it — **not re-verified**; the line has moved and this needs a reader, not a grep.
+- ~~`meta/save.ts:177` `{ ...DEFAULT_SAVE }` shallow-aliases the module defaults~~ — fixed;
+  `defaultSave()` now returns a fresh save on every call and says why in its header.
+- ~~`meta/save.ts:290` discards `sanitizePersonnelHistory`'s `skipped`/`dropped`~~ — fixed
+  (`save.ts:305` records the history, and a partial load now reports itself).
+- ~~`meta/seedModes.ts:441` collects rejections in parse order~~ — fixed; the published order is
+  exported at `seedModes.ts:419` so a test can pin it.
+- ~~`meta/keybinds.ts:107` `ownerOf` returns one owner where its own repair paths can create two~~
+  — fixed; `ownersOf` (`keybinds.ts:104`) returns all of them and `ownerOf` is the convenience.
+- ~~`content/bosses.ts:736+` five stale per-boss HP comments~~ — fixed; every comment now quotes
+  the `hp` beside it (1700 / 3060 / 5760 / 7400 / 12210).
 
 ## Post-M5 pass, 2026-07-26 — what shipped
 
@@ -550,19 +575,164 @@ them, in the same day:
 
 `SIM_VERSION` 3, `DIGEST_GENERATION` 6, `REPLAY_FORMAT_VERSION` 4, corpus re-recorded.
 
-**Nine findings this pass produced, none of them yet fixed:** D1-D6 below, plus the shield's
-suppression of every integrity-triggered effect, the HUD's silence about the recovery reserve, and
-a worst-sector death share reading 0.81 against a 0.35 criterion — which reads 0.79 with recovery
-switched off, so it predates the change and something else moved it.
+**Nine findings this pass produced:** D1-D6 below, plus the shield's suppression of every
+integrity-triggered effect, the HUD's silence about the recovery reserve, and ~~a worst-sector death
+share reading 0.81 against a 0.35 criterion — which reads 0.79 with recovery switched off, so it
+predates the change and something else moved it.~~ **The death-share finding was not a finding.**
+Nothing moved: 0.81 and 0.35 are two different numbers that the same criterion has always produced
+at the same time, one from the pooled probe set and one from the competent policy. Re-measured
+below.
+
+## Re-measurement pass, 2026-07-26 (after the shield shipped)
+
+Three figures were re-taken because the recharging shield landed underneath them. Every number
+below is the `aggressor` policy, **n = 300 runs per cell on each of three base seeds** — A
+`K7F29XQM3RTV`, B `Q3ZM8PXW5NRT`, C `WWQ4B8HT2NZP` (A and C are the pair the M5 exit numbers were
+taken on; B is new, added because two seeds cannot show which of two disagreeing numbers is the
+outlier). Pooled figures are over all 900 runs per arm. The shield ablation is the new
+`--no-recovery` flag; the item ablation is `--give`.
+
+### 1. Repair Nanites is weaker than recorded, and the shield is why
+
+| Arm | seed A | seed B | seed C | pooled (n=900/arm) |
+| --- | --- | --- | --- | --- |
+| baseline | 35.7% | 27.3% | 32.0% | **31.7%** |
+| `--give=repair-nanites` | 63.7% | 61.0% | 62.3% | **62.3%** |
+| multiplier | ×1.79 | ×2.23 | ×1.95 | **×1.97** |
+| baseline, `--no-recovery` | 22.3% | 19.0% | 22.7% | **21.3%** |
+| nanites, `--no-recovery` | 58.0% | 52.3% | 55.3% | **55.2%** |
+| multiplier, recovery off | ×2.60 | ×2.75 | ×2.44 | **×2.59** |
+
+**The recorded 1.9–2.6× is stale, and the reason is exactly the predicted one.** Against the shipped
+recharging shield the item multiplies the clear rate **1.8–2.2× (×1.97 pooled, +30.6pp)**. Switch
+recovery off and the *same* ablation on the *same* seeds gives **×2.59** — the old figure's top end,
+reproduced. The recharge did not weaken the item's numbers by accident; it removed roughly a quarter
+of them, by giving `repairOnKill` fewer triggers.
+
+Where the item shows up, unchanged in character: median entry health at sector 3 goes 44.8–46.5% →
+60.7–63.3%, and at sector 5 55.7–59.1% → 73.1–80.0%.
+
+**`retaliation-coil` is inert, with or without the shield.** ×1.04 / ×1.12 / ×1.05 by seed with
+recovery on (pooled 31.7% → 33.8%, **+2.1pp against a 2.2pp standard error** — not distinguishable
+from zero at 900 runs per arm), and ×1.04 / ×1.00 / ×1.00 with recovery off. Note what this does *not*
+support: `docs/DESIGN.md`'s "as built" section says the recharge makes the coil "strictly worse". The
+trigger count certainly falls — the corpus's effect-coverage check measured that directly — but the
+coil's contribution to the clear rate was already inside noise before the shield, so **no clear-rate
+measurement can show the coil getting worse, because there was nothing to lose.** The honest
+statement is that the coil is worth nothing measurable either way.
+
+**Verdict: integrity recovery is still the dominant variable, and it is not close.** Shield recovery
+itself, ablated the same way, is worth **+13.3 / +8.3 / +9.3pp by seed (×1.60 / ×1.44 / ×1.41;
+21.3% → 31.7% pooled, ×1.49)** against the item's **+30.6pp**. The shield is the second-largest
+single lever measured and about a third of one relic. One item is still worth more than the recovery
+mechanic handed free to every hull.
+
+**Stale figures this produced**, for whoever owns those files (this pass owns `tools/playtest.ts`
+and this document only):
+
+- `src/content/items.ts:1138` — "it still multiplies the clear rate by 1.9-2.6x". Should read
+  1.8–2.2× (×1.97 pooled over 900 runs per arm, three seeds, 2026-07-26), with the note that the
+  2.4–2.8× band is what the item measures with shield recovery switched off.
+- `src/content/items.ts:1117-1121` — the ablation block's figures (26.7% / 34.0% → 68.7% / 63.7%,
+  entry health, sector-2 death share) all predate the shield. Replacements are in the table above.
+- `docs/DESIGN.md:223-224` — "One recovery relic multiplies the clear rate by 1.9–2.6×", used as the
+  benchmark the shield had to be tuned against.
+- `docs/DESIGN.md`, "as built" — "measured at 1.9-2.6x ... It has not been re-measured and should be
+  before the next balance pass." It has been now; and the "strictly worse" claim about the coil is
+  not measurable in the clear rate, as above.
+
+### 2. The worst-sector death share: nothing moved, the criterion has two readings
+
+**The 0.79–0.81 is not a regression and never was.** `m5ExitCriteria.worstDeathShare` in the JSON was
+computed over **every policy pooled**, while the printed verdict — and the 35.4% / 36.2% recorded in
+the M5 table above — is read off the **competent policy alone**. Both numbers came out of the same
+sweeps at the same time. Checked against the archived M5 sweep JSON that produced the recorded
+figures:
+
+| Sweep | aggressor worst share | pooled worst share |
+| --- | --- | --- |
+| M5 exit, seed A, n=200×5 policies | 0.354 | 0.762 |
+| M5 exit, seed C, n=200×5 policies | 0.362 | 0.814 |
+| Today, seed A, n=200×5 policies | 0.331 | 0.803 |
+| Today, seed B, n=200×5 policies | 0.333 | 0.795 |
+| Today, seed A, `--no-recovery` | 0.310 | 0.785 |
+
+The pooled figure is dominated by the three probes that are *supposed* to die in sector one: on
+today's seed-A sweep `random` died in sector 1 in 200 of 200 runs, `dodger` in 193, `greedy` in 155.
+That is 548 of the 576 pooled sector-1 deaths. It is a fact about the instruments.
+
+**Fixed in the harness**: `worstDeathShare` now reads off the competent policy, so the JSON and the
+printed report can no longer disagree about the same criterion; the pooled figure is kept beside it
+as `worstDeathSharePooled`, because it is still the right thing to look at when asking whether a
+probe is behaving. **The criterion itself has not moved**: the competent-policy reading is
+**33.1% / 30.3% / 30.4%** by seed today, so it is now *met* — but see below before treating that as
+good news.
+
+**And the criterion is measuring the clear rate twice.** A share has every sector in every other
+sector's denominator, so it moves whenever the clear rate moves and says nothing about difficulty
+shape. Compare the ablations, all read off aggressor at n=300: the baseline reads 0.337 and
+`--no-recovery` reads 0.335, which is a criterion declaring two games of very different difficulty
+(35.7% vs 22.3% clear) identically shaped; while `--give=repair-nanites` reads 0.266 purely because
+the pilot lives long enough to spread its deaths over five sectors. **The criterion passes by getting
+easier and fails by getting harder, in both cases without the distribution changing.**
+
+**Proposed replacement — the cliff ratio**, implemented and reported by the harness under
+`m5ExitCriteria.cliff`, deliberately *not* wired to a pass/fail verdict because swapping a criterion
+is a balance decision and this was a measurement pass:
+
+> **Conditional death rate on arrival** — `died / (died + cleared)` for each sector, censoring
+> unfinished runs rather than counting them as survivals. Its denominator is per-sector, so it does
+> not move when the clear rate moves. A **cliff** is then the worst sector's rate divided by the
+> median of the others; sectors below 20 arrivals are excluded and named, because the late run is
+> where the sample thins and that is the survivorship hole the old criterion's own COVERAGE note
+> admits to. **Proposed threshold: ≤ 2.0×.**
+
+Measured today, aggressor, n=300 per seed: **2.50× / 1.89× / 2.04×** (A / B / C), worst sector 3
+Bloomfield on all three, which kills 28.4% / 30.8% / 32.0% of the pilots who resolve it against a
+11.3% / 16.3% / 15.7% median elsewhere.
+
+**Recomputed from the archived M5 exit sweeps, the same metric reads 2.30× (seed A) and 2.01× (seed
+C) — worst sector 3 both times.** So the cliff has been in the same place, at the same size, across
+the whole shield change, while the death-share criterion pointed at sector 2 on one seed and sector 1
+on the other and called the difference noise. **The proposed metric is stable where the recorded one
+was not, and it names a sector the recorded one has never named.** That is the argument for the swap,
+and it is worth more than the threshold number.
+
+The ablations behave the way a difficulty metric should, which the share does not: recovery off reads
+1.89× / 1.64× / 1.88× (the same shape, harder throughout) and nanites reads 1.72× / 1.71× / 1.59×
+(genuinely flatter).
+
+### 3. What the harness measures by default: the base pool, now said out loud
+
+`tools/playtest.ts` omitted `workOrders` while its own comment claimed to mirror `src/main.ts`
+exactly (D5). The omission is now **deliberate, documented, and the default**: `docs/DESIGN.md`'s
+cross-run-persistence decision makes `poolFor(new Set())` the definition of the comparable game, so
+the base pool is the right reference band and every recorded M5 number is a base-pool number. The
+comment now says so instead of claiming a mirror it does not do, every sweep prints its band, and
+`--pool=certified` sweeps the other one.
+
+**Both bands measured, and they are the same game — bit-for-bit.** Aggressor, n=300 per seed:
+35.7% / 27.3% / 32.0% base against 35.7% / 27.3% / 32.0% certified, identical to the run, and a
+25-run `--detail` comparison finds **25 of 25 identical state digests and identical tick counts**.
+
+That is not a coincidence and it is not reassurance about the decision's safety argument. Only the
+`workOrders` slice reaches the simulation at all, the sim applies no work-order outcome, and the card
+carries no offers — so the widest possible certification pool changes the number of options on one
+card per run and nothing else. **The certified band is unmeasurable rather than measured-equal**, and
+it will stay that way until D6 lands (the `items` and `enemies` slices are not pool-gated, so six of
+ten certifications grant nothing the sim can see). The flag is in place for the day that changes.
 
 ## M6 — Polish and balance
 
 - Fix the 2026-07-26 review findings above, and the vacuous guards that hid them. R1 and R11
   come first: every balance pass below is measured with the instruments they break.
-- **Re-measure Repair Nanites and the worst-sector death share before any other balance work.**
-  Both figures on record were taken before the shield recharged, and the recharge is measured to
-  suppress exactly the effects Repair Nanites depends on. Every other number below is read through
-  those two.
+- ~~**Re-measure Repair Nanites and the worst-sector death share before any other balance work.**~~
+  **Done 2026-07-26** — see "Re-measurement pass" above. Repair Nanites is ×1.97 pooled (was
+  recorded as 1.9–2.6×) and is still the dominant variable, worth about three times the shield's
+  own contribution. The death share did not move at all; the criterion had two readings. What is
+  left over from that pass and belongs to a balance milestone: **sector 3 Bloomfield is a real
+  difficulty cliff at 2.0–2.5× the surrounding conditional death rate**, and the death-share
+  criterion cannot see it — adopt the cliff ratio before tuning against the old number.
 - **Show the shield recovery reserve on the HUD.** It is simulation state that decides whether
   disengaging will work, and no screen draws it — so the mechanic's central decision is invisible.
 - Land **D1–D6** from "Proposed, unscheduled" below — the code the cross-run persistence decision
@@ -637,13 +807,14 @@ See **Proposals not yet decided** in `docs/DESIGN.md` for the reasoning. Summary
     an earned hull cannot be flown when it can. Same family as R12. One change: move
     `hulls` into the honoured list, rewrite the four `awaiting` strings, fix the
     docstring.
-  - **D5 — the certified game has never been measured.** `tools/playtest.ts:75` omits
-    `workOrders` while claiming to mirror `src/main.ts` exactly — the one place in the
-    harness its own comment says this could quietly happen. So every M5 number is a
-    base-pool number. That is the right *reference* band and should be labelled as such,
-    but the decision's safety argument ("a bigger pool is the same power at more variety")
-    is currently an argument and not a measurement. Needs a fully-certified sweep beside
-    the base one.
+  - ~~**D5 — the certified game has never been measured.**~~ **Closed 2026-07-26**, with the
+    caveat that the answer is smaller than the question. The harness no longer claims a
+    mirror it does not do: the base pool is the documented default, every sweep prints its
+    band, and `--pool=certified` sweeps the other. Measured at n=300 × 3 seeds the two bands
+    are identical to the run and bit-identical in the state digest — because `workOrders` is
+    the only slice that reaches the sim and the card has no outcome. So the decision's safety
+    argument is **still** an argument: the certified band is currently unmeasurable, not
+    measured-equal, and becomes measurable when D6 gates the `items` and `enemies` slices.
   - **D6 — six of ten certifications still grant nothing.** `items`, `enemies`,
     `bossVariants` and `hazards` are never drawn from the pool: the app hands the sim the
     whole `ITEMS`/`SECTORS`/`BOSSES`/`HAZARDS` tables, and `pickVariant` reads
