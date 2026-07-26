@@ -259,6 +259,37 @@ certifies which pool a run drew from and must not be described as an anti-TAS me
 percentage points of the mean; no sector is a difficulty cliff (death distribution has no single
 spike above 35%).
 
+### Measured, n=300 × 2 seeds — two of three met
+
+| Criterion | Before the rebalance | After | |
+| --- | --- | --- | --- |
+| Clear rate, 20–40% | 27.7% / 29.7% | **20.0% / 24.3%** | met |
+| Hull spread vs mean, ≤15pp | 29.4pp / 28.0pp | **13.6pp / 12.9pp** | met |
+| Worst sector death share, ≤35% | 47.0% / 43.1% | **39.2% / 36.1%** | **not met** |
+
+Median clearing run 16.8 minutes, inside the 15–20 target.
+
+**Sector 2 stays out of band and the reason is worth understanding before anyone "fixes" it.**
+Its absolute deaths fell by 8pp, but sectors 4–5 take only 13–15% of deaths, so The Tally's
+*share* stays high however much it is softened. Balancing the distribution means making the late
+run harder, which costs clear rate — and criterion 1 has roughly zero headroom on one of the two
+seeds. The three criteria are not independent, and this is where they pull against each other.
+
+### Two structural findings that outrank the criteria
+
+**Integrity recovery is the game's dominant variable, and nothing was designed around it.** Give
+the Lien one item — Repair Nanites, nothing else changed — and its clear rate goes from 15.3% to
+58.0%. Probate looked like the strongest hull by +24.8pp only because it starts holding the sole
+source of recovery in the roster. Any future item, hull or route that restores integrity has to be
+priced against that number, not against its own stat line.
+
+**Boss bullet density is inert.** `applyHullDamage` grants 45 ticks of invulnerability, capping
+intake at 1.33 hits/second, and every boss pattern is denser than that. Cutting the Repossessor's
+fire rate by 42% moved the run one percentage point. Only per-shot damage and fight *length*
+matter, at a measured 0.28pp of clear rate per second of boss time — which is why boss fights
+cannot be lengthened into their originally authored 20–40s band without breaking the clear rate.
+`BOSS_TTK_BAND.min` was lowered to 16.5 with the conflict recorded rather than quietly missed.
+
 ### What shipped
 
 | Item | Status |
