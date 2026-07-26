@@ -9,7 +9,7 @@
  * No behaviour lives here — types only.
  */
 
-import type { EnemyShape, MovementKind } from '../content/types'
+import type { EnemyShape, ItemTier, MovementKind } from '../content/types'
 
 /**
  * Anything drawn between ticks keeps its previous position so the renderer can
@@ -41,6 +41,23 @@ export interface Bullet extends Interpolated {
   damage: number
   radius: number
   alive: boolean
+  /**
+   * Targets this round may still pass through.
+   *
+   * Undefined means the bullet has not pierced yet and should take the build's
+   * current value.
+   */
+  pierceRemaining?: number
+  /**
+   * Enemies this round has already damaged.
+   *
+   * The count alone is NOT sufficient, and assuming it was shipped a real bug: a
+   * bullet travels ~10 units per tick and a large enemy has a 30-unit radius, so a
+   * round sits inside its target for several ticks and re-hit it on every one. A
+   * `pierce: 3` round did 4x damage to a single hauler — making the item worth
+   * *more* against big targets, the exact inversion of its intent.
+   */
+  hitUids?: number[]
 }
 
 /** Visual/behavioural class of an enemy projectile. */
@@ -59,6 +76,16 @@ export interface EnemyBullet extends Interpolated {
 export type EnemyPhase = 'entering' | 'holding' | 'committed' | 'leaving'
 
 export interface EnemyInstance extends Interpolated {
+  /**
+   * Unique instance identity, monotonic within a run.
+   *
+   * `defId` is shared by every enemy of a type and array position is unstable
+   * (projectile and enemy lists use swap-remove), so neither can identify *this*
+   * enemy. Piercing needs to, in order to not hit the same target twice.
+   *
+   * Play-affecting, therefore hashed.
+   */
+  uid: number
   /** Id of the EnemyDef this was spawned from. */
   defId: string
   hp: number
@@ -281,6 +308,15 @@ export interface ActiveInteraction {
  */
 export interface ItemOffer {
   defId: string
+  /**
+   * The item's tier.
+   *
+   * Included because the choice screen displays it, and a `WorldView` that withholds
+   * something visible on screen makes any observer — a bot measuring pick rates, most
+   * of all — blind to information the player has. Tier preference was unmeasurable
+   * outside shops until this existed.
+   */
+  tier: ItemTier
   /** Non-empty when taking this would activate an interaction with the build. */
   interactionText: readonly string[]
 }

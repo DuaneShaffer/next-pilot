@@ -229,7 +229,26 @@ export class World implements WorldView {
   /** Earliest tick the sector may be declared complete. */
   private readonly extractionTick: number
 
-  private fireCooldown = 0
+  /**
+   * Fractional shot accumulator, in ticks.
+   *
+   * NOT an integer countdown. `fireIntervalTicks` has a base of 3, so an integer
+   * cooldown cannot express any percentage change to fire rate at all — 3/1.18
+   * rounds straight back to 3, which silently turns every percentage fire-rate item
+   * into a no-op. (That is why a `mul` on this stat had to be banned in content.)
+   *
+   * Accumulating whole ticks against a fractional interval gives the correct
+   * *average* rate while still firing on tick boundaries, and subtracting the
+   * interval rather than resetting to zero means the remainder carries and the rate
+   * does not drift. Float arithmetic is deterministic, so replays are unaffected.
+   *
+   * Starts one short of full: the tick's own increment tops it up, so the first
+   * trigger pull fires on the tick it is pressed *and* the cadence that follows is
+   * exact. Starting at zero made the weapon spend three ticks charging its first
+   * shot (input lag on the very first thing a player does); starting at exactly full
+   * overshot by one and produced 21 shots a second where the HUD said 20.
+   */
+  private fireAccumulator = FIRE_INTERVAL_TICKS - 1
   private nextMuzzleIsLeft = true
 
   // --- items ---------------------------------------------------------------
@@ -259,6 +278,8 @@ export class World implements WorldView {
    * stock depend on how many offers had been rolled.
    */
   private readonly rngOffers: Rng
+  /** Item effect rolls. Separate so a repair roll cannot shift spawns or offers. */
+  private readonly rngItems: Rng
 
   constructor(seed: string, content: RunContent = EMPTY_CONTENT) {
     this.seed = seed
@@ -266,6 +287,7 @@ export class World implements WorldView {
     this.rngSpawn = Rng.fromSeed(seed, 'spawn')
     this.rngLoot = Rng.fromSeed(seed, 'loot')
     this.rngOffers = Rng.fromSeed(seed, 'offers')
+    this.rngItems = Rng.fromSeed(seed, 'items')
 
     this.sectorId = SECTOR_ONE.id
     this.spawner = new Spawner(SECTOR_ONE, this.enemyDefs, this.rngSpawn)
@@ -334,10 +356,10 @@ export class World implements WorldView {
     // A choice pauses the run. Ticks still advance so a recorded input log stays
     // aligned with wall-clock ticks, but nothing moves, spawns, or shoots — an item
     // choice is a decision, not a reflex test.
-    if (this.updateChoice(input)) {
-      this.advanceCosmetic()
-      return
-    }
+    // No advanceCosmetic() here: it already ran at the top of this tick. Calling it
+    // again aged explosions, hit flashes, and shake at DOUBLE speed behind the
+    // reward card — an 18-tick explosion lasted 9.
+    if (this.updateChoice(input)) return
 
     if (this.fireRateWindowTicks > 0) this.fireRateWindowTicks--
 
@@ -380,13 +402,94 @@ export class World implements WorldView {
    */
   private currentFireInterval(): number {
     const base = this.resolvedStats.fireIntervalTicks ?? FIRE_INTERVAL_TICKS
+    // `bonus` is a FRACTIONAL RATE increase, not a tick count — content authors
+    // "+18% fire rate" as 0.18, matching the worked example in UI.md rule 4. A rate
+    // increase divides the interval; subtracting it as ticks made the item a no-op.
     const bonus = this.fireRateWindowTicks > 0 ? this.effects.fireRateWindowBonus : 0
-    return Math.max(1, Math.round(base - bonus))
+    const interval = bonus > 0 ? base / (1 + bonus) : base
+    return Math.max(1, interval)
+  }
+
+  /**
+   * The open choice's selected index.
+   *
+   * The cursor lives in the simulation so a recorded run reproduces its picks; the
+   * screen renders this rather than holding a selection of its own, which is what
+   * keeps the two from disagreeing about what is highlighted.
+   */
+  get choiceSelection(): number {
+    return this.cursor.index
+  }
+
+  /**
+   * True while the card is open and the trigger has never been released.
+   *
+   * The screen shows a "release to choose" hint from this. Without it the card looks
+   * frozen to anyone holding fire, which is the state most players are in.
+   */
+  get choiceAwaitingRelease(): boolean {
+    return this.pendingChoice !== null && this.cursor.awaitingRelease
   }
 
   /** Shots per second the HUD should display. Derived, never hand-written. */
   get shotsPerSecond(): number {
     return shotsPerSecond(this.currentFireInterval())
+  }
+
+  /**
+   * Credit scrap through the economy multiplier.
+   *
+   * Every scrap gain goes through here. `scrapMultiplier` had no consumer at first,
+   * which made the economy item silently inert — a stat nothing reads is worse than
+   * a missing stat, because the item ships and does nothing.
+   */
+  private awardScrap(amount: number): void {
+    const multiplier = this.resolvedStats.scrapMultiplier ?? 1
+    const credited = Math.max(0, Math.round(amount * multiplier))
+    this.stats.scrap += credited
+    // Opens the fire-rate window. Without this the window ticks down from zero
+    // forever and a scrap-triggered item never fires at all.
+    if (this.effects.fireRateWindowTicks > 0) {
+      this.fireRateWindowTicks = this.effects.fireRateWindowTicks
+    }
+  }
+
+  /** Restore integrity on a kill, if an item grants it. */
+  private repairOnKill(): void {
+    const amount = this.effects.repairAmount
+    if (amount <= 0) return
+    const chance = this.effects.repairChance
+    // Its own stream, so a repair roll cannot shift spawns, loot, or offers.
+    if (chance < 1 && !this.rngItems.chance(chance)) return
+    this.hull.integrity = clamp(this.hull.integrity + amount, 1, this.hull.maxIntegrity)
+  }
+
+  /**
+   * Release retaliation fire when the hull is hurt.
+   *
+   * Fires an even ring. NOTE the honest limitation the content author found: the
+   * only damage hook is after shields absorb, so a *larger* shield means strictly
+   * FEWER retaliation triggers. Pairing retaliation with a shield item would put an
+   * anti-synergy behind a synergy marker; expressing that combination needs an
+   * onShieldAbsorbed hook, which M3 does not have.
+   */
+  private retaliate(): void {
+    const count = this.effects.retaliateCount
+    if (count <= 0) return
+    const speed = this.resolvedStats.projectileSpeed ?? BULLET_SPEED
+    const damage = this.resolvedStats.projectileDamage ?? BULLET_DAMAGE
+    for (let i = 0; i < count; i++) {
+      const angle = (i / count) * Math.PI * 2
+      spawnPlayerBullet(
+        this.playerBullets,
+        this.hull.x,
+        this.hull.y,
+        Math.sin(angle) * speed * 0.7,
+        -Math.cos(angle) * speed * 0.7,
+        damage,
+        BULLET_RADIUS,
+      )
+    }
   }
 
   /** Recompute everything the inventory determines. Called only when it changes. */
@@ -432,13 +535,32 @@ export class World implements WorldView {
    */
   private maybeOpenChoice(): void {
     if (this.pendingChoice !== null) return
-    const wave = this.stats.waveIndex
-    if (wave <= 0 || this.rewardedWaves.has(wave)) return
+    const latest = this.stats.waveIndex
+    if (latest <= 0) return
 
-    const isItem = ITEM_CHOICE_WAVES.includes(wave)
+    // Scan every unrewarded wave up to the latest, not just the latest itself. If
+    // two waves ever release on one tick and the earlier is a reward wave, reading
+    // only the newest index would silently skip its reward. Unreachable in sector 1
+    // — no shared release ticks, and a freeze is at most 8 ticks against 300-tick
+    // spacing — but a denser script would hit it, and a lost reward is invisible.
+    let wave = -1
+    for (let candidate = 1; candidate <= latest; candidate++) {
+      if (this.rewardedWaves.has(candidate)) continue
+      if (
+        ITEM_CHOICE_WAVES.includes(candidate) ||
+        SHOP_WAVES.includes(candidate) ||
+        WORK_ORDER_WAVES.includes(candidate)
+      ) {
+        wave = candidate
+        break
+      }
+      // Not a reward wave: mark it so the scan does not re-walk it every tick.
+      this.rewardedWaves.add(candidate)
+    }
+    if (wave < 0) return
+
     const isShop = SHOP_WAVES.includes(wave)
     const isWorkOrder = WORK_ORDER_WAVES.includes(wave)
-    if (!isItem && !isShop && !isWorkOrder) return
 
     this.rewardedWaves.add(wave)
     this.cursor = newCursor()
@@ -459,7 +581,7 @@ export class World implements WorldView {
     this.pendingChoice = makeChoice(
       isShop ? 'shop' : 'item',
       offers,
-      isShop ? shopCosts(offers, this.content.items) : offers.map(() => 0),
+      isShop ? shopCosts(offers, this.content.items, wave) : offers.map(() => 0),
     )
   }
 
@@ -532,8 +654,29 @@ export class World implements WorldView {
   }
 
   private updateWeapon(input: InputSnapshot): void {
-    if (this.fireCooldown > 0) this.fireCooldown--
-    if (!input.fire || this.fireCooldown > 0) return
+    const interval = this.currentFireInterval()
+    this.fireAccumulator += 1
+
+    // The cap applies only while the trigger is RELEASED. It exists to stop a
+    // minute of not shooting banking a burst — but a held trigger cannot bank
+    // anything, because it fires the instant the accumulator is full.
+    //
+    // Capping unconditionally is what made fractional intervals inert: the
+    // accumulator was clamped to exactly `interval`, so `-= interval` always landed
+    // on zero and the remainder this field's docstring says "carries" was thrown
+    // away every shot. Effective period became ceil(interval), so a 2.54-tick
+    // interval fired at 20/s while the HUD advertised 23.6 — the panel-lies-about-
+    // the-weapon bug for the third time.
+    if (!input.fire) {
+      // Capped one short of full, not full. The tick's own increment tops it up, so
+      // the first press still fires immediately — but capping at exactly `interval`
+      // let the accumulator reach interval+1, leaving a remainder of 1 that shifted
+      // the whole cadence and produced one extra shot per window. Same reasoning as
+      // the field's initial value.
+      this.fireAccumulator = Math.min(this.fireAccumulator, interval - 1)
+      return
+    }
+    if (this.fireAccumulator < interval) return
 
     const offset = this.nextMuzzleIsLeft ? -MUZZLE_OFFSET : MUZZLE_OFFSET
     const muzzleX = this.hull.x + offset
@@ -573,7 +716,7 @@ export class World implements WorldView {
     // alternating pattern.
     if (!fired) return
 
-    this.fireCooldown = this.currentFireInterval()
+    this.fireAccumulator -= interval
     this.nextMuzzleIsLeft = !this.nextMuzzleIsLeft
     this.stats.shotsFired++
     // At the muzzle, not at the hull centre: the flash has to come out of the
@@ -614,12 +757,25 @@ export class World implements WorldView {
       for (let j = 0; j < this.enemies.length; j++) {
         const e = this.enemies[j] as EnemyInstance
         if (!e.alive) continue
+        // Already damaged by this round. A bullet travels ~10 units per tick and a
+        // large enemy has a 30-unit radius, so without this a piercing round sat
+        // inside its target and hit it again every tick — worth MORE against big
+        // enemies, which inverts the item.
+        if (b.hitUids !== undefined && b.hitUids.includes(e.uid)) continue
         // Swept against the bullet's path: at 620 units/second a bullet covers
         // ~10 units per tick, enough to step clean over a small enemy.
         if (!segmentHitsCircle(b.prevX, b.prevY, b.x, b.y, e.x, e.y, e.radius + b.radius)) continue
 
+        // Captured before the hit so overkill can be measured: damage beyond what
+        // was needed is the difference, and after the fact the hp is already gone.
+        const hpBefore = e.hp
         const lethal = applyEnemyDamage(e, b.damage)
         this.stats.hits++
+        if (lethal && this.effects.overkillFraction > 0) {
+          const overkill = Math.max(0, b.damage - hpBefore)
+          if (overkill > 0) this.awardScrap(overkill * this.effects.overkillFraction)
+        }
+        this.chainFrom(e, b.damage, j)
         // Reported at the bullet, not at the target's centroid: the spark belongs
         // where the round landed. A 30-unit hauler flashing at its centre reads as
         // a hit on empty space. The bullet is inside the target by definition here,
@@ -633,12 +789,63 @@ export class World implements WorldView {
           lethal,
         })
         this.addImpact(freezeForEnemyHit(b.damage, lethal), shakeForEnemyHit(b.damage, lethal))
-        // No piercing in M1: one bullet, one target.
+
+        // Piercing: the round continues through this target. Tracked per bullet so
+        // it cannot hit the same enemy twice — without that a pierce shot sitting on
+        // a large hauler would tick it down every frame.
+        const pierced = b.pierceRemaining ?? this.effects.pierceCount
+        if (pierced > 0) {
+          b.pierceRemaining = pierced - 1
+          if (b.hitUids === undefined) b.hitUids = [e.uid]
+          else b.hitUids.push(e.uid)
+          continue
+        }
         b.alive = false
         break
       }
     }
     cullDead(bullets)
+  }
+
+  /**
+   * Arc damage from a hit to nearby enemies.
+   *
+   * Skips the target that was already hit, deals a fraction of the original damage,
+   * and never chains from a chain — a recursive version turns one shot into a
+   * screen clear and makes the frame cost unbounded.
+   */
+  private chainFrom(source: EnemyInstance, damage: number, sourceIndex: number): void {
+    const count = this.effects.chainCount
+    if (count <= 0) return
+    const radius = this.effects.chainRadius
+    const share = damage * this.effects.chainFraction
+    if (radius <= 0 || share <= 0) return
+
+    let arced = 0
+    for (let k = 0; k < this.enemies.length && arced < count; k++) {
+      if (k === sourceIndex) continue
+      const other = this.enemies[k] as EnemyInstance
+      if (!other.alive) continue
+      const dx = other.x - source.x
+      const dy = other.y - source.y
+      if (dx * dx + dy * dy > radius * radius) continue
+
+      const hpBefore = other.hp
+      const lethal = applyEnemyDamage(other, share)
+      arced++
+      this.emit({
+        kind: 'enemy-hit',
+        x: other.x,
+        y: other.y,
+        damage: share,
+        defId: other.defId,
+        lethal,
+      })
+      if (lethal && this.effects.overkillFraction > 0) {
+        const overkill = Math.max(0, share - hpBefore)
+        if (overkill > 0) this.awardScrap(overkill * this.effects.overkillFraction)
+      }
+    }
   }
 
   private resolveEnemyBulletHits(): void {
@@ -695,7 +902,8 @@ export class World implements WorldView {
         const def = this.enemyDefs[e.defId]
         if (def !== undefined) fireDeathBurst(e, def, this.enemyBullets)
         this.stats.kills++
-        this.stats.scrap += e.scrap
+        this.awardScrap(e.scrap)
+        this.repairOnKill()
         // Shape only selects which explosion the renderer draws; it changes no
         // behaviour, so this stays a presentation mapping rather than a rule.
         const kind: ExplosionKind = e.shape === 'mine' ? 'mine' : 'enemy'
@@ -777,6 +985,10 @@ export class World implements WorldView {
   private onHullHit(damage: number, shieldBefore: number, integrityBefore: number): void {
     const hull = this.hull
     const fatal = this.runState === 'lost'
+
+    // Retaliation fires on any hull hit, fatal or not: dying to a ram and taking the
+    // rammer with you is the fantasy the item is selling.
+    this.retaliate()
 
     // Reported at the hull rather than at the projectile: the damage number belongs
     // on the ship (UI rule 9), and both damage paths — fire and ramming — then

@@ -25,7 +25,7 @@ import { formatSeed } from '../core/seed'
 import { VIRTUAL_H, VIRTUAL_W } from '../core/space'
 import type { Settings } from '../meta/save'
 import { Palette } from '../render/palette'
-import { drawLabel, drawText } from '../render/text'
+import { canvasMeasure, drawLabel, drawText, wrapText } from '../render/text'
 
 export type PauseItemId = 'resume' | 'shake' | 'volume' | 'mute' | 'abandon'
 
@@ -126,12 +126,25 @@ export interface PauseMenuState {
   seed: string
 }
 
+/**
+ * Widths and paddings.
+ *
+ * CONTENT_W is exported so tests can assert that every authored string on this card
+ * fits inside it. The longest hint used to overflow the card because it was drawn as
+ * one unmeasured line, and nothing checked.
+ */
 const CARD_W = 420
-const CARD_H = 366
+const CARD_H = 392
 const CARD_X = (VIRTUAL_W - CARD_W) / 2
 const CARD_Y = (VIRTUAL_H - CARD_H) / 2
 const PAD = 26
 const ROW_H = 34
+export const PAUSE_CONTENT_W = CARD_W - PAD * 2
+/** Point size the selected row's hint is drawn at. */
+export const PAUSE_HINT_SIZE = 11
+/** Point size of the controls footer. */
+export const PAUSE_FOOTER_SIZE = 10
+export const PAUSE_FOOTER_TEXT = 'Arrows adjust · ENTER confirm · ESC resume'
 
 export function drawPauseMenu(ctx: CanvasRenderingContext2D, state: PauseMenuState): void {
   // Heavier scrim than the incident report uses: a paused playfield showing
@@ -238,21 +251,31 @@ export function drawPauseMenu(ctx: CanvasRenderingContext2D, state: PauseMenuSta
 
   const selected = PAUSE_ITEMS[state.selected]
   if (selected) {
-    drawText(ctx, selected.hint, contentX, y, {
-      size: 11,
-      baseline: 'top',
-      color: Palette.textDim,
+    // WRAPPED, not drawn as one line. The "Abandon sortie" hint is 66 characters and
+    // ran past the card's right edge, because a single drawText call cannot know how
+    // wide its string is. Any string a designer can lengthen has to be measured.
+    const lines = wrapText(
+      selected.hint,
+      PAUSE_CONTENT_W,
+      PAUSE_HINT_SIZE,
+      canvasMeasure(ctx),
+    )
+    lines.forEach((line, index) => {
+      drawText(ctx, line, contentX, y + index * (PAUSE_HINT_SIZE + 4), {
+        size: PAUSE_HINT_SIZE,
+        baseline: 'top',
+        color: Palette.textDim,
+      })
     })
   }
 
   // Shortened and stepped down a size: the long form reached both card edges with
   // no breathing room, which reads as text that has overflowed rather than as a
   // caption.
-  drawText(
-    ctx,
-    'Arrows adjust · ENTER confirm · ESC resume',
-    CARD_X + CARD_W / 2,
-    CARD_Y + CARD_H - PAD + 4,
-    { size: 10, align: 'center', baseline: 'top', color: Palette.textFaint },
-  )
+  drawText(ctx, PAUSE_FOOTER_TEXT, CARD_X + CARD_W / 2, CARD_Y + CARD_H - PAD + 4, {
+    size: PAUSE_FOOTER_SIZE,
+    align: 'center',
+    baseline: 'top',
+    color: Palette.textFaint,
+  })
 }

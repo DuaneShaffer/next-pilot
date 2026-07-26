@@ -109,21 +109,37 @@ export function summariseEffects(effects: readonly BoundEffect[]): EffectTotals 
 /**
  * Fan angles for a volley, in radians from straight up.
  *
- * The centre shot is always kept and always dead ahead, so taking a split item
- * never *removes* the shot the player was already aiming — it adds to it. An even
- * fan with no centre would make the weapon feel worse at the moment of upgrade.
+ * Two properties, both required, and they conflict unless handled deliberately:
+ *
+ * 1. **The centre shot is always kept, dead ahead.** Taking a split item must never
+ *    *remove* the shot the player was already aiming with; it adds to it. A
+ *    centreless even fan makes the weapon feel worse at the moment of upgrade.
+ * 2. **The fan is symmetrical.** An earlier version alternated outward from centre,
+ *    which for an ODD number of extras left the last one unpaired — a "+1
+ *    projectile" item sent its entire extra shot 24° to the LEFT with nothing
+ *    balancing it. Aim drifting sideways when you buy an upgrade is indefensible.
+ *
+ * Resolved by pairing: extras are placed in mirrored ±pairs, and an odd leftover
+ * reinforces the CENTRE rather than picking a side. Two rounds dead ahead is a
+ * coherent outcome — more punch on the aim line — where a lone off-axis round is
+ * not.
  */
 export function volleyAngles(extraShots: number, spreadDegrees: number): readonly number[] {
   if (extraShots <= 0) return [0]
-  const total = extraShots + 1
   const spread = (spreadDegrees > 0 ? spreadDegrees : 12) * (Math.PI / 180)
-  const step = spread / extraShots
+  const pairs = Math.floor(extraShots / 2)
   const angles: number[] = [0]
-  // Alternate outward from centre so the fan stays symmetrical at every count,
-  // including even ones where a naive loop would lean to one side.
-  for (let i = 1; i < total; i++) {
-    const magnitude = Math.ceil(i / 2) * step
-    angles.push(i % 2 === 1 ? -magnitude : magnitude)
+
+  // `spreadDegrees` is the TOTAL arc width, so the outermost pair sits at ±half of
+  // it and the span is the requested width for ANY extra count. The previous
+  // divisor (spread / extraShots) held that only for two extras: at four the arc
+  // silently opened to double the width content asked for.
+  const half = spread / 2
+  const step = pairs > 0 ? half / pairs : half
+  for (let pair = 1; pair <= pairs; pair++) {
+    angles.push(-pair * step, pair * step)
   }
+  // Odd leftover: a second centre round, not an unpaired flanker.
+  if (extraShots % 2 === 1) angles.push(0)
   return angles
 }

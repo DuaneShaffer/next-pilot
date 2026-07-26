@@ -82,6 +82,7 @@ function enemy(overrides: Partial<EnemyInstance> = {}): EnemyInstance {
     y: 120,
     prevX: 200,
     prevY: 118,
+    uid: 1,
     defId: 'skiff',
     hp: 12,
     maxHp: 12,

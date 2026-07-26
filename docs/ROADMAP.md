@@ -137,18 +137,56 @@ unchanged and still monotone — a useful demonstration that spawned HP is only 
   `OfflineAudioContext` render in headless Chromium producing both measurements and WAVs; it needs
   a context shim because the backend constructs its own.
 
-## M3 — The roguelike loop
+## M3 — The roguelike loop ✅
 
-- Item system with an effect bus, so items compose instead of special-casing each other
-- ~12 items with at least 4 genuine interactions, all with explicit tags
-- Item-choice screen: three options, full mechanical text, synergy markers, current build visible
-- Scrap economy and a shop
-- Work-order route choice between sectors
-- Death → next sortie in two inputs (UI rule 6)
+- [x] Item effect bus: stat modifiers with a fixed fold order, plus parameterised
+      `EffectDef` behaviours the sim interprets — adding an item is a data change
+- [x] 14 items and 7 interactions, with interactions as **first-class data** so the
+      choice screen can state them (UI rule 5) rather than leaving them undiscoverable
+- [x] Item-choice screen: three options, full mechanical text, synergy markers, current
+      build visible, time paused
+- [x] Scrap economy and a shop, priced against the measured scrap curve
+- [x] Work-order assignment points (within a sector — see WorkOrderKind for why)
+- [x] Death → next sortie in one input (landed in M2)
 
-**Exit:** bot sweeps show no single item above a 70% pick rate and none below 10%; a
-Playwright test confirms death-to-next-sortie in ≤2 keypresses; every item's mechanical text names
-its numbers.
+**Exit criteria, measured over 2 seeds × 1,000 runs (~15,600 offer slots each):**
+
+| criterion | result |
+| --- | --- |
+| No item above 70% pick rate | **pass** — highest 39.8% |
+| No item below 10% pick rate | **pass** — lowest 19.6% |
+| Every item reachable | **pass** — none never offered; offer shares track weights |
+| Every interaction reachable | **pass** — all 7 went live |
+
+Offer rate and pick rate are reported separately, deliberately: an item offered rarely
+and always taken is not the same as one offered constantly and usually declined, and
+conflating them would have hidden both.
+
+**Balance work this milestone, all measured:**
+
+- **The first shop was dead in 999 of 999 screens** — median scrap at that wave was 67
+  against a cheapest option of 120, so every visit was a forced decline. A shop the
+  player can never buy from is worse than no shop: it teaches them that stopping is
+  pointless. Moved later, base price cut, and prices now scale with progress so one
+  number can serve both shops.
+- **Items took a competent policy from a 39% clear to 99.3%.** The items are not
+  individually overtuned; there were simply four rewards inside a three-minute sector,
+  which is an entire five-sector run's worth of upgrades handed out during the
+  *easiest* sector. Two per sector now — the pace a five-sector run wants — bringing it
+  to 92%, with `greedy` 72% → 36.7% and `dodger`/`random` still at 0%.
+
+**Carried into M6:** a 92% sector-1 clear for a developed build is defensible for the
+*first* sector, but the real target is a full five-sector run and that cannot be
+measured until M5.
+
+**Two bugs from a human playing it**, neither of which any test caught:
+
+- A reward card ignored a held trigger, so anyone still holding fire — nearly everyone
+  in a shmup — got an apparently frozen game until a 60-second timeout. Fixed with a
+  dwell that yields to deliberate input, plus an on-screen explanation.
+- The pause menu's longest hint ran off the card, because it was drawn as one
+  unmeasured line. `tests/textFits.test.ts` now walks **every authored string in the
+  project** and measures it against its real container.
 
 ## M4 — Progression, seeds, replays
 

@@ -128,6 +128,7 @@ function enemyBullet(x: number, y: number, kind: EnemyBullet['kind']): EnemyBull
 
 function enemy(overrides: Partial<EnemyInstance> = {}): EnemyInstance {
   return {
+    uid: 1,
     defId: 'skiff',
     hp: 6,
     maxHp: 30,

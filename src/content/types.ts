@@ -234,7 +234,8 @@ export type ItemTag =
  * being data-driven, and item behaviour would escape the determinism review that
  * every other sim change gets.
  *
- * - `splitShot`      — fires `count` extra projectiles at ±`spreadDegrees`.
+ * - `splitShot`      — fires `count` extra projectiles fanned across a TOTAL arc of
+ *                      `spreadDegrees` (so the outermost sit at ±half of it).
  * - `chainOnHit`     — a hit arcs to `count` targets within `radius` for `fraction`
  *                      of the original damage.
  * - `scrapOnOverkill` — damage beyond what was needed to kill converts to scrap at

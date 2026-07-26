@@ -9,10 +9,10 @@ ends permanently, the incident is filed, and someone else is issued your equipme
 
 ▶ **[Play it](https://duaneshaffer.github.io/next-pilot/)**
 
-> **Status: early development (M2).** Playable: seeded runs, seven enemy types, telegraphed attacks,
-> hitstop and screen shake, synthesised audio, permadeath, a pause menu, and a filed incident report
-> when you die. Sector 1 is ~3 minutes of escalating waves. No items or meta-progression yet — see
-> [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status: early development (M3).** Playable: seeded runs, seven enemy types, telegraphed attacks,
+> hitstop and screen shake, synthesised audio, 14 items with 7 stated synergies, a scrap economy and
+> shop, permadeath, a pause menu, and a filed incident report when you die. Sector 1 is ~3 minutes of
+> escalating waves. No meta-progression between runs yet — see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Controls
 
@@ -52,7 +52,7 @@ simulation. All four exist for the verification harness and are just as usable b
 ## How it's built
 
 Vanilla TypeScript, Canvas2D, Vite. **No runtime dependencies**, no binary assets — ships are
-code-defined geometry and audio is synthesised at runtime. The production bundle is about 81KB (27KB gzipped).
+code-defined geometry and audio is synthesised at runtime. The production bundle is about 112KB (38KB gzipped).
 
 The design is built around one constraint: **the simulation is deterministic.** Same seed plus
 same inputs always produces the same run. It advances in fixed 60Hz ticks, draws all randomness

@@ -86,12 +86,40 @@ Example interactions, chosen to reward different playstyles:
 | -------------------------------- | ---------------------------------------------------------- |
 | Split Shot + Arc Coupler         | Each split fragment can chain lightning to a nearby target. |
 | Overkill Accounting + Warheads   | Excess damage on a kill converts to scrap.                 |
-| Retaliation Coil + Heavy Shield  | Absorbed shield damage charges a piercing beam.            |
+| ~~Retaliation Coil + Heavy Shield~~ | **Backwards — do not ship.** See below.                 |
 | Drone Uplink + Mirror Mount      | Drones fire a weaker copy of your main weapon.             |
 | Heat Sink + Overclocked Beam     | The beam's overheat penalty becomes a sustained beam.       |
 | Graze Reactor + Phase Window     | Near-misses charge your special, rewarding dangerous flying. |
 | Scrap Magnet + Coin-Op Cannon    | Collecting scrap briefly raises fire rate — a greed engine. |
 | Cursed Hull + Repair Nanites     | Lower max integrity, but every repair also grants damage.    |
+
+### Combinations this list got wrong
+
+Kept rather than deleted, because the reasoning is the useful part.
+
+**Retaliation Coil + Heavy Shield is an anti-synergy.** The only damage hook fires *after* shields
+absorb, so a bigger shield means strictly *fewer* retaliation triggers. Shipping it would have put an
+anti-synergy behind a synergy marker — telling the player two items combine while they actively
+work against each other, which is worse than no marker at all. Expressing it needs an
+`onShieldAbsorbed` hook that M3 does not have. The coil is paired with **Cursed Hull** instead
+(fewer hit points, so more triggers), which is the same fantasy pointing the right way.
+
+Three more from the original list are not expressible yet, and are waiting on mechanics rather than
+on items:
+
+- **Heat Sink + Overclocked Beam** needs a beam weapon and an overheat resource. No `EffectKind`
+  accumulates and vents.
+- **Graze Reactor + Phase Window** needs a near-miss event and a chargeable special. Neither a graze
+  hook nor a special meter exists.
+- **Drone Uplink + Mirror Mount** needs drone entities. The `drone` tag exists; nothing spawns one.
+
+**Cursed Hull + Repair Nanites** shipped only partially: "every repair also grants damage" is a
+*stacking* buff, and no `EffectKind` holds state across triggers. The delivered version is a flat
+damage bonus plus a much larger repair — the same build, without the ramp.
+
+The lesson worth keeping: a synergy list written before the effect system exists will contain
+combinations the system cannot express, and a few that are actively wrong. Check each against the
+hooks that exist before promising it to a player.
 
 ## Progression
 

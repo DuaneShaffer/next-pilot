@@ -62,6 +62,7 @@ function fakeEnemy(overrides: Partial<EnemyInstance> = {}): EnemyInstance {
     y: 120,
     prevX: 200,
     prevY: 110,
+    uid: 1,
     defId: 'turret',
     hp: 10,
     maxHp: 10,

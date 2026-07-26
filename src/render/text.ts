@@ -110,3 +110,69 @@ export function drawValue(
   })
   return valueWidth + 4 + unitWidth
 }
+
+
+/**
+ * Width measurement, injected so wrapping can be unit-tested without a canvas.
+ */
+export type Measure = (
+  text: string,
+  size: number,
+  weight?: 400 | 600 | 700,
+  tracking?: number,
+) => number
+
+/** Measure against a real canvas context, for callers that have one. */
+export function canvasMeasure(ctx: CanvasRenderingContext2D): Measure {
+  return (text, size, weight = 400, tracking = 0) =>
+    measureText(ctx, text, { size, weight, tracking })
+}
+
+/**
+ * Break `text` into lines that fit `maxWidth`.
+ *
+ * Lives here rather than in a screen because EVERY card needs it and the one that
+ * did not use it shipped a bug: the pause menu drew its longest hint as a single
+ * unmeasured line, and "Ends the run. The hull is written off and the pilot is
+ * reassigned." ran past the card edge. Any string a designer can lengthen needs
+ * measuring, not eyeballing.
+ */
+export function wrapText(
+  text: string,
+  maxWidth: number,
+  size: number,
+  measure: Measure,
+  weight: 400 | 600 | 700 = 400,
+): readonly string[] {
+  const collapsed = text.replace(/\s+/g, ' ').trim()
+  if (collapsed.length === 0) return []
+  // A non-positive or non-finite width would loop forever in the split below.
+  if (!Number.isFinite(maxWidth) || maxWidth <= 0) return [collapsed]
+
+  const lines: string[] = []
+  let line = ''
+
+  const pushHardSplit = (word: string): void => {
+    let rest = word
+    while (measure(rest, size, weight) > maxWidth && rest.length > 1) {
+      let cut = rest.length - 1
+      while (cut > 1 && measure(`${rest.slice(0, cut)}-`, size, weight) > maxWidth) cut--
+      lines.push(`${rest.slice(0, cut)}-`)
+      rest = rest.slice(cut)
+    }
+    line = rest
+  }
+
+  for (const word of collapsed.split(' ')) {
+    const candidate = line === '' ? word : `${line} ${word}`
+    if (measure(candidate, size, weight) <= maxWidth) {
+      line = candidate
+      continue
+    }
+    if (line !== '') lines.push(line)
+    if (measure(word, size, weight) > maxWidth) pushHardSplit(word)
+    else line = word
+  }
+  if (line !== '') lines.push(line)
+  return lines
+}

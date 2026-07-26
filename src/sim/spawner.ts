@@ -48,6 +48,12 @@ interface PendingSpawn {
 }
 
 export class Spawner {
+  /**
+   * Next enemy instance id. Owned here because a Spawner's lifetime is a run's
+   * lifetime, so the sequence restarts with every run without any global state.
+   */
+  private nextUid = 1
+
   private readonly schedule: ScheduledWave[]
   private nextWave = 0
   /** Staggered members of already-released formations, waiting for their tick. */
@@ -115,7 +121,7 @@ export class Spawner {
     for (let i = 0; i < this.pending.length; i++) {
       const p = this.pending[i] as PendingSpawn
       if (p.dueTick <= tick) {
-        out.push(createEnemy(p.def, p.x, p.y))
+        out.push(createEnemy(p.def, p.x, p.y, this.nextUid++))
       } else {
         this.pending[write++] = p
       }

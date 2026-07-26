@@ -30,7 +30,11 @@ const OUT_DIR = 'screenshots'
 /** Fixed seed so captures are comparable between runs. */
 const SEED = 'K7F29XQM3RTV'
 /** Whole-run ceiling. Generous for a slow machine, finite regardless. */
-const WATCHDOG_MS = 120_000
+/**
+ * Whole-run ceiling. Raised from 120s as capture states were added — 24 shots across
+ * two viewports, several of which wait on a late-run predicate.
+ */
+const WATCHDOG_MS = 300_000
 const PAGE_TIMEOUT_MS = 15_000
 /** Per-shot ceiling for a waitFor predicate. Fast-forwarded runs are quick. */
 const WAIT_FOR_TIMEOUT_MS = 45_000
@@ -91,7 +95,10 @@ const SHOTS = [
   },
   {
     name: 'hull-critical',
-    url: `/?seed=${SEED}&screen=sortie&autopilot=greedy&ff=20`,
+    // dodger, not greedy: items raised greedy's survival to the point that it now
+    // extracts before ever reaching a critical hull, so the predicate never fired
+    // and the capture silently photographed a healthy ship at the extraction screen.
+    url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=20`,
     // The low-integrity screen rim only appears below 30%, so this capture is
     // the only check that it renders at all.
     waitFor: 'runState === "active" && integrity <= 28',
@@ -111,6 +118,21 @@ const SHOTS = [
     url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=28`,
     waitFor: 'runState === "extracted"',
     holdMs: 500,
+  },
+  {
+    // A reward card. Bots resolve a choice in ~6 ticks, so this waits on the state
+    // rather than a duration — there is no timing guess that reliably lands here.
+    name: 'item-choice',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=dodger&ff=6&holdchoice=1`,
+    waitFor: 'choiceKind === "item"',
+    holdMs: 0,
+  },
+  {
+    // A shop, which needs a build and some scrap first, so it is further in.
+    name: 'shop-choice',
+    url: `/?seed=${SEED}&screen=sortie&autopilot=aggressor&ff=10&holdchoice=1`,
+    waitFor: 'choiceKind === "shop"',
+    holdMs: 0,
   },
   {
     name: 'pause-menu',
@@ -236,11 +258,17 @@ async function capture() {
               (expression) => {
                 const api = window.__nextPilot
                 if (!api) return false
+                // Must stay in step with the reporting object below. A predicate
+                // naming a field absent here throws instead of waiting, and
+                // waitForFunction reports that as "never became true" — which reads
+                // like a game problem rather than a harness typo.
                 const view = {
                   screen: api.screen,
                   runState: api.runState,
                   enemyCount: api.enemyCount,
                   integrity: api.integrity,
+                  choiceKind: api.choiceKind,
+                  heldItems: api.heldItems,
                   stats: api.stats,
                 }
                 // eslint-disable-next-line no-new-func
@@ -277,6 +305,8 @@ async function capture() {
           if (!api) return null
           return {
             screen: api.screen,
+            choiceKind: api.choiceKind,
+            heldItems: api.heldItems,
             seed: api.seed,
             stats: api.stats,
             runState: api.runState,
@@ -292,7 +322,8 @@ async function capture() {
         step(
           `${file}  screen=${state?.screen ?? '?'} run=${state?.runState ?? '-'} ` +
             `tick=${state?.stats?.tick ?? '?'} enemies=${state?.enemies ?? '?'} ` +
-            `hull=${state?.integrity ?? '?'} dropped=${droppedWhileRunning}`,
+            `hull=${state?.integrity ?? '?'} items=${state?.heldItems ?? '?'} ` +
+            `choice=${state?.choiceKind ?? '-'} dropped=${droppedWhileRunning}`,
         )
 
         if (!state) problems.push(`${shot.name}/${viewport.name}: game never initialised`)

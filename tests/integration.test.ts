@@ -30,7 +30,7 @@ describe('sine frequency means oscillations per second', () => {
    * would quietly stop working, and every existing test would still pass.
    */
   function measurePeriodTicks(def: EnemyDef): number {
-    const enemy = createEnemy(def, PLAYFIELD_W / 2, 0)
+    const enemy = createEnemy(def, PLAYFIELD_W / 2, 0, 1001)
     const startX = enemy.x
     let previousX = startX
     let crossings = 0
@@ -71,7 +71,7 @@ describe('sine frequency means oscillations per second', () => {
 
   it('oscillates around its spawn column rather than drifting off it', () => {
     const skiff = getEnemy('skiff')
-    const enemy = createEnemy(skiff, PLAYFIELD_W / 2, 0)
+    const enemy = createEnemy(skiff, PLAYFIELD_W / 2, 0, 1002)
     const originX = enemy.x
     let minX = originX
     let maxX = originX
@@ -125,7 +125,7 @@ describe('sector content agrees with the simulation', () => {
     for (const wave of SECTOR_ONE.waves) {
       for (const formation of wave.formations) {
         const def = getEnemy(formation.enemyId)
-        const enemy = createEnemy(def, PLAYFIELD_W / 2, -20)
+        const enemy = createEnemy(def, PLAYFIELD_W / 2, -20, 1003)
         expect(enemy.hp).toBe(def.hp)
         expect(enemy.maxHp).toBe(def.hp)
         expect(enemy.alive).toBe(true)

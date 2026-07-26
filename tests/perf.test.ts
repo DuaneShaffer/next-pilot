@@ -176,7 +176,11 @@ function buildWorstCase(seed: string): { world: World; refill: () => void } {
     }
     for (let i = world.enemies.length; i < TARGET_ENEMIES; i++) {
       const t = i / TARGET_ENEMIES
-      world.enemies.push(createEnemy(mine, 16 + t * (PLAYFIELD_W - 32), 30 + ((i * 17) % 240)))
+      // Distinct uids: identity is what stops a piercing round re-hitting one
+      // target, so a stress scenario built from clones would not stress piercing.
+      world.enemies.push(
+        createEnemy(mine, 16 + t * (PLAYFIELD_W - 32), 30 + ((i * 17) % 240), 900_000 + i),
+      )
     }
   }
 

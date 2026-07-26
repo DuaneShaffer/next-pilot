@@ -7,17 +7,30 @@
  * *explain* does not ship — so every one of them is data with a sentence attached,
  * and the choice screen reads that sentence verbatim.
  *
- * ## How to read the numbers in `text`
+ * ## THE AUTHORING RULE: which params to write as increments and which as totals
  *
- * **Interaction effects are additive on top of the items' own effects, not
- * replacements.** `resolveInventory` pushes each held item's effects and then each
- * live interaction's effects into the same list, so a build holding Arc Coupler and
- * this file's `split-arc` runs *two* `chainOnHit` effects, not one upgraded one.
+ * `resolveInventory` pushes each held item's effects and then each live
+ * interaction's effects into one list, and `src/sim/itemEffects.ts` reduces that
+ * list **field by field, with two different rules**:
  *
- * Every `text` below therefore states the **total** the player will observe —
- * "arcs twice instead of once", not "adds one arc" — because the player is reading
- * it to decide what their gun will do, not to audit the data model. Where a total is
- * quoted, the comment above the interaction shows the arithmetic.
+ *   `count`, `amount`                                        SUM
+ *   `spreadDegrees`, `radius`, `fraction`, `bonus`,
+ *   `durationTicks`, `chance`                                MAX
+ *
+ * So an interaction authors an **increment** for a summed field and the **final
+ * value** for a maxed one. Getting that backwards is a silent no-op: an interaction
+ * declaring `fraction: 0.5` alongside an item's own `fraction: 0.4` does not reach
+ * 0.9, it reaches 0.5, and the sentence on the choice screen promising 90% is a lie
+ * the game tells with a straight face. Every `fraction`, `chance`, `radius`, `bonus`
+ * and `durationTicks` below is therefore written as the number the player will
+ * actually observe, and `tests/items.test.ts` runs each interaction through
+ * `summariseEffects` to confirm it changes the totals its own two items already
+ * produce.
+ *
+ * Every `text` states the **total** either way — "arcs to 2 enemies instead of 1",
+ * not "adds one arc" — because the player is reading it to decide what their gun
+ * will do, not to audit the data model. The comment above each interaction shows the
+ * arithmetic.
  *
  * ## What a synergy has to be
  *
@@ -64,31 +77,39 @@ export const INTERACTIONS: readonly InteractionDef[] = [
    * projectile that hits, including split fragments, so the interaction has to give
    * something the two items do not already give each other: a **second** arc.
    *
-   * Arithmetic behind "9 hits": 3 projectiles x (1 direct + 1 coupler arc + 1
-   * interaction arc). Damage on a full volley at base 4 is
-   * 3 x (4 + 1.6 + 1.4) = 21 rather than 12, and it lands on up to nine separate
-   * enemies, which is the actual change — this stops being a damage build and starts
-   * being a formation-deleting build.
+   * `count: 1` is an increment (counts sum, so 1 + 1 = 2 arcs). `radius: 130` is a
+   * total (radii take the max, so 130 replaces the coupler's 90 for *both* arcs, not
+   * just the new one) — which is the intended reading: a wider coupler is a better
+   * coupler. `fraction: 0.4` is deliberately equal to the coupler's own rather than
+   * lower: authoring 0.35 here would look like a decaying chain and resolve to 0.4
+   * anyway under the max rule, so the file would document behaviour that does not
+   * happen.
    *
-   * 130 units of reach against the coupler's 90 so the second arc hops *outward*
-   * rather than doubling back into the same pair, and 35% rather than 40% so the
-   * chain decays instead of paying more the further it travels.
+   * Arithmetic behind "9 hits": 3 projectiles x (1 direct + 2 arcs). Damage on a
+   * full volley at base 4 is 3 x (4 + 1.6 + 1.6) = 21.6 against 12, spread across up
+   * to nine separate enemies. The spread is the actual change — this stops being a
+   * damage build and becomes a formation-deleting build.
    */
   {
     id: 'split-arc',
     requires: ['split-shot', 'arc-coupler'],
-    text: 'Every hit arcs twice instead of once — the second arc reaches 130 units for 35% of the damage — so one 3-projectile volley can land up to 9 hits.',
-    effects: [{ kind: 'chainOnHit', on: 'onProjectileHit', count: 1, radius: 130, fraction: 0.35 }],
+    text: 'Every hit arcs to 2 enemies instead of 1 and arc reach grows from 90 to 130 units, each arc for 40% of the damage — so one 3-projectile volley can land up to 9 hits.',
+    effects: [{ kind: 'chainOnHit', on: 'onProjectileHit', count: 1, radius: 130, fraction: 0.4 }],
   },
 
   /**
    * The economy engine. Overkill Accounting is deliberately weak at 4 damage; this
    * is the pairing it was priced for.
    *
-   * Conversion 0.4 + 0.5 = 0.9. Worked example in the text: a 5.8-damage shell into
-   * an enemy with 2 integrity left wastes 3.8, and 3.8 x 0.9 = 3.42 becomes scrap.
-   * That is chosen as the example because it is the *common* case with Warheads —
-   * 5.8 per shot against 12-40 HP sector-1 enemies overkills almost every time.
+   * `fraction: 0.9` is a **total**, not an increment — overkill fractions take the
+   * max, so this replaces the item's 0.4 outright. Writing 0.5 here in the hope of
+   * summing to 0.9 would resolve to 0.5 and quietly halve the payout the text
+   * promises.
+   *
+   * Worked example in the text: a 5.8-damage shell into an enemy with 2 integrity
+   * left wastes 3.8, and 3.8 x 0.9 = 3.42 becomes scrap. That is the example because
+   * it is the *common* case with Warheads — 5.8 per shot against 12-40 HP sector-1
+   * enemies overkills almost every time.
    *
    * The +20% `scrapMultiplier` is what makes this route-defining rather than
    * incremental: a ~800-scrap sector becomes ~960 before overkill, and the overkill
@@ -101,7 +122,7 @@ export const INTERACTIONS: readonly InteractionDef[] = [
     requires: ['overkill-accounting', 'warheads'],
     text: 'Overkill converts at 90% instead of 40%, and all scrap is worth 20% more: a 5.8-damage shell finishing an enemy with 2 integrity left banks 3.4 scrap from the 3.8 wasted.',
     stats: [{ stat: 'scrapMultiplier', kind: 'mul', value: 1.2 }],
-    effects: [{ kind: 'scrapOnOverkill', on: 'onEnemyKilled', fraction: 0.5 }],
+    effects: [{ kind: 'scrapOnOverkill', on: 'onEnemyKilled', fraction: 0.9 }],
   },
 
   /**
@@ -109,23 +130,27 @@ export const INTERACTIONS: readonly InteractionDef[] = [
    *
    * Coin-Operated Cannon's window is 3 s and sector 1 pays ~800 scrap over ~188 s,
    * so scrap arrives every 2-4 seconds during a fight and the window is *usually*
-   * up. The two halves of this interaction close that gap from both ends: radius
-   * 34 + 26 + 30 = 90 units collects scrap the player never flew to, and a second
-   * window of 5 s means one pickup covers more than the gap to the next.
+   * up. This interaction closes that gap from both ends: radius 34 + 26 + 30 = 90
+   * units collects scrap the player never flew to, and a 7 s window is longer than
+   * any realistic gap between pickups during a fight, so the bonus stops flickering
+   * and becomes something the player can plan a pass around.
    *
-   * Up to +40% fire rate (18 + 22) while both windows overlap. That is a large
-   * standing bonus, and it is the intended payoff of committing two picks to a
-   * mechanic that pays nothing while retreating — the build has to fly *into* the
-   * wreckage to keep the meter fed, which is the risk the reward is priced against.
+   * `bonus` and `durationTicks` are **totals**, not increments — both take the max,
+   * so these replace the Cannon's 0.18/180 rather than adding to them. There is no
+   * "+40% while both windows overlap": the windows do not stack, and the text says
+   * "instead of" for exactly that reason.
+   *
+   * +35% for 7 s is therefore priced as the *whole* payoff of committing two picks
+   * to a mechanic that pays nothing while retreating. The build has to fly into the
+   * wreckage to keep the meter fed, which is the risk the number is set against.
    */
   {
     id: 'magnet-coin-op',
     requires: ['scrap-magnet', 'coin-op-cannon'],
-    text: 'Pickup radius rises to 90 units, and each scrap collected also opens a +22% fire-rate window for 5 s on top of the Cannon’s +18% for 3 s — up to +40% fire rate, and scrap arrives often enough that it rarely lapses.',
+    text: 'Pickup radius rises to 90 units, and each scrap collected opens a +35% fire-rate window for 7 s instead of +18% for 3 s — at 90 units the next pickup usually arrives before the window closes.',
     stats: [{ stat: 'pickupRadius', kind: 'add', value: 30 }],
-    // 300 ticks at 60 Hz is 5 s — longer than the 3 s window it stacks with, so one
-    // pickup reliably bridges the gap to the next rather than only overlapping it.
-    effects: [{ kind: 'fireRateWindow', on: 'onScrapCollected', bonus: 0.22, durationTicks: 300 }],
+    // 420 ticks at 60 Hz is 7 s.
+    effects: [{ kind: 'fireRateWindow', on: 'onScrapCollected', bonus: 0.35, durationTicks: 420 }],
   },
 
   /**
@@ -135,10 +160,11 @@ export const INTERACTIONS: readonly InteractionDef[] = [
    * with the base 40 shield means shields break early and hits reach the hull often.
    * The two items point the same way.
    *
-   * 6 + 8 = 14 projectiles per hit. Sized against the trade: a cursed hull has two
-   * survivable mistakes instead of four, so retaliation has to be worth roughly a
-   * volley and a half of the player's own fire (14 vs the 3-shot Split Shot volley)
-   * to make "take the hit" a decision rather than always wrong.
+   * 6 + 8 = 14 projectiles per hit — `count` is a summed field, so this one really is
+   * an increment. Sized against the trade: a cursed hull has two survivable mistakes
+   * instead of four, so retaliation has to be worth roughly a volley and a half of
+   * the player's own fire (14 against the 3-shot Split Shot volley) to make "take the
+   * hit" a decision rather than always wrong.
    *
    * `pierce` is the piece that changes the build. It is the roster's only source of
    * piercing other than `warhead-fragments`, and one extra pass-through against
@@ -160,12 +186,12 @@ export const INTERACTIONS: readonly InteractionDef[] = [
    * DESIGN.md's "Cursed Hull + Repair Nanites", minus the ramp it cannot express
    * (see the header note).
    *
-   * Recovery: 0.25 x 3 = 0.75 from the item, plus 0.45 x 6 = 2.7 from the
-   * interaction, so about 3.4 integrity per kill. Against a 55-integrity hull that
-   * is a fundamentally different resource: 16 kills is a full heal, and sector 1 has
-   * ~70 kills in it. The curse stops being a life total and becomes a throughput
-   * problem — the hull is fine as long as things keep dying, which is exactly the
-   * play pattern the +2 damage is there to support.
+   * Recovery: `amount` sums (3 + 5 = 8) and `chance` takes the max (0.45 beats the
+   * item's 0.25), so 0.45 x 8 = about 3.6 integrity per kill against the item's 0.75.
+   * Against a 55-integrity hull that is a fundamentally different resource: 15 kills
+   * is a full heal, and sector 1 has ~70 kills in it. The curse stops being a life
+   * total and becomes a throughput problem — the hull is fine as long as things keep
+   * dying, which is exactly the play pattern the +2 damage is there to support.
    *
    * The damage is `add`, so the curse's x1.5 multiplies it: (4 + 2) x 1.5 = 9 per
    * shot, 180 dps at the base fire rate. That ordering is a property of the fixed
@@ -175,9 +201,9 @@ export const INTERACTIONS: readonly InteractionDef[] = [
   {
     id: 'curse-nanites',
     requires: ['cursed-hull', 'repair-nanites'],
-    text: 'Kills also have a 45% chance to restore 6 integrity, taking recovery from about 0.75 to about 3.4 integrity per kill, and projectiles gain +2 damage — 9 per shot with the curse applied.',
+    text: 'Kills restore 8 integrity instead of 3, at a 45% chance instead of 25% — about 3.6 integrity per kill against 0.75 — and projectiles gain +2 damage, 9 per shot once the curse multiplies it.',
     stats: [{ stat: 'projectileDamage', kind: 'add', value: 2 }],
-    effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 6, chance: 0.45 }],
+    effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 5, chance: 0.45 }],
   },
 
   /**
@@ -191,10 +217,10 @@ export const INTERACTIONS: readonly InteractionDef[] = [
    * combination has to be better than not having taken Warheads, or the interaction
    * is an apology.
    *
-   * `pierce` on all three projectiles is the build change. 5.8-damage shells passing
-   * through 2 enemies each is 3 x 2 = 6 bodies per volley on a `column` or `line`
-   * formation, which turns the sector's densest spawns from the hardest thing in it
-   * into the most profitable.
+   * `pierce` on all three projectiles is the build change. One extra pass-through
+   * means each 5.8-damage shell hits 2 enemies, so a volley reaches 3 x 2 = 6 bodies
+   * on a `column` or `line` formation — which turns the sector's densest spawns from
+   * the hardest thing in it into the most profitable.
    */
   {
     id: 'warhead-fragments',
@@ -212,9 +238,10 @@ export const INTERACTIONS: readonly InteractionDef[] = [
    * large shield is a buffer that only pays off if something behind it refills.
    * Repair Nanites is that something.
    *
-   * 40 + 35 + 20 = 95 shield, and recovery of 0.75 + (0.35 x 4) = 2.15 integrity per
-   * kill. Effective health 195, refilling at roughly 2.2 a kill against sector 1's
-   * chip damage (Skiff 6, Escort 7, Turret 7 per pellet) — so a pilot who keeps
+   * 40 + 35 + 20 = 95 shield, and recovery of 0.35 x (3 + 4) = 2.45 integrity per
+   * kill — `amount` sums, `chance` takes the max. Effective health 195, refilling at
+   * roughly 2.5 a kill against sector 1's chip damage (Skiff 6, Escort 7, Turret 7
+   * per pellet) — so a pilot who keeps
    * killing outruns incoming fire and only dies to the big avoidable hits, the
    * 22-24 damage collisions. That is the intended failure mode: this build makes
    * bullets survivable and mistakes fatal, which is the inverse of the cursed route.
@@ -225,7 +252,7 @@ export const INTERACTIONS: readonly InteractionDef[] = [
   {
     id: 'shield-nanites',
     requires: ['heavy-shield', 'repair-nanites'],
-    text: 'Max shield rises to 95, and kills also have a 35% chance to restore 4 integrity — about 2.2 integrity recovered per kill behind a 95-point buffer.',
+    text: 'Max shield rises to 95, and kills restore 7 integrity instead of 3 at a 35% chance instead of 25% — about 2.5 integrity recovered per kill behind a 95-point buffer.',
     stats: [{ stat: 'maxShield', kind: 'add', value: 20 }],
     effects: [{ kind: 'repairOnKill', on: 'onEnemyKilled', amount: 4, chance: 0.35 }],
   },

@@ -8,11 +8,13 @@
  */
 
 import { FixedLoop } from './core/loop'
-import { Keyboard, type InputSnapshot } from './core/input'
+import { Keyboard, NEUTRAL_INPUT, type InputSnapshot } from './core/input'
 import { generateSeed, isValidSeed, normalizeSeed } from './core/seed'
 import { VIRTUAL_H, VIRTUAL_W } from './core/space'
 import { ENEMIES } from './content/enemies'
 import { SECTOR_ONE, SECTORS } from './content/sectors'
+import { ITEMS } from './content/items'
+import { INTERACTIONS } from './content/interactions'
 import { createAudioDirector } from './audio'
 import { adoptLegacySave, loadSave, persistSave, type Save, type Settings } from './meta/save'
 import { Viewport } from './render/layout'
@@ -21,7 +23,8 @@ import { drawPanel, type PanelState } from './render/panel'
 import { drawScene } from './render/scene'
 import { Starfield } from './render/starfield'
 import { BOTS, isBotName, type BotPolicy } from './sim/bots'
-import { SHOTS_PER_SECOND, World } from './sim/world'
+import { World, type RunContent } from './sim/world'
+import { drawChoiceScreen } from './ui/choiceScreen'
 import { drawIncidentReport } from './ui/incidentReport'
 import {
   PAUSE_ITEMS,
@@ -60,6 +63,15 @@ interface UrlOptions {
   autopilot: BotPolicy | null
   /** Extra simulation ticks per rendered frame. 1 is real time. */
   fastForward: number
+  /**
+   * Stop the autopilot from resolving a reward choice, so the card stays open.
+   *
+   * A capture affordance. A bot resolves a choice in about six ticks, which at any
+   * useful fast-forward is ~25ms — shorter than the harness's polling interval, so
+   * the reward screen was literally unobservable and its captures silently
+   * photographed whatever state the run had reached instead.
+   */
+  holdChoice: boolean
 }
 
 /** Ceiling on fast-forward, so a typo can't wedge the page in a long loop. */
@@ -85,6 +97,7 @@ function readUrlOptions(fallbackSeed: string): UrlOptions {
     screen: params.get('screen') === 'sortie' || autopilot ? 'sortie' : 'title',
     autopilot,
     fastForward,
+    holdChoice: params.get('holdchoice') === '1',
   }
 }
 
@@ -105,7 +118,10 @@ function main(): void {
 
   let screen: Screen = options.screen
   let seed = options.seed
-  let world = new World(seed)
+  // The real content tables. World defaults to empty so sim tests can fabricate
+  // items; the app is what supplies the shipping set.
+  const content: RunContent = { items: ITEMS, interactions: INTERACTIONS }
+  let world = new World(seed, content)
   let sceneStars = new Starfield(seed)
   const titleStars = new Starfield(`${seed}:title`, VIRTUAL_W, VIRTUAL_H)
   let menuTick = 0
@@ -115,12 +131,15 @@ function main(): void {
     pilotNumber: save.pilotNumber,
     hullName: 'Lien',
     weaponName: 'Twin Pulse',
-    // Derived from the sim, never hand-written, so the HUD cannot lie about it.
-    fireRate: SHOTS_PER_SECOND,
+    // Read from the run, never hand-written: items change this constantly and the
+    // HUD advertising a rate the weapon does not have has already shipped once.
+    fireRate: world.shotsPerSecond,
     sector: 1,
     // Sectors that exist, not sectors that are planned. See SECTORS.
     sectorCount: SECTORS.length,
     waveCount: SECTOR_ONE.waves.length,
+    // Without the table the build readout formats ids instead of authored names.
+    items: ITEMS,
   }
 
   function applyAudioSettings(settings: Settings): void {
@@ -141,7 +160,7 @@ function main(): void {
     panelState.pilotNumber = save.pilotNumber
 
     seed = generateSeed()
-    world = new World(seed)
+    world = new World(seed, content)
     sceneStars = new Starfield(seed)
     resetFeelState(feel)
     screen = 'sortie'
@@ -186,7 +205,14 @@ function main(): void {
 
   /** One simulation step. Separated so fast-forward can run it many times. */
   function stepSim(): void {
-    const input: InputSnapshot = options.autopilot ? options.autopilot(world) : keyboard.snapshot()
+    // Held choices get neutral input so nothing confirms and the card stays up for
+    // the capture. Everything else still runs, so the frame is a real one.
+    const holding = options.holdChoice && world.pendingChoice !== null
+    const input: InputSnapshot = holding
+      ? NEUTRAL_INPUT
+      : options.autopilot
+        ? options.autopilot(world)
+        : keyboard.snapshot()
 
     sceneStars.update()
     world.tick(input)
@@ -297,17 +323,50 @@ function main(): void {
       // Paused and dead both freeze the playfield, so interpolation must not keep
       // sliding entities toward a tick that will never be simulated.
       const frozen = screen === 'incident' || screen === 'paused'
+      // Refreshed every frame from the run: an item taken mid-sortie changes this,
+      // and a stale copy is precisely the HUD-lies-about-the-weapon bug again.
+      panelState.fireRate = world.shotsPerSecond
       drawScene(ctx, world, sceneStars, frozen ? 0 : alpha, {
         feel,
         shakeScale: save.settings.shake,
       })
+
+      // Not drawn under a choice card either: the card spans nearly the full width
+      // over a heavy scrim, and a thin strip of live panel ghosting past its edge
+      // reads as a rendering bug — the same finding as the incident report.
+      const choosing = world.pendingChoice !== null
 
       // The panel is deliberately NOT drawn under the incident report: its scrim
       // is translucent by design, and translucency over live readouts left panel
       // text legibly ghosting through the right margin. Faint wreckage behind
       // paperwork is atmosphere; faint numbers are noise. The pause menu is a
       // smaller card, so the panel stays visible behind it.
-      if (screen !== 'incident') drawPanel(ctx, world, panelState)
+      if (screen !== 'incident' && !choosing) drawPanel(ctx, world, panelState)
+
+      if (choosing) {
+        drawChoiceScreen(ctx, world, {
+          // The simulation owns the cursor so a recorded run reproduces its picks;
+          // this screen renders that selection rather than holding one.
+          selected: world.choiceSelection,
+          tick: world.stats.tick,
+          items: ITEMS,
+          awaitingRelease: world.choiceAwaitingRelease,
+        })
+        return
+      }
+
+
+      if (choosing) {
+        drawChoiceScreen(ctx, world, {
+          // The simulation owns the cursor so a recorded run reproduces its picks;
+          // this screen renders that selection rather than holding one.
+          selected: world.choiceSelection,
+          tick: world.stats.tick,
+          items: ITEMS,
+          awaitingRelease: world.choiceAwaitingRelease,
+        })
+        return
+      }
 
       if (screen === 'paused') {
         drawPauseMenu(ctx, {
@@ -398,6 +457,13 @@ function main(): void {
       },
       get integrity() {
         return world.hull.integrity
+      },
+      /** Null unless a reward card is open. Lets a capture wait on the real state. */
+      get choiceKind() {
+        return world.pendingChoice?.kind ?? null
+      },
+      get heldItems() {
+        return world.inventory.length
       },
       get stats() {
         return { ...world.stats, ...loop.getStats() }

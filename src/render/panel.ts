@@ -11,6 +11,7 @@
  *   - `danger` colour appears only when something is actually wrong.
  */
 
+import type { ItemDef } from '../content/types'
 import { PANEL_W, PLAYFIELD_W, VIRTUAL_H } from '../core/space'
 import { formatSeed } from '../core/seed'
 import type { WorldView } from '../sim/entities'
@@ -201,6 +202,138 @@ function formatAccuracy(hits: number, shotsFired: number): { value: string; unit
   return { value: String(Math.round((hits / shotsFired) * 100)), unit: '%' }
 }
 
+/**
+ * The held-build readout.
+ *
+ * Fills the ~140-unit void the layout comment below deliberately left in the
+ * middle of the column. Items are the fastest-moving state in the run now, and a
+ * player who cannot see what is fitted cannot read their own numbers.
+ *
+ * Three constraints shape it, all of them scars:
+ *
+ * - **Names are truncated, never wrapped.** The column's content width is 164
+ *   units and the longest item name ("Coin-Operated Cannon") is wider than that
+ *   once a stack count is beside it. `drawStatLine` degrades to two lines when a
+ *   value would collide with its label, but that answer does not scale to a list —
+ *   a dozen two-line rows would run straight into the sortie log. So a row
+ *   measures its name and clips it with an ellipsis instead.
+ * - **The list length comes from the available height**, not a constant, so the
+ *   readout cannot overflow into the log below it if anything above it grows.
+ * - **Every number is read from `view.resolvedStats`.** The panel advertising a
+ *   fire rate the weapon did not have shipped once already; items make these
+ *   numbers move constantly, and recomputing one here would reintroduce it.
+ */
+const BUILD_ROW_H = 15
+
+/** Clip to fit, with an ellipsis so a shortened name cannot read as the whole one. */
+function truncateToWidth(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  size: number,
+): string {
+  if (measureText(ctx, text, { size }) <= maxWidth) return text
+  let cut = text.length
+  while (cut > 0 && measureText(ctx, `${text.slice(0, cut).trimEnd()}…`, { size }) > maxWidth) {
+    cut--
+  }
+  return cut > 0 ? `${text.slice(0, cut).trimEnd()}…` : '…'
+}
+
+/** `coin-op-cannon` becomes `Coin Op Cannon`. Only reached when no table is supplied. */
+function prettifyId(id: string): string {
+  return id
+    .split(/[-_\s]+/)
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+/** At most one decimal: items produce values like 5.8 and 7.25, not integers. */
+function formatStat(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1)
+}
+
+/**
+ * Draw the build between `top` and `bottom`, and return nothing — the block is
+ * anchored, not flowed, so nothing below it depends on how tall it turned out.
+ */
+function drawHeldBuild(
+  ctx: CanvasRenderingContext2D,
+  view: WorldView,
+  top: number,
+  bottom: number,
+  items?: Readonly<Record<string, ItemDef>>,
+): void {
+  let y = drawSectionHeading(ctx, top, 'Build')
+
+  // Damage per shot lives here rather than with the weapon group above because it
+  // is the number items move most, and reading it next to the list that changed it
+  // is what makes an item's effect legible.
+  const damage = view.resolvedStats.projectileDamage
+  if (damage !== undefined) {
+    y = drawStatLine(ctx, y, 'Damage', formatStat(damage), 'per shot')
+  }
+
+  if (view.inventory.length === 0) {
+    drawText(ctx, 'Nothing fitted', CONTENT_X, y, {
+      size: 12,
+      baseline: 'top',
+      color: Palette.textFaint,
+    })
+    return
+  }
+
+  const live = view.activeInteractions.length
+  // Reserve the synergy row up front, so the item list cannot eat the space and
+  // push a live combination off the panel.
+  const reserved = live > 0 ? 20 : 0
+  const rows = Math.max(0, Math.floor((bottom - y - reserved) / BUILD_ROW_H))
+
+  // One row is given up to the overflow count when the list is longer than the
+  // void: an undercount of the build is worse than one fewer name.
+  const listed = view.inventory.length > rows ? Math.max(0, rows - 1) : view.inventory.length
+  for (let i = 0; i < listed; i++) {
+    const entry = view.inventory[i]
+    if (!entry) continue
+    const count = entry.count > 1 ? `×${entry.count}` : ''
+    const countWidth = count ? measureText(ctx, count, { size: 12 }) : 0
+    const name = items?.[entry.defId]?.name ?? prettifyId(entry.defId)
+    drawText(ctx, truncateToWidth(ctx, name, CONTENT_W - countWidth - 8, 12), CONTENT_X, y, {
+      size: 12,
+      baseline: 'top',
+      color: Palette.text,
+    })
+    if (count) {
+      // A count, not a bare number: "×2" cannot be misread as a quantity of
+      // anything else on the row.
+      drawText(ctx, count, CONTENT_X + CONTENT_W, y, {
+        size: 12,
+        align: 'right',
+        baseline: 'top',
+        color: Palette.textDim,
+      })
+    }
+    y += BUILD_ROW_H
+  }
+  const hidden = view.inventory.length - listed
+  if (hidden > 0) {
+    drawText(ctx, `+${hidden} more fitted`, CONTENT_X, y, {
+      size: 12,
+      baseline: 'top',
+      color: Palette.textDim,
+    })
+    y += BUILD_ROW_H
+  }
+
+  if (live > 0) {
+    // `good` because a live combination is a gain. The count carries the
+    // information; the colour only reinforces it. The interaction text itself is
+    // too long for this column and is stated on the choice screen instead.
+    drawStatLine(ctx, y, 'Synergy', String(live), 'live', Palette.good)
+  }
+}
+
 export interface PanelState {
   pilotNumber: number
   hullName: string
@@ -217,6 +350,15 @@ export interface PanelState {
    * waves released instead of a fraction — never a bare count.
    */
   waveCount?: number
+  /**
+   * Item table, for resolving held ids to names.
+   *
+   * Optional and injected rather than imported, for the reason the incident report
+   * takes its `causeName` the same way: a render module that cannot be drawn
+   * without the content registry loaded is hard to test. Without it the readout
+   * formats the id, which is readable but not the authored name.
+   */
+  items?: Readonly<Record<string, ItemDef>>
 }
 
 export function drawPanel(
@@ -318,7 +460,19 @@ export function drawPanel(
   // bottom that reads as unfinished.
   const LOG_H = 17 + 20 * 3
   const logTop = footerDivider - AFTER_DIVIDER - LOG_H
-  drawDivider(ctx, logTop - AFTER_DIVIDER)
+  const logDivider = logTop - AFTER_DIVIDER
+  drawDivider(ctx, logDivider)
+
+  // The void the comment above reserved, now spent on the build.
+  //
+  // Drawn after the log's divider is known because the readout is bounded by it:
+  // the space it gets is whatever is left between the progress group and the fixed
+  // block below, and it must never grow past that. The gap above the heading is
+  // tighter than AFTER_DIVIDER on purpose — every unit there is a unit the item
+  // list does not get, and the void is only ~110 tall to begin with.
+  y += BEFORE_DIVIDER
+  drawDivider(ctx, y)
+  drawHeldBuild(ctx, view, y + 12, logDivider - 8, state.items)
 
   let logY = drawSectionHeading(ctx, logTop, 'Sortie log')
   const accuracy = formatAccuracy(view.stats.hits, view.stats.shotsFired)

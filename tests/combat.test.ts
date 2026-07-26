@@ -256,7 +256,7 @@ describe('damage', () => {
   })
 
   it('destroys an enemy only when its hp reaches zero', () => {
-    const e = createEnemy(makeDef({ hp: 10 }), 100, 100)
+    const e = createEnemy(makeDef({ hp: 10 }), 100, 100, 1001)
     expect(applyEnemyDamage(e, 4)).toBe(false)
     expect(applyEnemyDamage(e, 4)).toBe(false)
     expect(e.hitFlashTicks).toBeGreaterThan(0)
@@ -273,7 +273,7 @@ describe('damage', () => {
 describe('movement kinds', () => {
   it('drift falls straight down at speed', () => {
     const def = makeDef({ movement: 'drift', movementParams: { speed: 60 } })
-    const e = createEnemy(def, 200, 0)
+    const e = createEnemy(def, 200, 0, 1002)
     moveFor(e, def, 60)
     expect(e.x).toBe(200)
     expect(e.y).toBeCloseTo(60, 6)
@@ -285,7 +285,7 @@ describe('movement kinds', () => {
       movement: 'sine',
       movementParams: { speed: 60, amplitude: 40, frequency: 1 },
     })
-    const e = createEnemy(def, 100, 0)
+    const e = createEnemy(def, 100, 0, 1003)
     expect(e.originX).toBe(100)
 
     // A quarter of a 1Hz cycle is 15 ticks, at which point the offset is +amplitude.
@@ -315,7 +315,7 @@ describe('movement kinds', () => {
         diveMultiplier: 3,
       },
     })
-    const e = createEnemy(def, 200, 0)
+    const e = createEnemy(def, 200, 0, 1004)
     expect(e.holdY).toBeCloseTo(holdY, 6)
 
     moveFor(e, def, 100)
@@ -340,7 +340,7 @@ describe('movement kinds', () => {
       movement: 'hover',
       movementParams: { speed: 60, holdYFraction: 0.25 },
     })
-    const e = createEnemy(def, 200, 0)
+    const e = createEnemy(def, 200, 0, 1005)
     moveFor(e, def, 600)
     expect(e.phase).toBe('holding')
     expect(e.y).toBeCloseTo(0.25 * PLAYFIELD_H, 6)
@@ -352,7 +352,7 @@ describe('movement kinds', () => {
       movement: 'hover',
       movementParams: { speed: 60, holdYFraction: 0.25, holdTicks: 60 },
     })
-    const e = createEnemy(def, 200, 0)
+    const e = createEnemy(def, 200, 0, 1006)
     moveFor(e, def, 180 + 62)
     expect(e.phase).toBe('leaving')
     moveFor(e, def, 900)
@@ -366,26 +366,26 @@ describe('movement kinds', () => {
     })
     const holdY = 0.25 * PLAYFIELD_H
 
-    const fromLeft = createEnemy(def, 40, 0)
+    const fromLeft = createEnemy(def, 40, 0, 1007)
     moveFor(fromLeft, def, 200 + 60)
     expect(fromLeft.phase).toBe('committed')
     expect(fromLeft.y).toBeCloseTo(holdY, 6)
     expect(fromLeft.x).toBeGreaterThan(40)
 
-    const fromRight = createEnemy(def, PLAYFIELD_W - 40, 0)
+    const fromRight = createEnemy(def, PLAYFIELD_W - 40, 0, 1008)
     moveFor(fromRight, def, 200 + 60)
     expect(fromRight.x).toBeLessThan(PLAYFIELD_W - 40)
   })
 
   it('is never culled for being above the playfield, only for leaving it', () => {
     const def = makeDef({})
-    const above = createEnemy(def, 200, -300)
+    const above = createEnemy(def, 200, -300, 1009)
     expect(isEnemyOutOfPlay(above)).toBe(false)
 
-    const below = createEnemy(def, 200, PLAYFIELD_H + 200)
+    const below = createEnemy(def, 200, PLAYFIELD_H + 200, 1010)
     expect(isEnemyOutOfPlay(below)).toBe(true)
 
-    const sideways = createEnemy(def, -200, 100)
+    const sideways = createEnemy(def, -200, 100, 1011)
     expect(isEnemyOutOfPlay(sideways)).toBe(true)
   })
 })
@@ -400,7 +400,7 @@ describe('movement kinds', () => {
 describe('enemy weapons', () => {
   it('never fires when unarmed', () => {
     const def = makeDef({ weapon: UNARMED })
-    const e = createEnemy(def, 100, 200)
+    const e = createEnemy(def, 100, 200, 1012)
     expect(fireFor(e, def, 600)).toHaveLength(0)
   })
 
@@ -408,7 +408,7 @@ describe('enemy weapons', () => {
     const def = makeDef({
       weapon: { kind: 'aimed', intervalTicks: 20, bulletSpeed: 100, damage: 3, firstDelayTicks: 30, windupTicks: 0 },
     })
-    const e = createEnemy(def, 100, 200)
+    const e = createEnemy(def, 100, 200, 1013)
 
     // An enemy that fires the instant it appears is unreactable, not difficult.
     expect(fireFor(e, def, 29)).toHaveLength(0)
@@ -426,7 +426,7 @@ describe('enemy weapons', () => {
       radius: 10,
       weapon: { kind: 'aimed', intervalTicks: 20, bulletSpeed: 100, damage: 3, firstDelayTicks: 30, windupTicks: 0 },
     })
-    const e = createEnemy(def, 100, -40)
+    const e = createEnemy(def, 100, -40, 1014)
     expect(fireFor(e, def, 300)).toHaveLength(0)
     expect(e.fireCooldown).toBe(30)
 
@@ -439,7 +439,7 @@ describe('enemy weapons', () => {
     const def = makeDef({
       weapon: { kind: 'aimed', intervalTicks: 60, bulletSpeed: 120, damage: 3, firstDelayTicks: 10, windupTicks: 0 },
     })
-    const e = createEnemy(def, 100, 200)
+    const e = createEnemy(def, 100, 200, 1015)
     const shots = fireFor(e, def, 10, 100, 600)
     expect(shots).toHaveLength(1)
 
@@ -457,7 +457,7 @@ describe('enemy weapons', () => {
     const def = makeDef({
       weapon: { kind: 'aimed', intervalTicks: 30, bulletSpeed: 100, damage: 3, firstDelayTicks: 1, windupTicks: 0 },
     })
-    const e = createEnemy(def, 100, 100)
+    const e = createEnemy(def, 100, 100, 1016)
     const left = fireFor(e, def, 1, 0, 200)
     const right = fireFor(e, def, 30, 400, 200)
     expect((left[0] as AttributedEnemyBullet).vx).toBeLessThan(0)
@@ -477,7 +477,7 @@ describe('enemy weapons', () => {
       windupTicks: 0,
       },
     })
-    const e = createEnemy(def, 100, 200)
+    const e = createEnemy(def, 100, 200, 1017)
     const shots = fireFor(e, def, 5, 100, 600)
     expect(shots).toHaveLength(5)
 
@@ -505,7 +505,7 @@ describe('enemy weapons', () => {
       windupTicks: 0,
       },
     })
-    const e = createEnemy(def, 100, 200)
+    const e = createEnemy(def, 100, 200, 1018)
     const shots = fireFor(e, def, 1, 300, 200)
     expect(shots).toHaveLength(1)
     expect((shots[0] as AttributedEnemyBullet).vy).toBeCloseTo(0, 6)
@@ -525,7 +525,7 @@ describe('enemy weapons', () => {
       },
     })
 
-    const a = createEnemy(def, 100, 200)
+    const a = createEnemy(def, 100, 200, 1019)
     const shots = fireFor(a, def, 4, 0, 0)
     expect(shots).toHaveLength(8)
     // Evenly spaced: the velocities sum to zero and every speed is identical.
@@ -545,8 +545,8 @@ describe('enemy weapons', () => {
     }
 
     // Position, not aim: the same volley regardless of where the hull is.
-    const b1 = createEnemy(def, 100, 200)
-    const b2 = createEnemy(def, 100, 200)
+    const b1 = createEnemy(def, 100, 200, 1020)
+    const b2 = createEnemy(def, 100, 200, 1021)
     const near = fireFor(b1, def, 4, 100, 210).map((b) => [b.vx, b.vy])
     const far = fireFor(b2, def, 4, 400, 700).map((b) => [b.vx, b.vy])
     expect(near).toEqual(far)
@@ -563,7 +563,7 @@ describe('enemy weapons', () => {
       windupTicks: 0,
       },
     })
-    const e = createEnemy(def, 100, 100)
+    const e = createEnemy(def, 100, 100, 1022)
     const shots = fireFor(e, def, 6, 300, 300)
     expect(shots).toHaveLength(1)
 
@@ -585,7 +585,7 @@ describe('enemy weapons', () => {
 
   it('deathBurst fires a ring when the enemy dies', () => {
     const def = makeDef({ deathBurst: { count: 6, bulletSpeed: 80, damage: 4 } })
-    const e = createEnemy(def, 120, 240)
+    const e = createEnemy(def, 120, 240, 1023)
     const out: AttributedEnemyBullet[] = []
 
     fireDeathBurst(e, def, out)
@@ -608,7 +608,7 @@ describe('enemy weapons', () => {
   it('fires no death burst for a def without one', () => {
     const def = makeDef({})
     const out: AttributedEnemyBullet[] = []
-    fireDeathBurst(createEnemy(def, 100, 100), def, out)
+    fireDeathBurst(createEnemy(def, 100, 100, 1024), def, out)
     expect(out).toHaveLength(0)
   })
 })
@@ -846,9 +846,9 @@ describe('projectile caps', () => {
     })
     const out: AttributedEnemyBullet[] = []
     const enemies = [
-      createEnemy(def, 100, 200),
-      createEnemy(def, 200, 200),
-      createEnemy(def, 300, 200),
+      createEnemy(def, 100, 200, 1025),
+      createEnemy(def, 200, 200, 1026),
+      createEnemy(def, 300, 200, 1027),
     ]
     for (let t = 0; t < 200; t++) {
       for (const e of enemies) {
@@ -888,7 +888,7 @@ describe('combat in the world', () => {
   it('awards a kill, scrap, and an explosion when player fire destroys an enemy', () => {
     const world = new World('KILLKILLKIL1')
     const def = ENEMIES['hauler'] as EnemyDef
-    world.enemies.push(createEnemy(def, world.hull.x, world.hull.y - 120))
+    world.enemies.push(createEnemy(def, world.hull.x, world.hull.y - 120, 1028))
 
     for (let i = 0; i < 40; i++) world.tick(FIRING)
     expect(world.stats.kills).toBeGreaterThanOrEqual(1)
@@ -903,7 +903,7 @@ describe('combat in the world', () => {
     expect(mine.deathBurst).toBeDefined()
     // Far enough up that the ring does not reach the hull before we look at it,
     // and short enough that the sector's own first wave (t=150) has not released.
-    world.enemies.push(createEnemy(mine, world.hull.x, 120))
+    world.enemies.push(createEnemy(mine, world.hull.x, 120, 1029))
 
     for (let i = 0; i < 140; i++) world.tick(FIRING)
     expect(world.stats.kills).toBe(1)
@@ -914,7 +914,7 @@ describe('combat in the world', () => {
   it('awards nothing for an enemy that escapes off the bottom', () => {
     const world = new World('ESCAPEESCAP1')
     const def = ENEMIES['hauler'] as EnemyDef
-    world.enemies.push(createEnemy(def, 20, PLAYFIELD_H - 20))
+    world.enemies.push(createEnemy(def, 20, PLAYFIELD_H - 20, 1030))
 
     for (let i = 0; i < 300; i++) world.tick(NEUTRAL_INPUT)
     expect(world.stats.kills).toBe(0)
@@ -993,7 +993,7 @@ function fireTimeline(
 describe('enemy telegraphs', () => {
   it('commits for exactly windupTicks before every volley', () => {
     const def = telegraphDef()
-    const e = createEnemy(def, 100, 200)
+    const e = createEnemy(def, 100, 200, 1031)
     const { shotTicks, telegraph } = fireTimeline(e, def, 130)
 
     // firstDelayTicks 30, then a 12-tick windup: the first shot lands on tick 42.
@@ -1017,7 +1017,7 @@ describe('enemy telegraphs', () => {
 
   it('reports the windup total so render can show progress', () => {
     const def = telegraphDef()
-    const e = createEnemy(def, 100, 200)
+    const e = createEnemy(def, 100, 200, 1032)
     fireFor(e, def, 35)
     expect(e.telegraphTicks).toBeGreaterThan(0)
     expect(e.telegraphTotal).toBe(12)
@@ -1033,7 +1033,7 @@ describe('enemy telegraphs', () => {
     // Charging the windup on top of the interval would have cut every armed
     // enemy's rate of fire — a balance change wearing a feel change's clothes.
     const def = telegraphDef()
-    const e = createEnemy(def, 100, 200)
+    const e = createEnemy(def, 100, 200, 1033)
     const { shotTicks } = fireTimeline(e, def, 200)
     expect(shotTicks.length).toBeGreaterThan(4)
     for (let i = 1; i < shotTicks.length; i++) {
@@ -1045,7 +1045,7 @@ describe('enemy telegraphs', () => {
     // A telegraph the player cannot see is not a telegraph. The cadence clock and
     // the windup both wait for the enemy to be visible.
     const def = telegraphDef()
-    const e = createEnemy(def, 100, -40)
+    const e = createEnemy(def, 100, -40, 1034)
     const offScreen = fireTimeline(e, def, 300)
     expect(offScreen.shots).toHaveLength(0)
     expect(Math.max(...offScreen.telegraph)).toBe(0)
@@ -1060,7 +1060,7 @@ describe('enemy telegraphs', () => {
 
   it('fires nothing when killed mid-windup', () => {
     const def = telegraphDef()
-    const e = createEnemy(def, 100, 200)
+    const e = createEnemy(def, 100, 200, 1035)
     expect(fireFor(e, def, 35)).toHaveLength(0)
     expect(e.telegraphTicks).toBeGreaterThan(0)
 
@@ -1072,14 +1072,14 @@ describe('enemy telegraphs', () => {
 
   it('fires without warning only when content asks for windupTicks 0', () => {
     const def = telegraphDef({ windupTicks: 0 })
-    const e = createEnemy(def, 100, 200)
+    const e = createEnemy(def, 100, 200, 1036)
     const { shotTicks, telegraph } = fireTimeline(e, def, 60)
     expect(shotTicks[0]).toBe(30)
     expect(Math.max(...telegraph)).toBe(0)
   })
 
   it('starts every enemy un-telegraphed', () => {
-    const e = createEnemy(telegraphDef(), 100, 200)
+    const e = createEnemy(telegraphDef(), 100, 200, 1037)
     expect(e.telegraphTicks).toBe(0)
     expect(e.telegraphTotal).toBe(0)
   })
@@ -1189,7 +1189,7 @@ function eventsOfKind<K extends SimEvent['kind']>(
 function withEnemy(world: World, id: string, x: number, y: number): EnemyDef {
   const def = ENEMIES[id] as EnemyDef
   expect(def).toBeDefined()
-  world.enemies.push(createEnemy(def, x, y))
+  world.enemies.push(createEnemy(def, x, y, 1038))
   return def
 }
 
@@ -1409,7 +1409,7 @@ describe('sim events', () => {
   it('reports an enemy volley when it leaves, not when it was telegraphed', () => {
     const world = new World('EVENTVOLLEY1')
     const skiff = ENEMIES['skiff'] as EnemyDef
-    world.enemies.push(createEnemy(skiff, 60, 220))
+    world.enemies.push(createEnemy(skiff, 60, 220, 1039))
 
     const log = eventLog(world, NEUTRAL_INPUT, 145)
     const shots = eventsOfKind(log, 'enemy-shot')
@@ -1535,7 +1535,7 @@ describe('render-only countdowns', () => {
     // Split out of updateEnemyMovement so it can keep running during hitstop, when
     // movement deliberately does not.
     const def = makeDef({})
-    const e = createEnemy(def, 100, 100)
+    const e = createEnemy(def, 100, 100, 1040)
     applyEnemyDamage(e, 1)
     const flash = e.hitFlashTicks
     expect(flash).toBeGreaterThan(0)

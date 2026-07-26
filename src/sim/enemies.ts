@@ -41,9 +41,25 @@ const DEFAULT_DIVE_MULTIPLIER = 2.4
  * a def starts in exactly the same state regardless of which formation released
  * it.
  */
-export function createEnemy(def: EnemyDef, x: number, y: number): EnemyInstance {
+/**
+ * Create an enemy instance.
+ *
+ * `uid` is supplied by the caller rather than drawn from a module counter. A
+ * module-global counter was the first attempt and it is wrong in a way that hides:
+ * two `World`s alive in the same process would draw from the same sequence, so the
+ * same seed would produce different uids depending on what else had been
+ * constructed — and uids are hashed, so every replay fixture would become dependent
+ * on test execution order. Ownership belongs to the thing with a run's lifetime.
+ *
+ * REQUIRED, with no default. A default of 1 was the second attempt and it is also
+ * wrong: every fabricated enemy shared one identity, so a piercing round hit the
+ * first target and then skipped all the others as "already hit". A parameter that
+ * silently collides is worse than one the caller is forced to think about.
+ */
+export function createEnemy(def: EnemyDef, x: number, y: number, uid: number): EnemyInstance {
   const holdFraction = def.movementParams.holdYFraction ?? DEFAULT_HOLD_Y_FRACTION
   return {
+    uid,
     defId: def.id,
     hp: def.hp,
     maxHp: def.hp,
