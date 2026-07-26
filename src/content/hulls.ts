@@ -286,18 +286,32 @@ export const HULLS: Record<string, HullDef> = {
    *
    * ## The write-down is -36%, up from -28%, and the relic is what it pays for
    *
-   * Probate was the roster's strongest hull at +29.4 pp and +28.0 pp above the hull
-   * mean over 300 aggressor runs on each of two seeds, and nothing in its stat line
-   * accounted for it: effective health 132 against Lien's 140, identical incoming
-   * damage rate. The whole gap was that it arrived at each sector near full health
-   * (100/93/100/96/100% against Lien's 100/58/63/67/83%) because Repair Nanites is
-   * the roster's only integrity recovery and it compounds over fifteen minutes.
+   * Probate is the roster's strongest hull — +22.3 pp and +13.3 pp above Lien over
+   * 200 aggressor runs on each of two seeds — and nothing in its stat line accounts
+   * for it: effective health 124 against Lien's 140, identical incoming damage rate.
+   * The cause is Repair Nanites, the roster's only integrity recovery, compounding
+   * over fifteen minutes. Confirmed rather than inferred: handing the baseline Lien
+   * the same starting item and changing nothing else took it from 26.7% / 34.0% to
+   * 68.7% / 63.7%. The relic was cut on the strength of that (see `items.ts`), and
+   * this hull additionally pays more for holding it.
    *
-   * That was confirmed rather than inferred: handing the baseline Lien the same
-   * starting item and changing nothing else took it from 15.3% / 17.3% to 58.0% /
-   * 59.0%. The relic was cut 73% on the strength of that measurement (see
-   * `items.ts`), and this hull additionally pays more for holding it. Effective
-   * health lands at 124 against Lien's 140 rather than 132.
+   * ## THE EXPLANATION THIS BLOCK USED TO GIVE WAS AN ARTEFACT
+   *
+   * It said Probate "arrived at each sector near full health
+   * (100/93/100/96/100% against Lien's 100/58/63/67/83%)". Those numbers came from
+   * `medianEntryHealthPct`, which divided by the CURRENT shield instead of the
+   * maximum — so the shield cancelled out of the fraction, and a hull with a *larger*
+   * max shield read as healthier than it was. Corrected, the two hulls arrive at
+   * essentially the same fraction:
+   *
+   *   Probate  100/43/48/53/72   and  100/39/47/44/61
+   *   Lien     100/41/44/45/51   and  100/39/42/42/53
+   *
+   * And in absolute effective HP Probate is WORSE in sector two — 0.43 x 124 = 53
+   * against Lien's 0.41 x 140 = 57 — and better only by sector five. So the advantage
+   * is real and the mechanism is real, but "it arrives healthy" was the metric's bug
+   * rather than the hull's behaviour. Recorded because a plausible explanation attached
+   * to a correct conclusion is the hardest kind of wrong thing to notice later.
    *
    * -36% max integrity as a `mul` rather than an `add`, deliberately. The fold order
    * sums adds before applying muls, so a Plating Shim on a Probate is

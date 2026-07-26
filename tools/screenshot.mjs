@@ -533,7 +533,7 @@ async function capture() {
           // long a bot takes to get there.
           try {
             await page.waitForFunction(
-              (expression) => {
+              ([expression, freezeOnMatch]) => {
                 const api = window.__nextPilot
                 if (!api) return false
                 /*
@@ -553,9 +553,29 @@ async function capture() {
                  */
                 const view = { ...api }
                 // eslint-disable-next-line no-new-func
-                return Boolean(new Function('v', `with (v) { return (${expression}) }`)(view))
+                const held = Boolean(new Function('v', `with (v) { return (${expression}) }`)(view))
+                /*
+                 * FREEZE INSIDE THE PREDICATE, not after it.
+                 *
+                 * Freezing from the harness once `waitForFunction` resolves is a round
+                 * trip — at ff=20 that is tens of simulated ticks, so a ONE-TICK state
+                 * is already gone. An instant hazard's `active` phase is exactly one
+                 * tick (`corrosion` and `debris` act on the tick they fire), and it
+                 * failed its shutter check on one viewport and passed on the other,
+                 * which is the signature of a race rather than a slow capture.
+                 *
+                 * Stopping time in the same evaluation that observed the state closes
+                 * it. Idempotent by construction: once frozen the state cannot change,
+                 * so any later evaluation of the same predicate still holds.
+                 *
+                 * Skipped when the shot sets `holdMs`, because such a shot is explicitly
+                 * asking for time to pass after its predicate — freezing here would make
+                 * its hold a silent no-op. Those freeze after the hold instead.
+                 */
+                if (held && freezeOnMatch) api.freeze?.(true)
+                return held
               },
-              shot.waitFor,
+              [shot.waitFor, !shot.holdMs],
               // `pollMs` matters more than it looks. A state that lasts N ticks is
               // only N/(60*ff) seconds of wall clock, so a 60-tick hazard warning at
               // ff=20 is 50ms and the default poll misses it entirely. A shot that
@@ -600,6 +620,9 @@ async function capture() {
            * Applied to every `waitFor` shot: a capture defined by a state always wants
            * that state held still, and one that does not need it loses nothing.
            */
+          // Already frozen by the predicate the instant the state held; this is the
+          // belt-and-braces call for a shot whose `waitFor` matched on its very first
+          // poll, before any freeze could have been needed.
           await page.evaluate(() => window.__nextPilot?.freeze?.(true))
         } else {
           await page.waitForTimeout(shot.settleMs ?? 300)

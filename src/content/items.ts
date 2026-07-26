@@ -1044,10 +1044,26 @@ export const ITEMS: Record<string, ItemDef> = {
    * Ablation, `tools/playtest.ts`, aggressor policy, 300 runs on each of two base
    * seeds: the baseline Lien was given this item at launch and nothing else changed.
    *
-   *   full-run clear rate      15.3% / 17.3%  ->  58.0% / 59.0%   (+42.7 / +41.7 pp)
-   *   entry health, sector 3          62% / 61%  ->  89% / 89%
-   *   entry health, sector 5          71% / 76%  ->  94% / 97%
-   *   share of all deaths in sector 2  41.7% / 35.5%  ->  26.2% / 24.4%
+   *   full-run clear rate      26.7% / 34.0%  ->  68.7% / 63.7%   (+42.0 / +29.7 pp)
+   *   entry health, sector 3          44% / 42%  ->  59% / 57%
+   *   entry health, sector 5          51% / 53%  ->  79% / 67%
+   *   share of all deaths in sector 2  37.7% / 30.3%  ->  29.8% / 32.1%
+   *
+   * RE-MEASURED. The first version of this block quoted a clear rate of
+   * 15.3% / 17.3% -> 58.0% / 59.0% and entry-health figures around 62% -> 89%, and
+   * both were produced by broken instruments — two of them:
+   *
+   *   - `medianEntryHealthPct` divided by the CURRENT shield rather than the maximum,
+   *     so the shield cancelled out of the fraction and the metric systematically
+   *     flattered exactly the integrity-recovery builds it was being used to judge.
+   *   - the bots resolved every chained between-sector card by confirming option 0,
+   *     so the baseline was measured against a pilot that declined its own transit
+   *     shops. Fixing that raised the BASELINE, which is why the delta shrank rather
+   *     than the item weakening.
+   *
+   * The conclusion survives and is the reason this item was cut: it still multiplies
+   * the clear rate by 1.9-2.6x, and seed B's +29.7 pp is the honest low end that the
+   * broken metric had hidden behind a suspiciously stable +42/+42.
    *
    * An item that triples the clear rate is not an item, it is the game's difficulty
    * setting wearing a card. It also explained a separate failure that no design
