@@ -45,9 +45,13 @@
  * a typo'd field name throws and is reported as a HARNESS fault rather than
  * silently failing closed as a game fault.
  *
- * KNOWN UNREACHED. Four captures need a run stage no bot policy currently
- * reaches (see docs/VERIFICATION.md §3 — target clear rate is 20-40%, so most
- * runs die in sector one or two). Reporting those as failures every single run
+ * KNOWN UNREACHED. Some captures need a run stage no bot policy currently reaches
+ * (see docs/VERIFICATION.md §3 — target clear rate is 20-40%, so most runs die in
+ * sector one or two). THE LIST IS CURRENTLY EMPTY: the last entry was
+ * `extraction-report`, and bounding the hitstop duty cycle let the aggressor reach
+ * an extraction, so the harness failed the build asking for the marker to be
+ * deleted — which is the mechanism below working exactly as intended, on a change
+ * that had nothing to do with screenshots. Reporting a miss as a failure every run
  * trains a reader to skim past the section that also carries real regressions, so
  * a shot may declare `unreachedUntil: '<reason>'`: its miss is reported in a
  * separate NOTE block and does not fail the build. The list cannot rot, because a
@@ -260,7 +264,6 @@ const SHOTS = [
     // 37032 holding 14 items. So sector clearing works and the last sector does not
     // — a balance fact, and the fix VERIFICATION §3 already names is a per-capture
     // seed known to go the distance, or a survival-tuned capture policy.
-    unreachedUntil: 'M6 balance — needs all five sectors; aggressor dies in sector four on this seed',
   },
   {
     // A reward card. Bots resolve a choice in ~6 ticks, so this waits on the state
