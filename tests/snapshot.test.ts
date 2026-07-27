@@ -222,6 +222,7 @@ function worldView(overrides: Partial<WorldView> = {}): WorldView {
     events: [],
     cosmetic: { shake: 0 },
     freezeTicks: 0,
+    freezeLockoutTicks: 0,
     inventory: [{ defId: 'warheads', acquiredAtTick: 420, count: 1 }],
     activeInteractions: [],
     resolvedStats: {},

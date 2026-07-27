@@ -135,6 +135,7 @@ function viewOf(overrides: Partial<WorldView> = {}): WorldView {
     resolvedStats: {},
     pendingChoice: null,
     freezeTicks: 0,
+    freezeLockoutTicks: 0,
   }
   return { ...base, ...overrides }
 }

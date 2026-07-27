@@ -27,6 +27,8 @@ import {
   clampSelection,
   isAffordable,
   layoutChoiceScreen,
+  SHOP_DEAD_END_FOOTER,
+  SHOP_DEAD_END_SUBTITLE,
   lineBounds,
   monoMeasure,
   packChips,
@@ -1248,5 +1250,82 @@ describe('resolved stat detail (UI rule 4, dynamically)', () => {
         expect(Number.isFinite(row.after)).toBe(true)
       }
     }
+  })
+})
+
+/** The drawn strings of a line list, for containment assertions. */
+function textOf(lines: readonly TextLine[]): readonly string[] {
+  return lines.map((entry) => entry.text)
+}
+
+describe('a shop the pilot cannot buy anything from', () => {
+  /**
+   * A reachable state, and it was silent.
+   *
+   * `updateCursor` refuses to move onto an unaffordable option and bounds its search at
+   * one lap, so a card where every option is unaffordable correctly leaves the cursor
+   * still. Correct, and indistinguishable from a broken key: the screen said "Fit one
+   * system at the listed price" and then would not let the player select one.
+   *
+   * This is the residue of the unbuyable wave-8 shop that `SHOP_WAVES` was retuned to
+   * remove. Pricing fixed the systematic case; it cannot fix a player who arrives broke,
+   * so the card has to say so.
+   */
+  const broke = () =>
+    layout({
+      kind: 'shop',
+      offers: [offer('machined-slugs'), offer('thrust-trim'), offer('plating-shim')],
+      costs: [200, 220, 240],
+      scrap: 10,
+    })
+
+  it('says nothing is affordable instead of telling the player to buy something', () => {
+    const result = broke()
+    expect(result.nothingAffordable).toBe(true)
+    const header = textOf(result.header).join(' ')
+    expect(header).toContain(collapse(SHOP_DEAD_END_SUBTITLE))
+    // The default subtitle describes an action that is not available.
+    expect(header).not.toContain('Fit one system at the listed price')
+  })
+
+  it('names the key that gets the player out', () => {
+    expect(textOf(broke().footer).join(' ')).toContain(collapse(SHOP_DEAD_END_FOOTER))
+  })
+
+  it('does not cry dead end when even one option is affordable', () => {
+    const result = layout({
+      kind: 'shop',
+      offers: [offer('machined-slugs'), offer('thrust-trim'), offer('plating-shim')],
+      costs: [200, 220, 10],
+      scrap: 10,
+    })
+    expect(result.nothingAffordable).toBe(false)
+    expect(textOf(result.header).join(' ')).toContain('Fit one system at the listed price')
+  })
+
+  it('is a shop-only state — a free item card is never a dead end', () => {
+    // Item and work-order cards cost nothing, so "you cannot afford this" is
+    // meaningless there however little scrap the pilot holds.
+    for (const kind of ['item', 'work-order'] as const) {
+      expect(layout({ kind, scrap: 0, costs: [0, 0, 0] }).nothingAffordable).toBe(false)
+    }
+  })
+
+  it('still shows the prices and the shortfall, so the player can see how short', () => {
+    // Saying "you cannot afford anything" without the numbers turns a legible wall into
+    // an arbitrary one — the player cannot tell if they missed it by 5 credits or 500.
+    const result = broke()
+    for (const option of result.options) {
+      expect(option.affordable).toBe(false)
+      expect(option.shortfall).toBeGreaterThan(0)
+    }
+    expect(result.scrap).toBe(10)
+  })
+
+  it('keeps the state out of the colour alone', () => {
+    // Rule 3: the caution tint reinforces, the sentence carries it.
+    const header = textOf(broke().header).join(' ')
+    expect(header.toLowerCase()).toContain('balance')
+    expect(header.toLowerCase()).toContain('decline')
   })
 })

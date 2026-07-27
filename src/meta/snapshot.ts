@@ -139,9 +139,11 @@ import type {
  *      longer resolve themselves — the timeout is gone and confirm is a dedicated
  *      action rather than the fire key, so nothing is left for the digest to see.
  *      A narrowing is a real loss of coverage and is only acceptable because the
- *      behaviour it covered cannot occur; if self-resolution returns, so does the row.
+ *      behaviour it covered cannot occur; if self-resolution returns, so does the row. *   7. `freezeLockoutTicks` into `run`. It decides whether the NEXT hit freezes, and a
+ *      freeze spends real ticks, so two runs agreeing on `freezeTicks` and disagreeing
+ *      here diverge the moment a bullet lands. Added with the hitstop duty-cycle bound.
  */
-export const DIGEST_GENERATION = 6
+export const DIGEST_GENERATION = 7
 
 /**
  * Tags for optional sub-objects.
@@ -413,7 +415,8 @@ function hashStats(stats: Readonly<RunStats>): string {
  *
  * `freezeTicks` is play-affecting — a freeze spends real ticks, so a run that
  * froze differently diverges from that point on — and so it must be in the
- * regression hash rather than in the cosmetic digest.
+ * regression hash rather than in the cosmetic digest. `freezeLockoutTicks` rides with
+ * it for the same reason one step removed: it decides whether the NEXT hit freezes.
  *
  * EVERYTHING RIDES IN THIS ONE COMPONENT rather than getting one each, because
  * `tools/playtest.ts` enumerates component names by hand when it writes a fixture.
@@ -424,7 +427,7 @@ function hashStats(stats: Readonly<RunStats>): string {
  */
 function hashRun(view: WorldView): string {
   const h = new Hasher()
-  h.str(view.runState).num(view.freezeTicks)
+  h.str(view.runState).num(view.freezeTicks).num(view.freezeLockoutTicks)
   const incident = view.incident
   if (incident === null) {
     h.u32(0xffffffff)

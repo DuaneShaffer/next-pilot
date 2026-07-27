@@ -398,6 +398,7 @@ function worldFixture(overrides: Partial<WorldView> = {}): WorldView {
     resolvedStats: { projectileDamage: 6 },
     pendingChoice: null,
     freezeTicks: 0,
+    freezeLockoutTicks: 0,
     stage: STAGE,
     hullName: 'Lien',
     hullId: 'lien',

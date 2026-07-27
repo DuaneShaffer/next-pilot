@@ -180,6 +180,7 @@ function worldView(overrides: Partial<WorldView> = {}): WorldView {
     events: [],
     cosmetic: { shake: 0 },
     freezeTicks: 0,
+    freezeLockoutTicks: 0,
     inventory: [],
     activeInteractions: [],
     resolvedStats: {},
@@ -230,7 +231,7 @@ describe('state hashing', () => {
    *   - Digest generation 5 (`68587bac3c17901f` -> `9d27a50ec0d1a237`):
    *     `Bullet.pierceRemaining` and `.hitUids` entered `playerBullets`. Review
    *     finding R3: both are read by the next tick's hit resolution.
-   *   - Digest generation 6 (`9d27a50ec0d1a237` -> the constant below): shield
+   *   - Digest generation 6 (`9d27a50ec0d1a237` -> `71ae763cbfe84e6c`): shield
    *     recovery entered the hull component — `shieldRegenProgress`,
    *     `shieldRegenBlockedTicks` and `shieldReserve`, all three read by the next
    *     tick. AND, for the first time, a field LEFT: `choiceResolve` came out of the
@@ -238,13 +239,18 @@ describe('state hashing', () => {
    *     surviving `openTicks` steers nothing. A removal moves this constant exactly
    *     like an addition does, and is the one case where "the test went red" could
    *     mean coverage was lost rather than gained — so it is named here explicitly.
+   *   - Digest generation 7 (`71ae763cbfe84e6c` -> the constant below):
+   *     `freezeLockoutTicks` entered the run component, with the hitstop duty-cycle
+   *     bound. It decides whether the NEXT hit freezes and a freeze spends real ticks,
+   *     so two worlds agreeing on `freezeTicks` and differing here have different
+   *     futures — the same argument `freezeTicks` itself was admitted on.
    *
    * The generation numbers are `DIGEST_GENERATION` in `src/meta/snapshot.ts`, and
    * `tests/simVersion.test.ts` explains why a digest change and a sim change have to
    * be counted separately.
    */
   it('matches a recorded digest for a known world', () => {
-    expect(hashWorld(worldView())).toBe('71ae763cbfe84e6c')
+    expect(hashWorld(worldView())).toBe('c924d8b88002a065')
   })
 
   it('includes the M2 timing state that hitstop and telegraphs introduced', () => {

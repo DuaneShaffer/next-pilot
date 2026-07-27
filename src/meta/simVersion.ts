@@ -44,6 +44,16 @@ import { hashWorld } from './snapshot'
  *
  * ## History
  *
+ * **4 — hitstop stops eating the game.** Reported from play as the game lagging when a
+ * lot of shots connect, and it was not a performance problem: `addImpact` had no notion
+ * of a duty cycle, so a new freeze could begin on the first unfrozen tick and the
+ * reachable steady state was eight ticks stopped for every one running. Measured at 87%
+ * of the worst second frozen with one common damage item fitted. A freeze now costs
+ * `FREEZE_LOCKOUT_RATIO` ticks of enforced motion per tick served, which bounds the
+ * enemy-hit duty cycle at 25%; hull hits bypass it, being already rate-limited by the
+ * invulnerability window. This changes WHEN the sim advances, so every recorded run
+ * after the first dense engagement lands somewhere different.
+ *
  * **3 — the shield recharges, cards stop resolving themselves, and confirm leaves the
  * trigger.** Four independent behaviour changes landed together, and one of them also
  * moves the wire format, so this version is the *only* one so far where an old replay
@@ -111,7 +121,7 @@ import { hashWorld } from './snapshot'
  *
  * **1 — M0 through M4.** Single sector, no bosses, no hazards.
  */
-export const SIM_VERSION = 3
+export const SIM_VERSION = 4
 
 /** Seed for the canonical run. Arbitrary but fixed forever. */
 export const CANONICAL_SEED = 'K7F29XQM3RTV'

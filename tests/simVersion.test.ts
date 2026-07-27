@@ -148,6 +148,22 @@ const CANONICAL_HISTORY: ReadonlyArray<{
    * version (no route pays scrap) is invisible to this probe entirely.
    */
   { version: 3, digest: 6, hash: 'ce03d7deabff7fef' },
+
+  /**
+   * SIM_VERSION 4 at generation 7 — hitstop gained a duty-cycle bound.
+   *
+   * Like the row above this is not a verified re-base, and for the same reason: the
+   * simulation and the digest both moved. The sim now refuses a freeze while the lockout
+   * runs, and generation 7 hashes the lockout itself.
+   *
+   * Unusually, though, this probe DOES see the change it is named for. The canonical
+   * script fires almost continuously through 1,800 ticks of sector one, which is exactly
+   * the condition that made freezes chain — so the number below moved because hitstop
+   * behaves differently, not only because the digest widened. That is the first time one
+   * of these rows has been evidence of the thing it records rather than a side effect of
+   * measuring more.
+   */
+  { version: 4, digest: 7, hash: '4e301156350aec25' },
 ]
 
 function makeWorld() {

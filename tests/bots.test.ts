@@ -942,6 +942,7 @@ function fakeView(choice: PendingChoice | null, overrides: Partial<WorldView> = 
     events: [],
     cosmetic: { shake: 0 },
     freezeTicks: 0,
+    freezeLockoutTicks: 0,
     inventory: [],
     activeInteractions: [],
     resolvedStats: {},

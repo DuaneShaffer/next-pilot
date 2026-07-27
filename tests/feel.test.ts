@@ -224,6 +224,7 @@ function worldFixture(shake: number, freezeTicks: number): WorldView {
     events: [],
     cosmetic: { shake },
     freezeTicks,
+    freezeLockoutTicks: 0,
   }
 }
 

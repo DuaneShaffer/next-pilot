@@ -63,6 +63,36 @@ export const ENEMY_HIT_FLASH_TICKS = 5
 export const FREEZE_MAX_TICKS = 8
 
 /**
+ * Ticks of enforced motion after a freeze, per tick of freeze served.
+ *
+ * THE CEILING ABOVE BOUNDS ONE FREEZE. IT DOES NOT BOUND HOW OFTEN ONE HAPPENS, and
+ * for a long time nothing did. `world.ts` carried an invariant reading "that plus the
+ * ceiling in `extendFreeze` bounds every freeze at FREEZE_MAX_TICKS, full stop" — true,
+ * about the wrong quantity. Nothing stopped a new freeze beginning on the very first
+ * tick after the last one ended, so the reachable duty cycle was 8 frozen to 1 running:
+ * 89% of the time stopped.
+ *
+ * Measured before this constant existed, worst single second of each sector, aggressor
+ * over a full run (frozen ticks out of 60):
+ *
+ *   bare hull      22% / 47% / 65% / 75% / 72%
+ *   +8 damage      38% / 70% / 82% / 83% / 87%
+ *
+ * 87% is eight ticks of simulation in a second. Reported from play as "the game seems
+ * to be lagging", which is exactly what it is — the sim stops and the renderer keeps
+ * drawing the same frame.
+ *
+ * A ratio rather than a flat cooldown, so the bound is uniform: serving N ticks costs
+ * 3N ticks of enforced motion, which caps the enemy-hit duty cycle at 1/(1+3) = 25%
+ * whatever the freeze budget is later retuned to. A flat cooldown would leave short
+ * freezes chaining and long ones over-punished.
+ *
+ * HULL HITS ARE EXEMPT — see `World.addImpact`. They are the more important event, and
+ * they are already rate-limited to one per `HULL_INVULN_TICKS`, so they cannot chain.
+ */
+export const FREEZE_LOCKOUT_RATIO = 3
+
+/**
  * Damage per tick of freeze.
  *
  * 8 is chosen against the player's weapon, not in the abstract: a bullet does 4

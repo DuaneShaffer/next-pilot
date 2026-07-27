@@ -363,6 +363,14 @@ export interface WorldView {
    * invalidate every recorded replay.
    */
   readonly freezeTicks: number
+  /**
+   * Ticks before hitstop may fire again.
+   *
+   * Play-affecting, and hashed for the same reason `freezeTicks` is: it decides whether
+   * the NEXT hit freezes, and a freeze spends real ticks. Two runs agreeing on
+   * `freezeTicks` and disagreeing here diverge the moment a bullet lands.
+   */
+  readonly freezeLockoutTicks: number
 
   /** Which leg of the run is being flown. Never a planned figure — see StageView. */
   readonly stage: StageView

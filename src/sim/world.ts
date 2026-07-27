@@ -38,6 +38,7 @@ import {
   applyEnemyDamage,
   applyHullDamage,
   extendFreeze,
+  FREEZE_LOCKOUT_RATIO,
   freezeForEnemyHit,
   freezeForHullHit,
   HULL_COLLISION_RADIUS,
@@ -289,6 +290,16 @@ export class World implements WorldView {
    * handed; it can never skip one.
    */
   freezeTicks = 0
+
+  /**
+   * Ticks before hitstop may fire again. Bounds the DUTY CYCLE, which the per-freeze
+   * ceiling does not — see `addImpact`.
+   *
+   * Play-affecting and therefore hashed: it decides whether a future hit freezes, and a
+   * freeze spends real ticks, so two runs that disagree here diverge on when the next
+   * wave releases.
+   */
+  freezeLockoutTicks = 0
 
   readonly stats: RunStats = {
     tick: 0,
@@ -605,6 +616,9 @@ export class World implements WorldView {
     // freezes the n ticks that follow it, not n-1 of them.
     const frozen = this.freezeTicks > 0
     if (frozen) this.freezeTicks--
+    // Decremented on EVERY tick including frozen ones, so the lockout spans the freeze
+    // itself and then the enforced motion after it.
+    if (this.freezeLockoutTicks > 0) this.freezeLockoutTicks--
 
     // A finished run keeps only its cosmetic state running. The incident report is
     // drawn over the frozen playfield, and advancing the wave script behind it
@@ -1615,7 +1629,7 @@ export class World implements WorldView {
       this.emit({ kind: 'shield-broken', x: hull.x, y: hull.y })
       shake += SHAKE_SHIELD_BROKEN
     }
-    this.addImpact(freezeForHullHit(damage, fatal), shake)
+    this.addImpact(freezeForHullHit(damage, fatal), shake, true)
 
     if (!fatal) return
     if (hull.integrity > 0) return
@@ -1645,14 +1659,34 @@ export class World implements WorldView {
    * Register a hit's feel response. Both rules live in damage.ts — see
    * `extendFreeze` for why the freeze takes the longest rather than the sum.
    *
-   * A freeze also cannot be *extended* by damage arriving during it, because no
-   * collision, movement, or firing phase runs while frozen: there is nothing that
-   * can land a hit to extend it with. That plus the ceiling in `extendFreeze` bounds
-   * every freeze at FREEZE_MAX_TICKS, full stop.
+   * A freeze cannot be *extended* by damage arriving during it, because no collision,
+   * movement, or firing phase runs while frozen: there is nothing that can land a hit
+   * to extend it with. That plus the ceiling in `extendFreeze` bounds every freeze at
+   * FREEZE_MAX_TICKS.
+   *
+   * THAT SENTENCE USED TO END "full stop", AND IT WAS THE WHOLE PROBLEM. It bounds one
+   * freeze and says nothing about the next, and nothing stopped the next beginning on
+   * the first unfrozen tick — 8 frozen to 1 running, 89% of the time stopped, reported
+   * from play as the game lagging. `freezeLockoutTicks` is the missing half: serving a
+   * freeze costs `FREEZE_LOCKOUT_RATIO` ticks of enforced motion per tick served, so the
+   * DUTY CYCLE is bounded and not just the individual freeze.
+   *
+   * `fromHullHit` bypasses the lockout. A hull hit is the more important event and the
+   * invulnerability window already allows at most one per 45 ticks, so it cannot chain —
+   * and a player being killed should still feel each hit land.
    */
-  private addImpact(freezeTicks: number, shake: number): void {
-    this.freezeTicks = extendFreeze(this.freezeTicks, freezeTicks)
+  private addImpact(freezeTicks: number, shake: number, fromHullHit = false): void {
+    // Shake is unconditional: it is energy, it decays on its own, and suppressing it
+    // would mute the feedback for a hit that really happened.
     this.cosmetic.shake = addShake(this.cosmetic.shake, shake)
+    if (!fromHullHit && this.freezeLockoutTicks > 0) return
+    const granted = extendFreeze(this.freezeTicks, freezeTicks)
+    if (granted > this.freezeTicks) {
+      // Counted from now and decremented every tick, frozen ones included, so the
+      // lockout covers the freeze itself plus RATIO times its length afterwards.
+      this.freezeLockoutTicks = granted * (1 + FREEZE_LOCKOUT_RATIO)
+    }
+    this.freezeTicks = granted
   }
 
   private spawnExplosion(

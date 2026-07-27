@@ -333,6 +333,20 @@ const KIND_TITLE: Readonly<Record<PendingChoiceKind, string>> = {
   route: 'APPROACH SELECTION',
 }
 
+/**
+ * Shown instead of the shop subtitle when the pilot can afford nothing on the card.
+ *
+ * States the situation and the way out in one line, because the default subtitle
+ * ("Fit one system at the listed price") is actively wrong here — it describes an
+ * action that is not available, which is worse than saying nothing.
+ */
+export const SHOP_DEAD_END_SUBTITLE =
+  'Nothing here is within your balance. Decline to resume the sortie.'
+
+/** The footer's version. Names the key, because the subtitle names only the action. */
+export const SHOP_DEAD_END_FOOTER =
+  'Every option is short. X declines and the sortie resumes with nothing fitted.'
+
 const KIND_SUBTITLE: Readonly<Record<PendingChoiceKind, string>> = {
   item: 'Fit one system. The sortie is held while you read.',
   shop: 'Fit one system at the listed price. Scrap not spent stays with you.',
@@ -415,6 +429,14 @@ export interface ChoiceScreenLayout {
   selected: number
   scrap: number
   options: readonly OptionLayout[]
+  /**
+   * True when this is a shop and the pilot can afford NOTHING on it.
+   *
+   * Exposed rather than left implicit in the copy so a test can assert the state
+   * directly, and so the draw pass never has to re-derive it from the option list and
+   * risk disagreeing with the header about which situation the player is in.
+   */
+  nothingAffordable: boolean
   header: readonly TextLine[]
   build: BuildLayout
   footer: readonly TextLine[]
@@ -786,6 +808,23 @@ export function layoutChoiceScreen(input: ChoiceLayoutInput): ChoiceScreenLayout
   const scrap = Number.isFinite(input.scrap) ? Math.round(input.scrap) : 0
   const contents = buildOptionContent(input, scrap, measure)
   const selected = clampSelection(input.selected, contents.length)
+  /*
+   * THE DEAD-END SHOP, and it is a state the game reaches.
+   *
+   * `updateCursor` already refuses to select an unaffordable option, and the earlier
+   * fix for that deliberately bounded its search at one lap so a card where EVERY
+   * option is unaffordable leaves the cursor still rather than spinning. That is the
+   * correct simulation behaviour and it is silent: the screen looked exactly like a
+   * normal shop whose highlight would not move, which reads as an input bug.
+   *
+   * A shop that can sell the player nothing is the same failure as the unbuyable
+   * wave-8 shop that `SHOP_WAVES` was retuned to remove — the run stops, a card
+   * appears, and the only available action is to leave. That one was fixed by pricing;
+   * this is the residue that pricing cannot remove, because a player can always arrive
+   * broke. So the card has to SAY it.
+   */
+  const nothingAffordable =
+    kind === 'shop' && contents.length > 0 && contents.every((option) => !option.affordable)
 
   // Spending scrap and committing to a corridor both put something at risk, so
   // they get `caution`. A free reward does not, so it gets `self` — the selection
@@ -849,7 +888,17 @@ export function layoutChoiceScreen(input: ChoiceLayoutInput): ChoiceScreenLayout
     }),
   )
   y += 26
-  header.push(line(KIND_SUBTITLE[kind], CONTENT_X, y, SUB_SIZE, Palette.textDim))
+  header.push(
+    line(
+      nothingAffordable ? SHOP_DEAD_END_SUBTITLE : KIND_SUBTITLE[kind],
+      CONTENT_X,
+      y,
+      SUB_SIZE,
+      // `caution`, not `danger`: arriving broke costs the player nothing and threatens
+      // nothing. It is a dead end, not incoming fire. See UI.md rule 3.
+      nothingAffordable ? Palette.caution : Palette.textDim,
+    ),
+  )
   y += SUB_LH
   if (kind === 'work-order') {
     header.push(line(WORK_ORDER_NOTICE, CONTENT_X, y, LABEL_SIZE, Palette.textFaint))
@@ -1228,13 +1277,15 @@ export function layoutChoiceScreen(input: ChoiceLayoutInput): ChoiceScreenLayout
   // the copy was the third mitigation for one root cause nobody had removed.
   footer.push(
     line(
-      kind === 'shop'
-        ? 'Declining is free. An option marked SHORT cannot be confirmed.'
-        : 'Declining is free; the sortie resumes with nothing fitted.',
+      nothingAffordable
+        ? SHOP_DEAD_END_FOOTER
+        : kind === 'shop'
+          ? 'Declining is free. An option marked SHORT cannot be confirmed.'
+          : 'Declining is free; the sortie resumes with nothing fitted.',
       CONTENT_X,
       footerTop + 4 + SUB_LH,
       LABEL_SIZE,
-      Palette.textFaint,
+      nothingAffordable ? Palette.caution : Palette.textFaint,
     ),
   )
 
@@ -1256,6 +1307,7 @@ export function layoutChoiceScreen(input: ChoiceLayoutInput): ChoiceScreenLayout
     selected,
     scrap,
     options,
+    nothingAffordable,
     header,
     build: { box: buildBox, lines: buildLines, heldCount, liveCount },
     footer,
